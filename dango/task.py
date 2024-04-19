@@ -34,12 +34,3 @@ def task(
         return f
 
     return decorator
-
-
-class Workspace:
-    pass
-
-
-class Executor:
-    def run(self, a, workspace: Workspace):
-        pass

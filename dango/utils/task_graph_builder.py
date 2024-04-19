@@ -6,7 +6,7 @@ import inspect
 import sys
 import importlib
 
-from ..core import Task
+from .. import Task
 
 
 # TODO
@@ -52,9 +52,7 @@ class TaskGraphBuilder:
                     fn = m.__dict__[function_name]
                     if isinstance(fn, types.FunctionType) and hasattr(fn, "__task__"):
                         self.module_tasks[m][function_name] = fn
-                        m.__dict__[function_name] = functools.partial(
-                            self.task_wrapper, fn
-                        )
+                        m.__dict__[function_name] = functools.partial(self.task_wrapper, fn)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.globals.update(self.globals_tasks)

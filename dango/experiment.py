@@ -2,11 +2,11 @@ from __future__ import annotations
 from abc import ABCMeta, abstractmethod
 import functools
 
-from .core import Executor, Task, Workspace
+from . import Executor, Task, Workspace
 from .utils import TaskGraphBuilder
 
-class Experiment(metaclass=ABCMeta):
 
+class Experiment(metaclass=ABCMeta):
     @abstractmethod
     def calls(self):
         raise NotImplementedError
@@ -20,15 +20,12 @@ class Experiment(metaclass=ABCMeta):
             return task_graph
 
     def run(self, executor: Executor, workspace: Workspace):
-        executor.run(
-            self.step_graph,
-            workspace=workspace
-        )
+        executor.run(self.step_graph, workspace=workspace)
 
     @classmethod
     def cli(cls):
         # build workspace, executor, experiment from CLI
         executor = Executor()  # Executor(executor args)
-        workspace = Workspace() # Workspace(workspace args)
+        workspace = Workspace()  # Workspace(workspace args)
         experiment = cls()  # cls(experiment args)
         experiment.run(executor, workspace)
