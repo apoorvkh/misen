@@ -1,6 +1,7 @@
 from __future__ import annotations
-from abc import ABCMeta, abstractmethod
+
 import functools
+from abc import ABCMeta, abstractmethod
 
 from . import Executor, Task, Workspace
 from .utils import TaskGraphBuilder

@@ -1,7 +1,9 @@
 from __future__ import annotations
-from typing import Any
-import types
 
+import types
+from typing import Any
+
+# Make immutable
 
 class Task:
     def __init__(self, func: types.FunctionType, task_decorator: dict, kwargs: dict[str, Any]):
@@ -9,7 +11,11 @@ class Task:
         self.task_decorator = task_decorator
         self.kwargs = kwargs
 
-    # __hash__
+    def __hash__(self):
+        if not hasattr(self, "__cached_hash__"):
+            hash_uuid = self.task_decorator["uuid"] or self.func.__qualname__
+            self.__cached_hash__ = hash((hash_uuid, self.kwargs))
+        return self.__cached_hash__
 
     def __repr__(self):
         return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs})"

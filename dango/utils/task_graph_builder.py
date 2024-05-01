@@ -1,17 +1,22 @@
 from __future__ import annotations
-from collections import defaultdict
+
 import functools
-import types
+import importlib
 import inspect
 import sys
-import importlib
+import types
+from collections import defaultdict
 
-from .. import Task
-
+from ..task import Task
 
 # TODO
 # Consider sys.addaudithook
 # unittest.mock
+
+# or switch to multiple dispatch?
+# add dispatch where first object is Workspace or TaskInfo
+# returns Task object
+# or dispatch with argument passthrough
 
 
 class TaskGraphBuilder:
