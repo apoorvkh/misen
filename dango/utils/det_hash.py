@@ -83,12 +83,12 @@ def det_hash(obj, seed: int = 0) -> str:
     ormsgpack_options = 0
 
     match obj:
-        case None | bytes() | str() | float() | bool() | UUID() | date() | time() | datetime():
+        case None | bytes() | str() | bool() | UUID() | date() | time() | datetime():
             obj_data = obj
         case int() if is_bigint(obj):
             obj_type = class_identifier(bigint)
             obj_data = str(obj)
-        case int():
+        case int() | float() if not is_np_type(obj):
             obj_data = obj
         case bytearray():
             obj_data = bytes(obj)
