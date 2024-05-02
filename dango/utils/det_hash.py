@@ -11,8 +11,7 @@ from uuid import UUID
 import ormsgpack
 from xxhash import xxh3_64_hexdigest
 
-# TODO: check if numpy works and is consistent
-# TODO: np.float64 seems broken
+# TODO: check if numpy is consistent
 # TODO: torch.tensor
 # TODO: pydantic
 
