@@ -20,6 +20,8 @@ class Task:
     def __repr__(self):
         return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs})"
 
+    def run(self):
+        pass
 
 # openssl rand -base64 3
 def task(

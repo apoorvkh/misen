@@ -11,6 +11,7 @@ from uuid import UUID
 import ormsgpack
 from xxhash import xxh3_64_hexdigest
 
+# TODO: what about python functions with built-in __hash__, like np.csingle?
 # TODO: check if numpy is consistent
 # TODO: torch.tensor
 # TODO: pydantic
