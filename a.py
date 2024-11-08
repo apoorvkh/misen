@@ -1,6 +1,6 @@
 import numpy as np
 
-from dango import Experiment, task
+from misen import Experiment, task
 
 
 @task(uuid="QuNP")

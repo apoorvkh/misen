@@ -1,36 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "dango"
+name = "misen"
 version = "0.1.0"
-description = "Default template for PDM package"
+
 authors = [
-    {name = "apoorvkh", email = "mail@apoorvkh.com"},
+    {name = "Apoorv Khandelwal", email = "mail@apoorvkh.com"},
+    {name = "Peter Curtin", email = "peter_curtin@brown.edu"},
 ]
+description = "DAG execution engine"
+readme = "README.md"
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.9"
 dependencies = [
     "xxhash>=3.4.1",
     "ormsgpack>=1.5.0",
     "dill>=0.3.8",
 ]
-requires-python = ">=3.10"
-readme = "README.md"
-license = {text = "MIT"}
-
-[build-system]
-requires = ["pdm-backend"]
-build-backend = "pdm.backend"
-
-
-[tool.pdm]
-distribution = true
-
-[tool.pdm.dev-dependencies]
+[dependency-groups]
 dev = [
-    "ruff",
-    "pyright",
-    "pytest",
+    "ruff==0.7.2",
+    "pyright==1.1.388",
+    "pytest==8.3.3",
 ]
 
 [tool.ruff]
 line-length = 100
-
-[tool.ruff.lint]
-extend-select = ["I"]
