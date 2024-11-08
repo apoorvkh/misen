@@ -40,3 +40,15 @@ resolution = "lowest-direct"
 
 [tool.ruff]
 line-length = 100
+include = ["pyproject.toml", "src/**/*.py", "tests/**/*.py"]
+src = ["src", "tests"]
+# [tool.ruff.lint]
+# select = ["ALL"]
+# ignore = ["D"]
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.10"
+pythonPlatform = "Linux"

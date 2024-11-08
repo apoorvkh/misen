@@ -1,0 +1,28 @@
+name: Run checks on push or PR to main
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches:
+      - main
+
+jobs:
+
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.0"
+          python-version-file: ".python-version"
+          enable-cache: true
+      - run: uv sync
+      - run: source .venv/bin/activate
+      - run: ruff check
+        if: success() || failure()
+      - run: ruff format --check
+        if: success() || failure()
+      - run: pyright
+        if: success() || failure()
