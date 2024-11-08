@@ -5,6 +5,7 @@ from typing import Any
 
 # Make immutable
 
+
 class Task:
     def __init__(self, func: types.FunctionType, task_decorator: dict, kwargs: dict[str, Any]):
         self.func = func
@@ -22,6 +23,7 @@ class Task:
 
     def run(self):
         pass
+
 
 # openssl rand -base64 3
 def task(

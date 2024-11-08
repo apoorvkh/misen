@@ -49,7 +49,7 @@ class TaskGraphBuilder:
         for module_name, m in sys.modules.items():
             if not (
                 module_name in sys.builtin_module_names
-                or importlib._imp.is_frozen(module_name)
+                or importlib._imp.is_frozen(module_name)  # pyright: ignore [reportAttributeAccessIssue]
                 or isinstance(m.__dict__, types.MappingProxyType)
                 # could add more checks here
             ):

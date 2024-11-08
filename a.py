@@ -1,6 +1,7 @@
 import numpy as np
 
 from misen import Experiment, task
+from misen.utils.det_hash import deterministic_hashing
 
 
 @task(uuid="QuNP")
@@ -26,7 +27,6 @@ if __name__ == "__main__":
     from time import time
 
     print(MultiplyExperiment().step_graph.__repr__())
-    from dango.utils.det_hash import deterministic_hashing
 
     with deterministic_hashing():
         z = MultiplyExperiment().step_graph
