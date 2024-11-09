@@ -1,6 +1,7 @@
 import numpy as np
 
-from misen import Experiment, task
+from misen import Experiment, task, Task
+from misen.utils.task_graph_builder import TaskGraphBuilder
 from misen.utils.det_hash import deterministic_hashing
 
 
@@ -18,20 +19,29 @@ def double(x):
     return x * 2
 
 
-class MultiplyExperiment(Experiment):
-    def calls(self):
-        return multiply(add(double(1), 4), add(np.csingle(3), 4), hello=np.datetime64("2005-02-25"))
+# class MultiplyExperiment(Experiment):
+#     def calls(self):
+#         return multiply(add(double(1), 4), add(np.csingle(3), 4), hello=np.datetime64("2005-02-25"))
 
 
 if __name__ == "__main__":
-    from time import time
+    with TaskGraphBuilder(globals()):
+        task_graph: Task = multiply(
+            add(double(1), 4), add(np.csingle(3), 4), hello=np.datetime64("2005-02-25")
+        )
 
-    print(MultiplyExperiment().step_graph.__repr__())
+    print(task_graph)
 
-    with deterministic_hashing():
-        z = MultiplyExperiment().step_graph
-        start = time()
-        print(hash(z))
-        print(time() - start)
+# task_graph: Task = multiply(
+#     add(x=double(1), y=4), add(x=np.csingle(3), y=4), hello=np.datetime64("2005-02-25")
+# )
 
-    print(MultiplyExperiment().calls())
+# Task(
+#     func=__main__.multiply,
+#     kwargs={
+#         "x": Task(func=__main__.add, kwargs={"x": 2, "y": 4}),
+#         "y": Task(func=__main__.add, kwargs={"x": (3 + 0j), "y": 4}),
+#         "kwargsx": {"hello": numpy.datetime64("2005-02-25")},
+#         "z": 0,
+#     },
+# )

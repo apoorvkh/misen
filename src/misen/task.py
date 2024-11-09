@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import types
 from typing import Any
+
+from . import Workspace, Executor, LocalExecutor
 
 # Make immutable
 
@@ -21,8 +24,13 @@ class Task:
     def __repr__(self):
         return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs})"
 
-    def run(self):
-        pass
+    def run(self, workspace: Workspace, executor: Executor) -> asyncio.Future:
+        """This submits the task graph to the executor and is non-blocking. Returns the result as a Future, which the user could wait for."""
+        return executor.submit(task, workspace)
+
+    def result(self, workspace: Workspace):
+        """This runs incomplete Tasks locally and blocks for the result."""
+        return self.run(workspace=workspace, executor=LocalExecutor()).result()
 
 
 # openssl rand -base64 3

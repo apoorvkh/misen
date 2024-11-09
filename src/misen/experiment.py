@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import functools
-from abc import ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 
 from . import Executor, Task, Workspace
 from .utils import TaskGraphBuilder
 
 
-class Experiment(metaclass=ABCMeta):
+class Experiment(ABC):
     @abstractmethod
     def calls(self):
         raise NotImplementedError
@@ -16,8 +16,7 @@ class Experiment(metaclass=ABCMeta):
     @functools.cached_property
     def step_graph(self):
         with TaskGraphBuilder(self.calls.__globals__):
-            task_graph = self.calls()
-            assert isinstance(task_graph, Task)
+            task_graph: Task = self.calls()
             return task_graph
 
     def run(self, executor: Executor, workspace: Workspace):
