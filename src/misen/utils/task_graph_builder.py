@@ -17,6 +17,9 @@ from ..task import Task
 # or dispatch with argument passthrough
 
 
+# TODO: is it possible to encode (normal) functions with Task arguments as Tasks (cache=False)?
+
+
 class TaskGraphBuilder:
     def __init__(self, globals) -> None:
         self.globals = globals
