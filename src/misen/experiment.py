@@ -3,8 +3,10 @@ from __future__ import annotations
 import functools
 from abc import ABC, abstractmethod
 
-from . import Executor, Task, Workspace
-from .utils import TaskGraphBuilder
+from .executor import Executor
+from .task import Task
+from .workspace import Workspace
+from .utils.task_graph_builder import TaskGraphBuilder
 
 
 class Experiment(ABC):

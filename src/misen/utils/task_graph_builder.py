@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import functools
 import importlib
-import inspect
 import sys
 import types
 from collections import defaultdict
@@ -23,26 +21,16 @@ class TaskGraphBuilder:
     def __init__(self, globals) -> None:
         self.globals = globals
 
-    @staticmethod
-    def task_wrapper(func, *args, **kwargs):
-        # TODO: deprecated: use signature.bind instead
-        # parse kwargs properly
-        callargs = inspect.getcallargs(func, *args, **kwargs)
-        return Task(func, func.__task__, callargs)
-
     def __enter__(self):
+        # get @task functions from global namespace
         self.globals_tasks = {
             name: fn
             for name, fn in self.globals.items()
             if isinstance(fn, types.FunctionType) and hasattr(fn, "__task__")
         }
 
-        self.globals.update(
-            {
-                name: functools.partial(self.task_wrapper, fn)
-                for name, fn in self.globals_tasks.items()
-            }
-        )
+        # when func(*args, **kwargs) is called: we get Task(func, *args, **kwargs)
+        self.globals.update({name: Task.factory(fn) for name, fn in self.globals_tasks.items()})
 
         self.module_tasks = defaultdict(dict)
 
@@ -57,7 +45,7 @@ class TaskGraphBuilder:
                     fn = m.__dict__[function_name]
                     if isinstance(fn, types.FunctionType) and hasattr(fn, "__task__"):
                         self.module_tasks[m][function_name] = fn
-                        m.__dict__[function_name] = functools.partial(self.task_wrapper, fn)
+                        m.__dict__[function_name] = Task.factory(fn)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.globals.update(self.globals_tasks)

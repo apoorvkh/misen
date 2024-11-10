@@ -1,5 +1,6 @@
 import sys
 import typing as t
+import types
 import unittest.mock
 from dataclasses import is_dataclass
 from datetime import date, datetime, time
@@ -100,7 +101,7 @@ def det_hash(obj, seed: int = 0) -> str:
             obj_data = [det_hash(o, seed=seed) for o in obj]
         case set() | frozenset():
             obj_data = sorted([det_hash(o, seed=seed) for o in obj])
-        case dict():
+        case dict() | types.MappingProxyType():
             obj_data = [(det_hash(k, seed=seed), det_hash(v, seed=seed)) for k, v in obj.items()]
             obj_data = sorted(obj_data, key=itemgetter(0))
         case _ if is_np_type(obj):
