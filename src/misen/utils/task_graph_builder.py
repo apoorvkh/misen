@@ -30,7 +30,9 @@ class TaskGraphBuilder:
         }
 
         # when func(*args, **kwargs) is called: we get Task(func, *args, **kwargs)
-        self.globals.update({name: Task.factory(fn) for name, fn in self.globals_tasks.items()})
+        self.globals.update(
+            {name: Task._get_factory(fn) for name, fn in self.globals_tasks.items()}
+        )
 
         self.module_tasks = defaultdict(dict)
 
@@ -45,7 +47,7 @@ class TaskGraphBuilder:
                     fn = m.__dict__[function_name]
                     if isinstance(fn, types.FunctionType) and hasattr(fn, "__task__"):
                         self.module_tasks[m][function_name] = fn
-                        m.__dict__[function_name] = Task.factory(fn)
+                        m.__dict__[function_name] = Task._get_factory(fn)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.globals.update(self.globals_tasks)

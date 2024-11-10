@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import functools
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from .executor import Executor
-from .task import Task
-from .workspace import Workspace
 from .utils.task_graph_builder import TaskGraphBuilder
+from .workspace import Workspace
+
+if TYPE_CHECKING:
+    from .task import Task
 
 
 class Experiment(ABC):
@@ -22,7 +25,7 @@ class Experiment(ABC):
             return task_graph
 
     def run(self, executor: Executor, workspace: Workspace):
-        executor.run(self.step_graph, workspace=workspace)
+        executor.submit(task=self.step_graph, workspace=workspace)
 
     @classmethod
     def cli(cls):

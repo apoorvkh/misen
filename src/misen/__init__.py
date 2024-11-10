@@ -1,8 +1,8 @@
-from .task import Task, task
-from .workspace import Workspace
-from .executor import Executor, LocalExecutor
+from .executor import Executor
 from .experiment import Experiment
+from .task import Task, task
 from .utils.task_graph_builder import TaskGraphBuilder
+from .workspace import Workspace
 
 __all__ = [
     "Task",
@@ -10,6 +10,5 @@ __all__ = [
     "Workspace",
     "TaskGraphBuilder",
     "Executor",
-    "LocalExecutor",
     "Experiment",
 ]

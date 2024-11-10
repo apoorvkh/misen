@@ -42,7 +42,8 @@ python-preference = "only-managed"
 line-length = 100
 include = ["pyproject.toml", "src/**/*.py", "tests/**/*.py"]
 src = ["src", "tests"]
-# [tool.ruff.lint]
+[tool.ruff.lint]
+extend-select = ["I", "TCH"]
 # select = ["ALL"]
 # ignore = ["D"]
 [tool.ruff.lint.pydocstyle]

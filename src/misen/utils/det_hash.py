@@ -1,6 +1,6 @@
 import sys
-import typing as t
 import types
+import typing as t
 import unittest.mock
 from dataclasses import is_dataclass
 from datetime import date, datetime, time
