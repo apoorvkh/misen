@@ -5,6 +5,15 @@ requires-python = ">=3.10"
 resolution-mode = "lowest-direct"
 
 [[package]]
+name = "cloudpickle"
+version = "3.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/97/c7/f746cadd08c4c08129215cf1b984b632f9e579fc781301e63da9e85c76c1/cloudpickle-3.1.0.tar.gz", hash = "sha256:81a929b6e3c7335c863c771d673d105f02efdb89dfaba0c90495d1c64796601b", size = 66155 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/41/e1d85ca3cab0b674e277c8c4f678cf66a91cd2cecf93df94353a606fe0db/cloudpickle-3.1.0-py3-none-any.whl", hash = "sha256:fe11acda67f61aaaec473e3afe030feb131d78a43461b718185363384f1ba12e", size = 22021 },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -56,12 +65,15 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+slurm = [
+    { name = "submitit" },
+]
 
 [package.metadata]
 requires-dist = [
-    { name = "dill", specifier = ">=0.3.8" },
+    { name = "dill", specifier = ">=0.3.6" },
     { name = "ormsgpack", specifier = ">=1.5.0" },
-    { name = "xxhash", specifier = ">=3.4.1" },
+    { name = "xxhash", specifier = ">=3.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -70,6 +82,7 @@ dev = [
     { name = "pytest", specifier = "==8.3.3" },
     { name = "ruff", specifier = "==0.7.2" },
 ]
+slurm = [{ name = "submitit", specifier = ">=1.5.0" }]
 
 [[package]]
 name = "nodeenv"
@@ -174,6 +187,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a1/16/8969304f25bcd0e4af1778342e63b715e91db8a2dbb51807acd858cba915/ruff-0.7.2-py3-none-win32.whl", hash = "sha256:fa993cfc9f0ff11187e82de874dfc3611df80852540331bc85c75809c93253a8", size = 8650268 },
     { url = "https://files.pythonhosted.org/packages/d9/18/c4b00d161def43fe5968e959039c8f6ce60dca762cec4a34e4e83a4210a0/ruff-0.7.2-py3-none-win_amd64.whl", hash = "sha256:dd8800cbe0254e06b8fec585e97554047fb82c894973f7ff18558eee33d1cb88", size = 9433693 },
     { url = "https://files.pythonhosted.org/packages/7f/7b/c920673ac01c19814dd15fc617c02301c522f3d6812ca2024f4588ed4549/ruff-0.7.2-py3-none-win_arm64.whl", hash = "sha256:bb8368cd45bba3f57bb29cbb8d64b4a33f8415d0149d2655c5c8539452ce7760", size = 8735845 },
+]
+
+[[package]]
+name = "submitit"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2a/18/46a96b4f8c4e73103d905baf5ef9735154e273f2a7888f6dbc364e91d45b/submitit-1.5.0.tar.gz", hash = "sha256:2766868e71656b1e278a42f33bced74faebf2c525dba74f4cc43be8cbef6c588", size = 79720 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/d2/f620673750965ed7664560b6dc804cbd1e055fbb3b32d50a47f8617322c6/submitit-1.5.0-py3-none-any.whl", hash = "sha256:234e7d378eca33415fc82a6d700064d4a46345c214d508a5abc3cf0377fb072f", size = 74440 },
 ]
 
 [[package]]

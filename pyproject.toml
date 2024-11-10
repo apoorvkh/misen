@@ -22,11 +22,12 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "xxhash>=3.4.1",
+    "xxhash>=3.0",
     "ormsgpack>=1.5.0",
-    "dill>=0.3.8",
+    "dill>=0.3.6",
 ]
 [dependency-groups]
+slurm = ["submitit>=1.5.0"]
 dev = [
     "ruff==0.7.2",
     "pyright==1.1.388",
@@ -36,7 +37,6 @@ dev = [
 [tool.uv]
 managed = true
 python-preference = "only-managed"
-resolution = "lowest-direct"
 
 [tool.ruff]
 line-length = 100
