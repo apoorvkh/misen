@@ -1,7 +1,6 @@
 import numpy as np
 
 from misen import Experiment, task, Task, TaskGraphBuilder
-from misen.utils.det_hash import deterministic_hashing
 
 
 @task(uuid="QuNP")
@@ -29,12 +28,8 @@ if __name__ == "__main__":
             add(double(1), 4), add(np.csingle(3), 4), hello=np.datetime64("2005-02-25")
         )
 
-    with deterministic_hashing():
-        hash(task_graph)
-        hash(task_graph)
-
     print(task_graph)
-    print(task_graph.result())
+    print(task_graph.result(ensure_cached=False))
 
 # task_graph: Task = multiply(
 #     add(x=double(1), y=4), add(x=np.csingle(3), y=4), hello=np.datetime64("2005-02-25")

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from types import FunctionType, MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable
 
+from .utils.det_hash import deterministic_hashing
+
 if TYPE_CHECKING:
     from .workspace import Workspace
 
@@ -30,6 +32,23 @@ class Task:
     kwargs: MappingProxyType  # immutable view for dict
     properties: TaskProperties
 
+    def __post_init__(self) -> None:
+        # compute and cache the hash
+        with deterministic_hashing():
+            self.__hash__()
+
+    def __hash__(self):
+        """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
+        if self.__dict__.get("__cached_hash__") is None:
+            # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
+            # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
+            # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
+            self.__dict__["__cached_hash__"] = hash((self.properties.id, self.kwargs))
+        return self.__dict__["__cached_hash__"]
+
+    def __repr__(self):
+        return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs}, hash={self.__hash__()})"
+
     @staticmethod
     def _get_factory(func: FunctionType) -> Callable[..., Task]:
         """If you pass a function object to this method, it will return a factory function. If you call that function with arguments, it will return a Task object.
@@ -43,19 +62,6 @@ class Task:
             return Task(func=func, kwargs=MappingProxyType(callargs), properties=func.__task__)  # pyright: ignore [reportAttributeAccessIssue]
 
         return _factory
-
-    def __hash__(self):
-        """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
-        if self.__dict__.get("__cached_hash__") is None:
-            # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
-            # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
-            # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-            self.__dict__["__cached_hash__"] = hash((self.properties.id, self.kwargs))
-        return self.__dict__["__cached_hash__"]
-
-    def __repr__(self):
-        cached_hash = self.__dict__.get("__cached_hash__")
-        return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs}, cached_hash={cached_hash})"
 
     def is_cached(self, workspace: Workspace | None = None) -> bool:
         # TODO: need a better name for this: this is basically "are sufficient computations pre-cached?"
