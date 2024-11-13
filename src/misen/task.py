@@ -37,14 +37,16 @@ class Task:
         with deterministic_hashing():
             self.__hash__()
 
+    # TODO: is this caching thread safe?
     def __hash__(self):
         """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
-        if self.__dict__.get("__cached_hash__") is None:
+        if not hasattr(self, "__cached_hash__"):
             # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
             # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
             # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-            self.__dict__["__cached_hash__"] = hash((self.properties.id, self.kwargs))
-        return self.__dict__["__cached_hash__"]
+            h = hash((self.properties.id, self.kwargs))
+            object.__setattr__(self, "__cached_hash__", h)
+        return self.__getattribute__("__cached_hash__")
 
     def __repr__(self):
         return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs}, hash={self.__hash__()})"

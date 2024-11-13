@@ -12,13 +12,16 @@ if TYPE_CHECKING:
     from .task import Task
 
 
+# TODO: can we make Experiment (and inherited classes) immutable and then cache step_graph?
+# Or cache step_graph using (deterministic hash of "self") as key? invalidate cache if this hash changes?
+# think about multi-threading; see @functools.cached_property notes
+
+
 class Experiment(ABC):
     @abstractmethod
     def calls(self):
         raise NotImplementedError
 
-    # cached_property is not cloudpickle-able
-    @functools.cached_property
     def step_graph(self):
         with TaskGraphBuilder(self.calls.__globals__):
             task_graph: Task = self.calls()
