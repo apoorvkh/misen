@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -22,7 +21,8 @@ class Experiment(ABC):
     def calls(self):
         raise NotImplementedError
 
-    def step_graph(self):
+    @property
+    def step_graph(self) -> Task:
         with TaskGraphBuilder(self.calls.__globals__):
             task_graph: Task = self.calls()
             return task_graph
