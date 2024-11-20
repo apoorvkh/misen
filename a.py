@@ -1,20 +1,28 @@
+import matplotlib.pyplot as plt
 import numpy as np
+from rustworkx import topological_sort
+from rustworkx.visualization import mpl_draw, graphviz_draw
 
-from misen import Experiment, task, Task, TaskGraphBuilder
-
-
-@task(uuid="QuNP")
-def add(x, y):
-    return x + y
-
-
-@task(uuid="def")
-def multiply(x, y, z: int = 0, **kwargsx):
-    return x * y
+from misen import Executor, Task, TaskGraphBuilder, task
+from misen.executor import ExecNode
+from misen.workspace import TestWorkSpace
 
 
-def double(x):
-    return x * 2
+@task(uuid="QuNP", cache=False)
+def add(addx, addy):
+    return addx + addy
+
+@task(uuid="add2", cache=True)
+def adds(addsx, addsy):
+    return addsx + addsy
+
+@task(uuid="def", cache=True)
+def multiply(mulx, muly, mulz: int = 0, **mulkwargsx):
+    return mulx * muly
+
+
+def double(dubx):
+    return dubx * 2
 
 
 # class MultiplyExperiment(Experiment):
@@ -24,17 +32,50 @@ def double(x):
 
 if __name__ == "__main__":
     with TaskGraphBuilder(globals()):
+        a = adds(4,3)
+        b = adds(2,1)
         task_graph: Task = multiply(
-            add(double(1), 4), add(np.csingle(3), 4), hello=np.datetime64("2005-02-25")
+            multiply(
+                add(
+                    add(a, b),
+                    double(1)), 
+                b),
+            add(
+                add(
+                    np.csingle(3), 
+                    a), 
+                b),
+            hello=np.datetime64("2005-02-25"),
         )
 
-    print(task_graph)
-    print(task_graph.result(ensure_cached=False))
+    e = Executor()
+    
+    dag, partitions = e.computable_groups(task=task_graph, workspace=TestWorkSpace())
+
+    def label_dag_node(n):
+        if isinstance(n, ExecNode):
+            l = str((n.func.__name__, n.hash))
+        else:
+            l = str(n)
+
+        return {'label': l}
+    
+    def label_dag_edge(e):
+        return {'label': str(e)}
+    
+    def label_partition_node(n):
+        return {'label': str((n.func.__name__, n.hash))}
+
+    graphviz_draw(dag, node_attr_fn=label_dag_node, edge_attr_fn=label_dag_edge).save("dag.png")
+    graphviz_draw(partitions, node_attr_fn=label_partition_node, edge_attr_fn=label_dag_edge).save("partition_dag.png")
+
+    #print(partitions.nodes())
+    #print(partitions.edges())
+    #print(partitions.edge_index_map())
 
 # task_graph: Task = multiply(
 #     add(x=double(1), y=4), add(x=np.csingle(3), y=4), hello=np.datetime64("2005-02-25")
 # )
-
 # Task(
 #     func=__main__.multiply,
 #     kwargs={

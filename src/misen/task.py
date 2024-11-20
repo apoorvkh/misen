@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import inspect
+import inspect, asyncio
 from dataclasses import dataclass
 from types import FunctionType, MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable
@@ -9,6 +9,7 @@ from .utils.det_hash import deterministic_hashing
 
 if TYPE_CHECKING:
     from .workspace import Workspace
+    from .executor import Executor
 
 __all__ = ["Task", "task"]
 
@@ -72,6 +73,11 @@ class Task:
         if self.properties.cacheable:
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
+    
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> asyncio.Future:
+        # TODO: executor cannot be None, but this is just until we have a LocalExecutor
+
+        return executor.submit(self, workspace) # type: ignore
 
     def result(self, workspace: Workspace | None = None, ensure_cached: bool = True):
         """This function directly computes the task graph and is blocking. Un-cached tasks will be executed.
