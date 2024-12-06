@@ -50,15 +50,10 @@ if __name__ == "__main__":
 
     e = Executor()
     
-    dag, partitions = e.computable_groups(task=task_graph, workspace=TestWorkSpace())
+    dag = e.computable_groups(task=task_graph, workspace=TestWorkSpace())
 
     def label_dag_node(n):
-        if isinstance(n, ExecNode):
-            l = str((n.func.__name__, n.hash))
-        else:
-            l = str(n)
-
-        return {'label': l}
+        return {'label': str(n)}
     
     def label_dag_edge(e):
         return {'label': str(e)}
@@ -67,7 +62,7 @@ if __name__ == "__main__":
         return {'label': str((n.func.__name__, n.hash))}
 
     graphviz_draw(dag, node_attr_fn=label_dag_node, edge_attr_fn=label_dag_edge).save("dag.png")
-    graphviz_draw(partitions, node_attr_fn=label_partition_node, edge_attr_fn=label_dag_edge).save("partition_dag.png")
+    #graphviz_draw(partitions, node_attr_fn=label_partition_node, edge_attr_fn=label_dag_edge).save("partition_dag.png")
 
     #print(partitions.nodes())
     #print(partitions.edges())
