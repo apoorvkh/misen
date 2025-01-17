@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
+from threading import Lock
 from typing import Any
 
 from .task import Task
@@ -46,21 +47,28 @@ class TestWorkSpace(Workspace):
 
     def __init__(self):
         self.d = {}
+        self.mtx = Lock()
     
     def __len__(self):
-        return len(self.d)
+        with self.mtx:
+            return len(self.d)
     
     def __getitem__(self, key):
-        return self.d[key]
+        with self.mtx:
+            return self.d[key]
 
     def __setitem__(self, key, item):
-        self.d[key] = item
+        with self.mtx:
+            self.d[key] = item
 
     def __delitem__(self, key):
-        del self.d[key]
+        with self.mtx:
+            del self.d[key]
 
     def __iter__(self):
-        return iter(self.d.items())
+        with self.mtx:
+            return iter(self.d.items())
 
     def __contains__(self, key):
-        return key in self.d
+        with self.mtx:
+            return key in self.d

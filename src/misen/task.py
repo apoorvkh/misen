@@ -47,7 +47,7 @@ class Task:
             # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
             h = hash((self.properties.id, self.kwargs))
             object.__setattr__(self, "__cached_hash__", h)
-        return self.__getattribute__("__cached_hash__")
+        return int(self.__getattribute__("__cached_hash__"), 16) # is this necessary?
 
     def __repr__(self):
         return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs}, hash={self.__hash__()})"
@@ -74,12 +74,12 @@ class Task:
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
     
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> asyncio.Future:
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None):
         # TODO: executor cannot be None, but this is just until we have a LocalExecutor
 
         return executor.submit(self, workspace) # type: ignore
 
-    def result(self, workspace: Workspace | None = None, ensure_cached: bool = True):
+    def result(self, workspace: Workspace | None = None, ensure_cached: bool = False, ensure_deps_cached: bool = True):
         """This function directly computes the task graph and is blocking. Un-cached tasks will be executed.
         If ensure_cached is True, this will raise an error if any dependent task is cachable but not cached.
         """
@@ -95,7 +95,7 @@ class Task:
 
         execution_result = self.func(
             **{
-                k: (v.result(ensure_cached=False) if isinstance(v, Task) else v)
+                k: (v.result(workspace=workspace, ensure_cached=ensure_deps_cached, ensure_deps_cached=ensure_deps_cached) if isinstance(v, Task) else v)
                 for k, v in self.kwargs.items()
             }
         )
