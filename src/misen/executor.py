@@ -162,10 +162,11 @@ class LocalExecutor(Executor):
 
             task_dict: dict[int, asyncio.Awaitable] = {} # is this the right typing? # type: ignore
 
-            l = None
-
+            # go through tasks in topological order
             for node in topological_sort(task_graph):
+                # get inbound edges to this task
                 in_edges = task_graph.in_edges(node)
+                # if there are inbound edges ("dependencies")
                 if in_edges != [] or len(task_dict) != 0:
                     # check whether we need to wait on anything
                     # construct temporary task list to use asyncio.gather on...
@@ -174,20 +175,24 @@ class LocalExecutor(Executor):
                     for in_edge in in_edges:
                         # the following node is a dependency of this node...
                         dependency = in_edge[0]
+                        # if this dependency is not yet gathered, it'll be in here
                         if dependency in task_dict:
                             print(f"{node} waiting for {dependency}")
                             tasks.append(task_dict[dependency])
                             tasks_keys.append(dependency)
+                    # gather dependencies
                     await asyncio.gather(*tasks)
+                    # delete dependencies (they're now done) so no other
+                    # tasks ever need to wait on them
                     for k in tasks_keys:
                         del task_dict[k]
 
                 # run this task
                 print(f"running {node}")
-                task_dict[node] = asyncio.create_task(asyncio.to_thread(execute_task_local, task_graph[node]))
-                l = task_dict[node]
+                new_task = asyncio.create_task(asyncio.to_thread(execute_task_local, task_graph[node]))
+                task_dict[node] = new_task
 
-            return await l # type: ignore
+            return await new_task # type: ignore
 
         return async_helper
 

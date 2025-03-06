@@ -17,15 +17,17 @@ def adds(addsx, addsy):
     return addsx + addsy
 
 @task(uuid="def", cache=True)
-def multiply(mulx, muly, mulz: int = 0, **mulkwargsx):
-    print("multiplying for 1 second")
+def multiply(mulx, muly, mulz: int = 0, n="m", **mulkwargsx):
+    print(f"{n} multiplying for 1 second")
     time.sleep(1)
+    print(f"{n} returning")
     return mulx * muly
 
 @task(uuid="delayret", cache=True)
-def ret(a, t):
-    print(f"sleeping for {t}")
+def ret(a, t, n="ret"):
+    print(f"{n} sleeping for {t} seconds")
     time.sleep(t)
+    print(f"{n} returning")
     return a
 
 
@@ -56,13 +58,19 @@ if __name__ == "__main__":
         #     hello=np.datetime64("2005-02-25"),
         # )
         task_graph: Task = multiply(
-            ret(5, 3),
-            ret(6, 1)
+            multiply(
+                ret(2, 3, n="r1"),
+                4,
+                n="m1"
+            ),
+            ret(6, 1, n="r2"),
+            n="m2"
             )
 
     e = LocalExecutor()
     ws = TestWorkSpace()
 
     f = task_graph.run(workspace=ws, executor=e)
-
-    asyncio.run(f()) # type: ignore
+    r = asyncio.run(f()) # type: ignore
+    print(r)
+    print(ws.d)
