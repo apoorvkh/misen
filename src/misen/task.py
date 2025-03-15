@@ -18,33 +18,25 @@ class TaskProperties:
     """Dataclass for task properties. Attributes are immutable so that Task.__hash__ will be constant and cacheable."""
 
     id: str
-    cacheable: bool
-    version: int
-    exclude: frozenset[str]
-    defaults: MappingProxyType
+    cacheable: bool = False
+    version: int = 0
+    exclude: frozenset[str] = frozenset()
+    defaults: MappingProxyType = MappingProxyType({})
 
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 
-# @dataclass(frozen=True)
 class Task(Generic[R]):
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
         self.func = func
         self.args = args
         self.kwargs = kwargs
-        self.properties = (
-            getattr(func, "__task__")
-            if hasattr(func, "__task__")
-            else TaskProperties(
-                id=func.__qualname__,
-                cacheable=False,
-                version=0,
-                exclude=frozenset(),
-                defaults=MappingProxyType({}),
-            )
-        )
+        if hasattr(self.func, "__task__"):
+            self.properties = getattr(self.func, "__task__")
+        else:
+            self.properties = TaskProperties(id=func.__qualname__)
 
         # compute and cache the hash
         with deterministic_hashing():
@@ -60,7 +52,7 @@ class Task(Generic[R]):
             # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
             # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
             # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-            h = hash((self.properties.id, self.kwargs))
+            h = hash((self.properties.id, self.args, self.kwargs))
             object.__setattr__(self, "__cached_hash__", h)
         return int(self.__getattribute__("__cached_hash__"), 16)  # is this necessary?
 
