@@ -13,23 +13,32 @@ if TYPE_CHECKING:
 
 # TODO: encourage implementing as frozen dataclass
 
+
 class Experiment(ABC):
     @property
     @abstractmethod
     def step_graph(self) -> dict[str, Task]:
         raise NotImplementedError
 
+    def _is_frozen_dataclass(self) -> bool:
+        return is_dataclass(self) and getattr(self, "__dataclass_params__").frozen
+
     def get_step_graph(self) -> dict[str, Task]:
-        # if frozen dataclass, cache step_graph
-        if is_dataclass(self) and getattr(self, "__dataclass_params__").frozen:
+        if self._is_frozen_dataclass():
             if not hasattr(self, "__cached_graph__"):
                 self.__cached_graph__ = self.step_graph
             return self.__cached_graph__
-        else:
-            return self.step_graph
+
+        return self.step_graph
+
+    # TODO: inherit caching decorators for abstract methods
+    # https://stackoverflow.com/a/57979319
 
     def run(self, executor: Executor, workspace: Workspace):
-        executor.submit(task=self.get_step_graph(), workspace=workspace)
+        ...
+        # executor.submit(workspace=workspace)
+
+    def result(self, workspace: Workspace, step_name: str): ...
 
     @classmethod
     def cli(cls):

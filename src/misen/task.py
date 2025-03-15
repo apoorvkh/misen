@@ -12,6 +12,38 @@ if TYPE_CHECKING:
 
 __all__ = ["Task", "task"]
 
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def task(
+    uuid: str | None = None,  # openssl rand -base64 3
+    cache: bool = False,
+    version: int = 0,
+    exclude: set[str] = set(),
+    defaults: dict[str, Any] = {},
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    # Currently id is set as uuid (if specified) or f.__qualname__ (i.e. the function name)
+    # It is nice to ignore f.__module__ so that this function can be moved into different files
+    # TODO: In the future, it would also be nice to "import" tasks from other libraries
+    # In that case, we might want to consider the package it originates from?
+
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        setattr(
+            func,
+            "__task__",
+            TaskProperties(
+                id=(uuid or func.__qualname__),
+                cacheable=cache,
+                version=version,
+                exclude=frozenset(exclude),
+                defaults=MappingProxyType(defaults),
+            ),
+        )
+        return func
+
+    return decorator
+
 
 @dataclass(frozen=True)
 class TaskProperties:
@@ -24,19 +56,16 @@ class TaskProperties:
     defaults: MappingProxyType = MappingProxyType({})
 
 
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
 class Task(Generic[R]):
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
         self.func = func
         self.args = args
         self.kwargs = kwargs
-        if hasattr(self.func, "__task__"):
-            self.properties = getattr(self.func, "__task__")
-        else:
-            self.properties = TaskProperties(id=func.__qualname__)
+        self.properties = getattr(
+            self.func,
+            "__task__",
+            TaskProperties(id=f"{func.__module__}.{func.__qualname__}"),
+        )
 
         # compute and cache the hash
         with deterministic_hashing():
@@ -45,7 +74,6 @@ class Task(Generic[R]):
     def as_argument(self) -> R:
         return self  # type: ignore
 
-    # TODO: is this caching thread safe?
     def __hash__(self):
         """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
         if not hasattr(self, "__cached_hash__"):
@@ -131,28 +159,3 @@ class Task(Generic[R]):
         if workspace is None:
             return None
         return workspace.get_work_dir(self)
-
-
-def task(
-    uuid: str | None = None,  # openssl rand -base64 3
-    cache: bool = False,
-    version: int = 0,
-    exclude: set[str] = set(),
-    defaults: dict[str, Any] = {},
-):
-    # Currently id is set as uuid (if specified) or f.__qualname__ (i.e. the function name)
-    # It is nice to ignore f.__module__ so that this function can be moved into different files
-    # TODO: In the future, it would also be nice to "import" tasks from other libraries
-    # In that case, we should also consider the package it originates from
-
-    def decorator(f):
-        f.__task__ = TaskProperties(
-            id=(uuid or f.__qualname__),
-            cacheable=cache,
-            version=version,
-            exclude=frozenset(exclude),
-            defaults=MappingProxyType(defaults),
-        )
-        return f
-
-    return decorator
