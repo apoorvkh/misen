@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 from .executor import Executor
-from .utils.task_graph_builder import TaskGraphBuilder
 from .workspace import Workspace
 
 if TYPE_CHECKING:
@@ -17,15 +16,10 @@ if TYPE_CHECKING:
 
 
 class Experiment(ABC):
-    @abstractmethod
-    def calls(self):
-        raise NotImplementedError
-
     @property
-    def step_graph(self) -> Task:
-        with TaskGraphBuilder(self.calls.__globals__):
-            task_graph: Task = self.calls()
-            return task_graph
+    @abstractmethod
+    def step_graph(self) -> Task:  # actually Graph
+        raise NotImplementedError
 
     def run(self, executor: Executor, workspace: Workspace):
         executor.submit(task=self.step_graph, workspace=workspace)

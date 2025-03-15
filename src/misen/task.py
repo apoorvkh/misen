@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import inspect, asyncio
 from dataclasses import dataclass
-from types import FunctionType, MappingProxyType
-from typing import TYPE_CHECKING, Any, Callable
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
 
 from .utils.det_hash import deterministic_hashing
 
 if TYPE_CHECKING:
-    from .workspace import Workspace
     from .executor import Executor
+    from .workspace import Workspace
 
 __all__ = ["Task", "task"]
 
@@ -20,23 +19,39 @@ class TaskProperties:
 
     id: str
     cacheable: bool
-    version: str
+    version: int
     exclude: frozenset[str]
     defaults: MappingProxyType
 
 
-@dataclass(frozen=True)
-class Task:
-    """Class for wrapping a function as a task. kwargs"""
+P = ParamSpec("P")
+R = TypeVar("R")
 
-    func: FunctionType
-    kwargs: MappingProxyType  # immutable view for dict
-    properties: TaskProperties
 
-    def __post_init__(self) -> None:
+# @dataclass(frozen=True)
+class Task(Generic[R]):
+    def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+        self.properties = (
+            getattr(func, "__task__")
+            if hasattr(func, "__task__")
+            else TaskProperties(
+                id=func.__qualname__,
+                cacheable=False,
+                version=0,
+                exclude=frozenset(),
+                defaults=MappingProxyType({}),
+            )
+        )
+
         # compute and cache the hash
         with deterministic_hashing():
             self.__hash__()
+
+    def as_argument(self) -> R:
+        return self  # type: ignore
 
     # TODO: is this caching thread safe?
     def __hash__(self):
@@ -47,24 +62,10 @@ class Task:
             # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
             h = hash((self.properties.id, self.kwargs))
             object.__setattr__(self, "__cached_hash__", h)
-        return int(self.__getattribute__("__cached_hash__"), 16) # is this necessary?
+        return int(self.__getattribute__("__cached_hash__"), 16)  # is this necessary?
 
     def __repr__(self):
-        return f"Task(func={self.func.__module__}.{self.func.__qualname__}, kwargs={self.kwargs}, hash={self.__hash__()})"
-
-    @staticmethod
-    def _get_factory(func: FunctionType) -> Callable[..., Task]:
-        """If you pass a function object to this method, it will return a factory function. If you call that function with arguments, it will return a Task object.
-
-        This is useful to replace a function object in globals(). A call to that function will then return a Task, instead of executing the function.
-        """
-
-        def _factory(*args, **kwargs):
-            # TODO: this is deprecated; switch to signature.bind
-            callargs = inspect.getcallargs(func, *args, **kwargs)
-            return Task(func=func, kwargs=MappingProxyType(callargs), properties=func.__task__)  # pyright: ignore [reportAttributeAccessIssue]
-
-        return _factory
+        return f"Task(func={self.func.__module__}.{self.func.__qualname__}, args={self.args}, kwargs={self.kwargs}, hash={self.__hash__()})"
 
     def is_cached(self, workspace: Workspace | None = None) -> bool:
         # TODO: need a better name for this: this is basically "are sufficient computations pre-cached?"
@@ -73,13 +74,18 @@ class Task:
         if self.properties.cacheable:
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
-    
+
     def run(self, workspace: Workspace | None = None, executor: Executor | None = None):
         # TODO: executor cannot be None, but this is just until we have a LocalExecutor
 
-        return executor.submit(self, workspace) # type: ignore
+        return executor.submit(self, workspace)  # type: ignore
 
-    def result(self, workspace: Workspace | None = None, ensure_cached: bool = False, ensure_deps_cached: bool = True):
+    def result(
+        self,
+        workspace: Workspace | None = None,
+        ensure_cached: bool = False,
+        ensure_deps_cached: bool = True,
+    ):
         """This function directly computes the task graph and is blocking. Un-cached tasks will be executed.
         If ensure_cached is True, this will raise an error if any dependent task is cachable but not cached.
         """
@@ -93,12 +99,34 @@ class Task:
         if self.properties.cacheable and workspace is not None and self in workspace:
             return workspace[self]
 
-        execution_result = self.func(
-            **{
-                k: (v.result(workspace=workspace, ensure_cached=ensure_deps_cached, ensure_deps_cached=ensure_deps_cached) if isinstance(v, Task) else v)
-                for k, v in self.kwargs.items()
-            }
-        )
+        # TODO: process Tasks and special objects
+        execution_result = self.func(*self.args, **self.kwargs)
+
+        # execution_result = self.func(
+        #     *(
+        #         v.result(
+        #             workspace=workspace,
+        #             ensure_cached=ensure_deps_cached,
+        #             ensure_deps_cached=ensure_deps_cached,
+        #         )
+        #         if isinstance(v, Task)
+        #         else v
+        #         for v in self.args
+        #     ),
+        #     **{
+        #         k: (
+        #             v.result(
+        #                 workspace=workspace,
+        #                 ensure_cached=ensure_deps_cached,
+        #                 ensure_deps_cached=ensure_deps_cached,
+        #             )
+        #             if isinstance(v, Task)
+        #             else v
+        #         )
+        #         for k, v in self.kwargs.items()
+        #     }
+        # )
+
         if self.properties.cacheable and workspace is not None:
             workspace[self] = execution_result
         return execution_result
@@ -116,7 +144,7 @@ class Task:
 def task(
     uuid: str | None = None,  # openssl rand -base64 3
     cache: bool = False,
-    version: str = "",
+    version: int = 0,
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
 ):

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 from abc import ABC
+from asyncio import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
-import asyncio
-from asyncio import Future
 
+import rustworkx
 from rustworkx import PyDAG, topological_sort
 from rustworkx.visit import DFSVisitor, PruneSearch
-import rustworkx
-from rustworkx.visualization import mpl_draw, graphviz_draw
+from rustworkx.visualization import graphviz_draw, mpl_draw
 
 from misen.task import Task
 from misen.workspace import Workspace
