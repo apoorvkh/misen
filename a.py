@@ -1,10 +1,7 @@
 import asyncio
 import time
 
-import numpy as np
-from rustworkx.visualization import graphviz_draw
-
-from misen import LocalExecutor, Task, TaskGraphBuilder, task
+from misen import LocalExecutor, Task, task
 from misen.workspace import TestWorkSpace
 
 
@@ -12,9 +9,11 @@ from misen.workspace import TestWorkSpace
 def add(addx, addy):
     return addx + addy
 
+
 @task(uuid="add2", cache=True)
 def adds(addsx, addsy):
     return addsx + addsy
+
 
 @task(uuid="def", cache=True)
 def multiply(mulx, muly, mulz: int = 0, n="m", **mulkwargsx):
@@ -22,6 +21,7 @@ def multiply(mulx, muly, mulz: int = 0, n="m", **mulkwargsx):
     time.sleep(1)
     print(f"{n} returning")
     return mulx * muly
+
 
 @task(uuid="delayret", cache=True)
 def ret(a, t, n="ret"):
@@ -41,36 +41,34 @@ def double(dubx):
 
 
 if __name__ == "__main__":
-    with TaskGraphBuilder(globals()):
-        # a = adds(4,3)
-        # b = adds(2,1)
-        # task_graph: Task = multiply(
-        #     multiply(
-        #         add(
-        #             add(a, b),
-        #             double(1)), 
-        #         b),
-        #     add(
-        #         add(
-        #             np.csingle(3), 
-        #             a), 
-        #         b),
-        #     hello=np.datetime64("2005-02-25"),
-        # )
-        task_graph: Task = multiply(
-            multiply(
-                ret(2, 3, n="r1"),
-                4,
-                n="m1"
-            ),
-            ret(6, 1, n="r2"),
-            n="m2"
-            )
+    # a = adds(4,3)
+    # b = adds(2,1)
+    # task_graph: Task = multiply(
+    #     multiply(
+    #         add(
+    #             add(a, b),
+    #             double(1)),
+    #         b),
+    #     add(
+    #         add(
+    #             np.csingle(3),
+    #             a),
+    #         b),
+    #     hello=np.datetime64("2005-02-25"),
+    # )
+    task_graph = Task(
+        multiply,
+        Task(multiply, Task(ret, 2, 3, n="r1"), 4, n="m1"),
+        Task(ret, 6, 1, n="r2"),
+        n="m2",
+    )
 
-    e = LocalExecutor()
-    ws = TestWorkSpace()
+    print(task_graph)
 
-    f = task_graph.run(workspace=ws, executor=e)
-    r = asyncio.run(f()) # type: ignore
-    print(r)
-    print(ws.d)
+    # e = LocalExecutor()
+    # ws = TestWorkSpace()
+
+    # f = task_graph.run(workspace=ws, executor=e)
+    # r = asyncio.run(f())  # type: ignore
+    # print(r)
+    # print(ws.d)
