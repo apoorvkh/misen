@@ -105,12 +105,39 @@ class Task(Generic[R]):
 
         return executor.submit(self, workspace)  # type: ignore
 
+    def _resolve_args(
+        self, workspace: Workspace | None = None, ensure_deps_cached: bool = True
+    ) -> tuple:
+        args = (
+            v.result(
+                workspace=workspace,
+                ensure_cached=ensure_deps_cached,
+            )
+            if isinstance(v, Task)
+            else v
+            for v in self.args
+        )
+
+        kwargs = {
+            k: (
+                v.result(
+                    workspace=workspace,
+                    ensure_cached=ensure_deps_cached,
+                )
+                if isinstance(v, Task)
+                else v
+            )
+            for k, v in self.kwargs.items()
+        }
+
+        return args, kwargs  # pyright: ignore
+
     def result(
         self,
         workspace: Workspace | None = None,
         ensure_cached: bool = False,
         ensure_deps_cached: bool = True,
-    ):
+    ) -> R:
         """This function directly computes the task graph and is blocking. Un-cached tasks will be executed.
         If ensure_cached is True, this will raise an error if any dependent task is cachable but not cached.
         """
@@ -124,33 +151,12 @@ class Task(Generic[R]):
         if self.properties.cacheable and workspace is not None and self in workspace:
             return workspace[self]
 
-        # TODO: process Tasks and special objects
-        execution_result = self.func(*self.args, **self.kwargs)
+        args, kwargs = self._resolve_args(
+            workspace=workspace, ensure_deps_cached=ensure_deps_cached
+        )
 
-        # execution_result = self.func(
-        #     *(
-        #         v.result(
-        #             workspace=workspace,
-        #             ensure_cached=ensure_deps_cached,
-        #             ensure_deps_cached=ensure_deps_cached,
-        #         )
-        #         if isinstance(v, Task)
-        #         else v
-        #         for v in self.args
-        #     ),
-        #     **{
-        #         k: (
-        #             v.result(
-        #                 workspace=workspace,
-        #                 ensure_cached=ensure_deps_cached,
-        #                 ensure_deps_cached=ensure_deps_cached,
-        #             )
-        #             if isinstance(v, Task)
-        #             else v
-        #         )
-        #         for k, v in self.kwargs.items()
-        #     }
-        # )
+        # TODO: fix typing?
+        execution_result = self.func(*args, **kwargs)  # pyright: ignore
 
         if self.properties.cacheable and workspace is not None:
             workspace[self] = execution_result

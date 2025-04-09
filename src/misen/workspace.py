@@ -42,28 +42,28 @@ class Workspace(MutableMapping[Task, Any]):
 # TODO: implement LocalWorkspace using DiskCache
 # https://grantjenks.com/docs/diskcache/tutorial.html
 
+
 # for testing only
 class TestWorkSpace(Workspace):
-
     def __init__(self):
         self.d = {}
         self.mtx = Lock()
-    
+
     def __len__(self):
         with self.mtx:
             return len(self.d)
-    
+
     def __getitem__(self, key):
         with self.mtx:
-            return self.d[key]
+            return self.d[key.__hash__()]
 
     def __setitem__(self, key, item):
         with self.mtx:
-            self.d[key] = item
+            self.d[key.__hash__()] = item
 
     def __delitem__(self, key):
         with self.mtx:
-            del self.d[key]
+            del self.d[key.__hash__()]
 
     def __iter__(self):
         with self.mtx:
@@ -71,4 +71,4 @@ class TestWorkSpace(Workspace):
 
     def __contains__(self, key):
         with self.mtx:
-            return key in self.d
+            return key.__hash__() in self.d

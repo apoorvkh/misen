@@ -17,11 +17,13 @@ if TYPE_CHECKING:
     from .task import Task
     from .workspace import Workspace
 
+
 # cacheable=True, necessarily
 @dataclass
 class PartitionNode:
     func: Callable
     hash: int
+
 
 @dataclass
 class ExecNode:
@@ -29,8 +31,9 @@ class ExecNode:
     cacheable: bool
     hash: int
 
+
 def label_dag_edge(e):
-    return {'label': str(e)}
+    return {"label": str(e)}
 
 
 class Executor(ABC):
@@ -43,23 +46,29 @@ class Executor(ABC):
 
 # TODO: implement LocalExecutor that implements local / async multi-processing / multi-threading
 
-class LocalExecutor(Executor):
 
+class LocalExecutor(Executor):
+    def __init__(self):
+        pass
+
+    def submit(self, task: Task, workspace: Workspace):
+        task_graph = self.computable_groups(task, workspace=workspace)
+
+
+class MultithreadedLocalExecutor(Executor):
     def __init__(self, num_procs=2):
         self.num_procs = num_procs
-    
-    def submit(self, task: Task, workspace: Workspace):
 
+    def submit(self, task: Task, workspace: Workspace):
         def execute_task_local(t: Task):
             return t.result(workspace=workspace)
-        
-        async def async_helper() -> Any:
 
+        async def async_helper() -> Any:
             task_graph = self.computable_groups(task, workspace=workspace)
 
-            #graphviz_draw(task_graph, edge_attr_fn=label_dag_edge).save("dag.png")
+            # graphviz_draw(task_graph, edge_attr_fn=label_dag_edge).save("dag.png")
 
-            task_dict: dict[int, asyncio.Awaitable] = {} # is this the right typing? # type: ignore
+            task_dict: dict[int, asyncio.Awaitable] = {}  # is this the right typing? # type: ignore
 
             # go through tasks in topological order
             for node in topological_sort(task_graph):
@@ -88,13 +97,14 @@ class LocalExecutor(Executor):
 
                 # run this task
                 print(f"running {node}")
-                new_task = asyncio.create_task(asyncio.to_thread(execute_task_local, task_graph[node]))
+                new_task = asyncio.create_task(
+                    asyncio.to_thread(execute_task_local, task_graph[node])
+                )
                 task_dict[node] = new_task
 
-            return await new_task # type: ignore
+            return await new_task  # type: ignore
 
         return async_helper
-
 
 
 # TODO: implement SlurmExecutor based on submitit
