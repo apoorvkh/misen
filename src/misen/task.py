@@ -100,14 +100,23 @@ class Task(Generic[R]):
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
 
-    def _run(self, workspace: Workspace | None = None, ensure_cached: bool = False, ensure_deps_cached: bool = False) -> R:
+    def _run(
+        self,
+        workspace: Workspace | None = None,
+        ensure_cached: bool = False,
+        ensure_deps_cached: bool = False,
+    ) -> R:
         # run self.func
         # expect all subtasks to be cached, error if not
 
         if ensure_cached:
             assert self.is_cached(workspace=workspace), "ensure_cached=True: expecting cached Task"
 
-        if self.properties.cacheable and workspace is not None and self.is_cached(workspace=workspace):
+        if (
+            self.properties.cacheable
+            and workspace is not None
+            and self.is_cached(workspace=workspace)
+        ):
             return workspace[self]
 
         args, kwargs = self._resolve_args(workspace=workspace, ensure_cached=ensure_deps_cached)
@@ -128,23 +137,17 @@ class Task(Generic[R]):
 
         return executor.submit(task=self, workspace=workspace)  # type: ignore
 
-    def _resolve_args(self, workspace: Workspace | None = None, ensure_cached: bool = False) -> tuple:
+    def _resolve_args(
+        self, workspace: Workspace | None = None, ensure_cached: bool = False
+    ) -> tuple:
         args = (
-            v._run(
-                workspace=workspace,
-                ensure_cached=ensure_cached
-            )
-            if isinstance(v, Task)
-            else v
+            v._run(workspace=workspace, ensure_cached=ensure_cached) if isinstance(v, Task) else v
             for v in self.args
         )
 
         kwargs = {
             k: (
-                v._run(
-                    workspace=workspace,
-                    ensure_cached=ensure_cached
-                )
+                v._run(workspace=workspace, ensure_cached=ensure_cached)
                 if isinstance(v, Task)
                 else v
             )
@@ -159,7 +162,7 @@ class Task(Generic[R]):
         """
         if self.properties.cacheable:
             assert self.is_cached(workspace), "Cannot get result, cacheable task not cached."
-            return workspace[self] # pyright: ignore
+            return workspace[self]  # pyright: ignore
 
         return self.run(workspace=workspace, executor=executor).result()
 

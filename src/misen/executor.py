@@ -52,8 +52,8 @@ class LocalExecutor(Executor):
         pass
 
     def submit(self, task: Task, workspace: Workspace):
-
         return task._run(workspace=workspace, ensure_deps_cached=False)
+
 
 class MultithreadedLocalExecutor(Executor):
     def __init__(self, num_procs=2):

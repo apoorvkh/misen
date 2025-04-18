@@ -29,7 +29,6 @@ class Experiment(ABC):
         return super().__getattribute__(name)
 
     def run(self, executor: Executor, workspace: Workspace):
-        
         # big brain??
         # this is literally all we need i think
         def meta_task(**kwargs) -> None:
@@ -38,7 +37,7 @@ class Experiment(ABC):
         Task(meta_task, **self.step_graph()).run(workspace=workspace, executor=executor).result()
 
     # just pull from cache, basically
-    def result(self, workspace: Workspace, step_name: str): 
+    def result(self, workspace: Workspace, step_name: str):
         self.step_graph()[step_name].result(workspace)
 
     @classmethod
