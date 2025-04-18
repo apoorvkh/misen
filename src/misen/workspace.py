@@ -53,22 +53,22 @@ class TestWorkSpace(Workspace):
         with self.mtx:
             return len(self.d)
 
-    def __getitem__(self, key):
+    def __getitem__(self, task: Task):
         with self.mtx:
-            return self.d[key.__hash__()]
+            return self.d[task.__hash__()]
 
-    def __setitem__(self, key, item):
+    def __setitem__(self, task: Task, item):
         with self.mtx:
-            self.d[key.__hash__()] = item
+            self.d[task.__hash__()] = item
 
-    def __delitem__(self, key):
+    def __delitem__(self, task: Task):
         with self.mtx:
-            del self.d[key.__hash__()]
+            del self.d[task.__hash__()]
 
     def __iter__(self):
         with self.mtx:
             return iter(self.d.items())
 
-    def __contains__(self, key):
+    def __contains__(self, task: Task):
         with self.mtx:
-            return key.__hash__() in self.d
+            return task.__hash__() in self.d

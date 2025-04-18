@@ -100,18 +100,39 @@ class Task(Generic[R]):
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
 
+    def _run(self, workspace: Workspace | None = None, ensure_cached: bool = False, ensure_deps_cached: bool = False) -> R:
+        # run self.func
+        # expect all subtasks to be cached, error if not
+
+        if ensure_cached:
+            assert self.is_cached(workspace=workspace), "ensure_cached=True: expecting cached Task"
+
+        if self.properties.cacheable and workspace is not None and self.is_cached(workspace=workspace):
+            return workspace[self]
+
+        args, kwargs = self._resolve_args(workspace=workspace, ensure_cached=ensure_deps_cached)
+
+        # TODO: fix typing?
+        execution_result = self.func(*args, **kwargs)  # pyright: ignore
+
+        if self.properties.cacheable and workspace is not None:
+            workspace[self] = execution_result
+
+        return execution_result
+
     def run(self, workspace: Workspace | None = None, executor: Executor | None = None):
+        """
+        Submit task to executor to fully execute the task graph.
+        """
         # TODO: executor cannot be None, but this is just until we have a LocalExecutor
 
-        return executor.submit(self, workspace)  # type: ignore
+        return executor.submit(task=self, workspace=workspace)  # type: ignore
 
-    def _resolve_args(
-        self, workspace: Workspace | None = None, ensure_deps_cached: bool = True
-    ) -> tuple:
+    def _resolve_args(self, workspace: Workspace | None = None, ensure_cached: bool = False) -> tuple:
         args = (
-            v.result(
+            v._run(
                 workspace=workspace,
-                ensure_cached=ensure_deps_cached,
+                ensure_cached=ensure_cached
             )
             if isinstance(v, Task)
             else v
@@ -120,9 +141,9 @@ class Task(Generic[R]):
 
         kwargs = {
             k: (
-                v.result(
+                v._run(
                     workspace=workspace,
-                    ensure_cached=ensure_deps_cached,
+                    ensure_cached=ensure_cached
                 )
                 if isinstance(v, Task)
                 else v
@@ -132,35 +153,15 @@ class Task(Generic[R]):
 
         return args, kwargs  # pyright: ignore
 
-    def result(
-        self,
-        workspace: Workspace | None = None,
-        ensure_cached: bool = False,
-        ensure_deps_cached: bool = True,
-    ) -> R:
-        """This function directly computes the task graph and is blocking. Un-cached tasks will be executed.
-        If ensure_cached is True, this will raise an error if any dependent task is cachable but not cached.
+    def result(self, workspace: Workspace | None = None, executor: Executor | None = None) -> R:
         """
+        Immediately get the result of cacheable tasks, or compute it if it's uncacheable.
+        """
+        if self.properties.cacheable:
+            assert self.is_cached(workspace), "Cannot get result, cacheable task not cached."
+            return workspace[self] # pyright: ignore
 
-        # TODO: should we actually submit to an executor here and block for the result?
-
-        if ensure_cached and not self.is_cached(workspace):
-            raise ValueError(f"Task {self} is not sufficiently cached but ensure_cached is True.")
-        # is_cached is recursive, so subsequent calls to Task.result can set ensure_cached=False
-
-        if self.properties.cacheable and workspace is not None and self in workspace:
-            return workspace[self]
-
-        args, kwargs = self._resolve_args(
-            workspace=workspace, ensure_deps_cached=ensure_deps_cached
-        )
-
-        # TODO: fix typing?
-        execution_result = self.func(*args, **kwargs)  # pyright: ignore
-
-        if self.properties.cacheable and workspace is not None:
-            workspace[self] = execution_result
-        return execution_result
+        return self.run(workspace=workspace, executor=executor).result()
 
     @property
     def work_dir(self, workspace: Workspace | None = None):

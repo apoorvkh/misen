@@ -52,8 +52,8 @@ class LocalExecutor(Executor):
         pass
 
     def submit(self, task: Task, workspace: Workspace):
-        task_graph = self.computable_groups(task, workspace=workspace)
 
+        return task._run(workspace=workspace, ensure_deps_cached=False)
 
 class MultithreadedLocalExecutor(Executor):
     def __init__(self, num_procs=2):
@@ -61,7 +61,7 @@ class MultithreadedLocalExecutor(Executor):
 
     def submit(self, task: Task, workspace: Workspace):
         def execute_task_local(t: Task):
-            return t.result(workspace=workspace)
+            return t._run(workspace=workspace, ensure_deps_cached=True)
 
         async def async_helper() -> Any:
             task_graph = self.computable_groups(task, workspace=workspace)
