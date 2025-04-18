@@ -117,7 +117,7 @@ class Task(Generic[R]):
 
         is_cached = self.is_cached(workspace=workspace)
 
-        if ensure_cached:
+        if ensure_cached and self.properties.cacheable:
             assert is_cached, "ensure_cached=True: expecting cached Task"
 
         if (
@@ -147,15 +147,11 @@ class Task(Generic[R]):
 
         return executor.submit(task=self, workspace=workspace)  # type: ignore
 
-    def result(self, workspace: Workspace | None = None, executor: Executor | None = None) -> R:
+    def result(self, workspace: Workspace | None = None) -> R:
         """
         Immediately get the result of cacheable tasks, or compute it if it's uncacheable.
         """
-        if self.properties.cacheable:
-            assert self.is_cached(workspace), "Cannot get result, cacheable task not cached."
-            return workspace[self]  # pyright: ignore
-
-        return self.run(workspace=workspace, executor=executor).result()
+        return self._run(workspace=workspace, ensure_cached=True, ensure_deps_cached=True)
 
     @property
     def work_dir(self, workspace: Workspace | None = None):
