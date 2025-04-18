@@ -1,14 +1,18 @@
-from .executor import Executor
+from .executor import Executor, LocalExecutor, MultithreadedLocalExecutor
 from .experiment import Experiment
+from .misen_settings import MisenSettings
 from .task import Task, task
-from .utils.task_graph_builder import TaskGraphBuilder
 from .workspace import Workspace
+
+settings = MisenSettings()
 
 __all__ = [
     "Task",
     "task",
     "Workspace",
-    "TaskGraphBuilder",
     "Executor",
+    "LocalExecutor",
+    "MultithreadedLocalExecutor",
     "Experiment",
+    "settings",
 ]

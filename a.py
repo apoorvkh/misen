@@ -1,10 +1,7 @@
-import matplotlib.pyplot as plt
-import numpy as np
-from rustworkx import topological_sort
-from rustworkx.visualization import mpl_draw, graphviz_draw
+import asyncio
+import time
 
-from misen import Executor, Task, TaskGraphBuilder, task
-from misen.executor import ExecNode
+from misen import LocalExecutor, MultithreadedLocalExecutor, Task, task
 from misen.workspace import TestWorkSpace
 
 
@@ -12,13 +9,26 @@ from misen.workspace import TestWorkSpace
 def add(addx, addy):
     return addx + addy
 
+
 @task(uuid="add2", cache=True)
 def adds(addsx, addsy):
     return addsx + addsy
 
+
 @task(uuid="def", cache=True)
-def multiply(mulx, muly, mulz: int = 0, **mulkwargsx):
+def multiply(mulx, muly, mulz: int = 0, n="m", **mulkwargsx):
+    print(f"{n} multiplying for 1 second")
+    time.sleep(1)
+    print(f"{n} returning")
     return mulx * muly
+
+
+@task(uuid="delayret", cache=True)
+def ret(a, t, n="ret"):
+    print(f"{n} sleeping for {t} seconds")
+    time.sleep(t)
+    print(f"{n} returning")
+    return a
 
 
 def double(dubx):
@@ -31,57 +41,41 @@ def double(dubx):
 
 
 if __name__ == "__main__":
-    with TaskGraphBuilder(globals()):
-        a = adds(4,3)
-        b = adds(2,1)
-        task_graph: Task = multiply(
-            multiply(
-                add(
-                    add(a, b),
-                    double(1)), 
-                b),
-            add(
-                add(
-                    np.csingle(3), 
-                    a), 
-                b),
-            hello=np.datetime64("2005-02-25"),
-        )
+    # a = adds(4,3)
+    # b = adds(2,1)
+    # task_graph: Task = multiply(
+    #     multiply(
+    #         add(
+    #             add(a, b),
+    #             double(1)),
+    #         b),
+    #     add(
+    #         add(
+    #             np.csingle(3),
+    #             a),
+    #         b),
+    #     hello=np.datetime64("2005-02-25"),
+    # )
+    task_graph = Task(
+        multiply,
+        Task(multiply, Task(ret, 2, 3, n="r1"), 4, n="m1"),
+        Task(ret, 6, 1, n="r2"),
+        n="m2",
+    )
 
-    e = Executor()
-    
-    dag, partitions = e.computable_groups(task=task_graph, workspace=TestWorkSpace())
+    print(task_graph)
 
-    def label_dag_node(n):
-        if isinstance(n, ExecNode):
-            l = str((n.func.__name__, n.hash))
-        else:
-            l = str(n)
+    e = MultithreadedLocalExecutor()
+    ws = TestWorkSpace()
+    # try:
+    #     task_graph.result()
+    # except:
+    #     print("pass")
 
-        return {'label': l}
-    
-    def label_dag_edge(e):
-        return {'label': str(e)}
-    
-    def label_partition_node(n):
-        return {'label': str((n.func.__name__, n.hash))}
+    f = task_graph.run(workspace=ws, executor=e)
+    print(f)
+    r = asyncio.run(f())  # type: ignore
+    print(r)
+    print(ws.d)
 
-    graphviz_draw(dag, node_attr_fn=label_dag_node, edge_attr_fn=label_dag_edge).save("dag.png")
-    graphviz_draw(partitions, node_attr_fn=label_partition_node, edge_attr_fn=label_dag_edge).save("partition_dag.png")
-
-    #print(partitions.nodes())
-    #print(partitions.edges())
-    #print(partitions.edge_index_map())
-
-# task_graph: Task = multiply(
-#     add(x=double(1), y=4), add(x=np.csingle(3), y=4), hello=np.datetime64("2005-02-25")
-# )
-# Task(
-#     func=__main__.multiply,
-#     kwargs={
-#         "x": Task(func=__main__.add, kwargs={"x": 2, "y": 4}),
-#         "y": Task(func=__main__.add, kwargs={"x": (3 + 0j), "y": 4}),
-#         "kwargsx": {"hello": numpy.datetime64("2005-02-25")},
-#         "z": 0,
-#     },
-# )
+    # print(task_graph.result(ws, e))
