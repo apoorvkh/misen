@@ -30,9 +30,11 @@ class Experiment(ABC):
 
     def run(self, executor: Executor, workspace: Workspace):
         ...
+        # task = Union(self.step_graph().values())
         # executor.submit(workspace=workspace)
 
-    def result(self, workspace: Workspace, step_name: str): ...
+    def result(self, workspace: Workspace, step_name: str):
+        return self.step_graph()[step_name].result(workspace, ensure_cached=True)
 
     @classmethod
     def cli(cls):

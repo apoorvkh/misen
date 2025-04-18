@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC
-from asyncio import Future
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 

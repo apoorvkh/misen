@@ -39,8 +39,7 @@ class Workspace(MutableMapping[Task, Any]):
         raise NotImplementedError
 
 
-# TODO: implement LocalWorkspace using DiskCache
-# https://grantjenks.com/docs/diskcache/tutorial.html
+# TODO: implement LocalWorkspace using LMDB
 
 # for testing only
 class TestWorkSpace(Workspace):
