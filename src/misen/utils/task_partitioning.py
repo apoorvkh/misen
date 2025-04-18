@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import rustworkx
 from rustworkx import PyDAG, topological_sort
+from rustworkx.visualization import graphviz_draw
 from rustworkx.visit import DFSVisitor, PruneSearch
 
 from ..task import Task
@@ -41,6 +42,8 @@ def computable_groups(task: Task, workspace: Workspace):
                 if cur.properties.cacheable:
                     d[cur.__hash__()] = n
                 # recurse on children
+                for i, child in enumerate(cur.args):
+                    rec(child, n, f"_args_{i}")
                 for k, child in cur.kwargs.items():
                     rec(child, n, k)
             # edges contain the kwarg names...
@@ -51,11 +54,15 @@ def computable_groups(task: Task, workspace: Workspace):
             dag.add_edge(n, parent, kwarg)
 
     # Step 1: Construct DAG
+    for i, child in enumerate(task.args):
+        rec(child, root_node, f"_args_{i}")
     for k, child in task.kwargs.items():
         rec(child, root_node, k)
 
     # Step 2: Copy DAG and snip outgoing edges from cacheable nodes,
     #  compute connected components
+
+    # graphviz_draw(dag).save("dag.png")
 
     # first, make note of the index of each node within the each node's data
     for node in dag.node_indices():
@@ -108,5 +115,4 @@ def computable_groups(task: Task, workspace: Workspace):
     computable_subdag = dag.subgraph(list(rustworkx.ancestors(dag, new_root)) + [new_root])
     # graphviz_draw(dag, edge_attr_fn=label_dag_edge).save("dag_final.png")
     # print(new_root, dag.node_indices(), list(rustworkx.ancestors(dag, new_root)))
-    # graphviz_draw(computable_subdag, edge_attr_fn=label_dag_edge).save("dag_final_subdag.png")
     return computable_subdag

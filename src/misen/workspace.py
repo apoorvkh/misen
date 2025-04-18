@@ -41,33 +41,33 @@ class Workspace(MutableMapping[Task, Any]):
 
 # TODO: implement LocalWorkspace using LMDB
 
+
 # for testing only
 class TestWorkSpace(Workspace):
-
     def __init__(self):
         self.d = {}
         self.mtx = Lock()
-    
+
     def __len__(self):
         with self.mtx:
             return len(self.d)
-    
-    def __getitem__(self, key):
-        with self.mtx:
-            return self.d[key]
 
-    def __setitem__(self, key, item):
+    def __getitem__(self, task: Task):
         with self.mtx:
-            self.d[key] = item
+            return self.d[task.__hash__()]
 
-    def __delitem__(self, key):
+    def __setitem__(self, task: Task, item):
         with self.mtx:
-            del self.d[key]
+            self.d[task.__hash__()] = item
+
+    def __delitem__(self, task: Task):
+        with self.mtx:
+            del self.d[task.__hash__()]
 
     def __iter__(self):
         with self.mtx:
             return iter(self.d.items())
 
-    def __contains__(self, key):
+    def __contains__(self, task: Task):
         with self.mtx:
-            return key in self.d
+            return task.__hash__() in self.d

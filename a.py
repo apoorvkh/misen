@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from misen import LocalExecutor, Task, task
+from misen import LocalExecutor, MultithreadedLocalExecutor, Task, task
 from misen.workspace import TestWorkSpace
 
 
@@ -65,10 +65,17 @@ if __name__ == "__main__":
 
     print(task_graph)
 
-    # e = LocalExecutor()
-    # ws = TestWorkSpace()
+    e = MultithreadedLocalExecutor()
+    ws = TestWorkSpace()
+    # try:
+    #     task_graph.result()
+    # except:
+    #     print("pass")
 
-    # f = task_graph.run(workspace=ws, executor=e)
-    # r = asyncio.run(f())  # type: ignore
-    # print(r)
-    # print(ws.d)
+    f = task_graph.run(workspace=ws, executor=e)
+    print(f)
+    r = asyncio.run(f())  # type: ignore
+    print(r)
+    print(ws.d)
+
+    # print(task_graph.result(ws, e))
