@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
@@ -100,6 +101,25 @@ class Task(Generic[R]):
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
 
+    def _resolve_args(
+        self, workspace: Workspace | None = None, ensure_cached: bool = False
+    ) -> tuple:
+        args = (
+            v._run(workspace=workspace, ensure_cached=ensure_cached) if isinstance(v, Task) else v
+            for v in self.args
+        )
+
+        kwargs = {
+            k: (
+                v._run(workspace=workspace, ensure_cached=ensure_cached)
+                if isinstance(v, Task)
+                else v
+            )
+            for k, v in self.kwargs.items()
+        }
+
+        return args, kwargs  # pyright: ignore
+
     def _run(
         self,
         workspace: Workspace | None = None,
@@ -129,32 +149,15 @@ class Task(Generic[R]):
 
         return execution_result
 
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None):
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
         """
         Submit task to executor to fully execute the task graph.
         """
-        # TODO: executor cannot be None, but this is just until we have a LocalExecutor
+        # TODO:
+        # if executor is None:
+        #     executor = ...
 
         return executor.submit(task=self, workspace=workspace)  # type: ignore
-
-    def _resolve_args(
-        self, workspace: Workspace | None = None, ensure_cached: bool = False
-    ) -> tuple:
-        args = (
-            v._run(workspace=workspace, ensure_cached=ensure_cached) if isinstance(v, Task) else v
-            for v in self.args
-        )
-
-        kwargs = {
-            k: (
-                v._run(workspace=workspace, ensure_cached=ensure_cached)
-                if isinstance(v, Task)
-                else v
-            )
-            for k, v in self.kwargs.items()
-        }
-
-        return args, kwargs  # pyright: ignore
 
     def result(self, workspace: Workspace | None = None, executor: Executor | None = None) -> R:
         """
