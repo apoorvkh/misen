@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
 
+from . import settings
 from .utils.cached_property import cached_property
 from .utils.det_hash import deterministic_hashing
 
@@ -100,8 +101,7 @@ class Task(Generic[R]):
         return args, kwargs  # pyright: ignore
 
     def is_cached(self, workspace: Workspace | None = None) -> bool:
-        if workspace is None:
-            return False
+        workspace = workspace or settings.workspace
         if self.properties.cacheable:
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
@@ -112,6 +112,8 @@ class Task(Generic[R]):
         ensure_cached: bool = False,
         ensure_deps_cached: bool = False,
     ) -> R:
+        workspace = workspace or settings.workspace
+
         # run self.func
         # expect all subtasks to be cached, error if not
 
@@ -120,11 +122,7 @@ class Task(Generic[R]):
         if ensure_cached and self.properties.cacheable:
             assert is_cached, "ensure_cached=True: expecting cached Task"
 
-        if (
-            self.properties.cacheable
-            and workspace is not None
-            and is_cached
-        ):
+        if self.properties.cacheable and is_cached:
             return workspace[self]
 
         args, kwargs = self._resolve_args(workspace=workspace, ensure_cached=ensure_deps_cached)
@@ -141,10 +139,7 @@ class Task(Generic[R]):
         """
         Submit task to executor to fully execute the task graph.
         """
-        # TODO:
-        # if executor is None:
-        #     executor = ...
-
+        executor = executor or settings.executor
         return executor.submit(task=self, workspace=workspace)  # type: ignore
 
     def result(self, workspace: Workspace | None = None) -> R:
@@ -158,8 +153,7 @@ class Task(Generic[R]):
         # TODO: how can we pass a Task.work_dir to Task.from(func(work_dir))
         # this is cyclic. we probably need a special object e.g. misen.WORK_DIR that is ignored by the hash and is realized as Task.work_dir.
         # we could do something similar to pass a Task.logger to a task
-        if workspace is None:
-            return None
+        workspace = workspace or settings.workspace
         return workspace.get_work_dir(self)
 
     def __hash__(self):

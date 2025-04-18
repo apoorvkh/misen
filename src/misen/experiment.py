@@ -28,7 +28,7 @@ class Experiment(ABC):
     def __getitem__(self, item: str):
         return self.tasks()[item]
 
-    def run(self, executor: Executor, workspace: Workspace) -> None:
+    def run(self, workspace: Workspace | None, executor: Executor | None) -> None:
         Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
 
     @classmethod
@@ -37,4 +37,4 @@ class Experiment(ABC):
         executor = Executor()  # Executor(executor args)
         workspace = Workspace()  # Workspace(workspace args)
         experiment = cls()  # cls(experiment args)
-        experiment.run(executor, workspace)
+        experiment.run(workspace=workspace, executor=executor)
