@@ -1,18 +1,12 @@
-from .executor import Executor, LocalExecutor, MultithreadedLocalExecutor
+from .executor import Executor
 from .experiment import Experiment
-from .misen_settings import MisenSettings
 from .task import Task, task
 from .workspace import Workspace
 
-settings = MisenSettings()
-
 __all__ = [
-    "Task",
     "task",
+    "Task",
     "Workspace",
     "Executor",
-    "LocalExecutor",
-    "MultithreadedLocalExecutor",
     "Experiment",
-    "settings",
 ]

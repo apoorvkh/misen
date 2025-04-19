@@ -1,110 +1,134 @@
 from __future__ import annotations
 
-import asyncio
+import copy
+import functools
 from abc import ABC
-from concurrent.futures import Future
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
-from rustworkx import topological_sort
+import rustworkx
+from rustworkx import PyDAG, topological_sort
+from rustworkx.visit import DFSVisitor, PruneSearch
 
-from misen.task import Task
-from misen.workspace import Workspace
-
-from .utils.task_partitioning import computable_groups
+from .task import Task
+from .workspace import Workspace
 
 if TYPE_CHECKING:
-    from .task import Task
-    from .workspace import Workspace
-
-
-# cacheable=True, necessarily
-@dataclass
-class PartitionNode:
-    func: Callable
-    hash: int
-
-
-@dataclass
-class ExecNode:
-    func: Callable
-    cacheable: bool
-    hash: int
-
-
-def label_dag_edge(e):
-    return {"label": str(e)}
+    from concurrent.futures import Future
 
 
 class Executor(ABC):
+    @classmethod
+    @functools.cache
+    def default(cls) -> Executor:
+        raise NotImplementedError
+        # return LocalExecutor()
+
     def computable_groups(self, task: Task, workspace: Workspace):
-        return computable_groups(task, workspace)
+        return _computable_groups(task, workspace)
 
     def submit(self, task: Task, workspace: Workspace) -> Future:
         raise NotImplementedError
 
 
-# TODO: implement LocalExecutor that implements local / async multi-processing / multi-threading
+def _computable_groups(task: Task, workspace: Workspace):
+    """
+    This function should partition (s.t. `task` and every cache=True Task is the root of a partition).
+    Then we should return the graph of partitions. Each partition should represented as a topologically-sorted list of its Tasks.
+    """
+    # TODO: implement this here
 
+    # this section builds `dag`: just reformating the task graph as a rustworkx PyDAG
+    dag = PyDAG()
 
-class LocalExecutor(Executor):
-    def __init__(self):
-        pass
+    root = task
+    root_node = dag.add_node(root)
 
-    def submit(self, task: Task, workspace: Workspace):
-        return task._run(workspace=workspace, ensure_deps_cached=False)
+    # more or less a 'seen' dictionary, for making sure that a single node can connect to multiple 'parents'
+    d = {}
 
+    def rec(cur: Task | Any, parent: int, kwarg: str):
+        # at the moment, I haven't turned constants into their own kind of Task
+        if isinstance(cur, Task):
+            # check if this node seen alr
+            if cur.__hash__() in d:
+                n = d[cur.__hash__()]
+            else:
+                # add it to the graph
+                n = dag.add_node(cur)
+                if cur.properties.cacheable:
+                    d[cur.__hash__()] = n
+                # recurse on children
+                for i, child in enumerate(cur.args):
+                    rec(child, n, f"_args_{i}")
+                for k, child in cur.kwargs.items():
+                    rec(child, n, k)
+            # edges contain the kwarg names...
+            dag.add_edge(n, parent, kwarg)
+        else:
+            # this is a leaf node (indegree 0)
+            n = dag.add_node(cur)
+            dag.add_edge(n, parent, kwarg)
 
-class MultithreadedLocalExecutor(Executor):
-    def __init__(self, num_procs=2):
-        self.num_procs = num_procs
+    # Step 1: Construct DAG
+    for i, child in enumerate(task.args):
+        rec(child, root_node, f"_args_{i}")
+    for k, child in task.kwargs.items():
+        rec(child, root_node, k)
 
-    def submit(self, task: Task, workspace: Workspace):
-        def execute_task_local(t: Task):
-            return t._run(workspace=workspace, ensure_deps_cached=True)
+    # Step 2: Copy DAG and snip outgoing edges from cacheable nodes,
+    #  compute connected components
 
-        async def async_helper() -> Any:
-            task_graph = self.computable_groups(task, workspace=workspace)
+    # graphviz_draw(dag).save("dag.png")
 
-            # graphviz_draw(task_graph, edge_attr_fn=label_dag_edge).save("dag.png")
+    # first, make note of the index of each node within the each node's data
+    for node in dag.node_indices():
+        dag[node] = (dag[node], node)
 
-            task_dict: dict[int, asyncio.Awaitable] = {}  # is this the right typing? # type: ignore
+    dag_c = copy.copy(dag)
+    for src, dest in dag_c.edge_list():
+        t: Task | Any = dag_c.get_node_data(src)[0]
+        if isinstance(t, Task) and t.properties.cacheable:
+            dag_c.remove_edge(src, dest)
+    # graphviz_draw(dag, edge_attr_fn=label_dag_edge).save("dag_.png")
+    # graphviz_draw(dag_c, edge_attr_fn=label_dag_edge).save("dag__.png")
+    conn_comps = rustworkx.connected_components(dag_c.to_undirected())  # type: ignore
+    # print(conn_comps)
+    # Step 3: Contract connected components to their topological root node
 
-            # go through tasks in topological order
-            for node in topological_sort(task_graph):
-                # get inbound edges to this task
-                in_edges = task_graph.in_edges(node)
-                # if there are inbound edges ("dependencies")
-                if in_edges != [] or len(task_dict) != 0:
-                    # check whether we need to wait on anything
-                    # construct temporary task list to use asyncio.gather on...
-                    tasks = []
-                    tasks_keys = []
-                    for in_edge in in_edges:
-                        # the following node is a dependency of this node...
-                        dependency = in_edge[0]
-                        # if this dependency is not yet gathered, it'll be in here
-                        if dependency in task_dict:
-                            print(f"{node} waiting for {dependency}")
-                            tasks.append(task_dict[dependency])
-                            tasks_keys.append(dependency)
-                    # gather dependencies
-                    await asyncio.gather(*tasks)
-                    # delete dependencies (they're now done) so no other
-                    # tasks ever need to wait on them
-                    for k in tasks_keys:
-                        del task_dict[k]
+    new_root = 0
+    i = 0
+    for conn_comp in conn_comps:
+        conn_comp_lst = list(reversed(list(conn_comp)))
+        sub_dag = dag.subgraph(conn_comp_lst)
+        sort = topological_sort(sub_dag)
+        conn_comp_root = sub_dag[sort[-1]][1]
+        new_node = dag.contract_nodes(conn_comp_lst, dag[conn_comp_root][0])
+        if conn_comp_root == 0:
+            new_root = new_node
+        # graphviz_draw(dag, edge_attr_fn=label_dag_edge).save(f"dag__{i}.png")
+        i += 1
 
-                # run this task
-                print(f"running {node}")
-                new_task = asyncio.create_task(
-                    asyncio.to_thread(execute_task_local, task_graph[node])
-                )
-                task_dict[node] = new_task
+    # Step 4: Traverse and delete nodes that are already cached
+    # and get the connected component containing the root node
+    class CachedVisitor(DFSVisitor):
+        def __init__(self):
+            self.to_remove = []
 
-            return await new_task  # type: ignore
+        def tree_edge(self, edge):  # type: ignore
+            t: Task | Any = dag[edge[0]]
+            if isinstance(t, Task) and t.is_cached(workspace=workspace):
+                self.to_remove.append(edge[0])
+                raise PruneSearch()
 
-        return async_helper
+    # find nodes to remove...
+    vis = CachedVisitor()
+    rustworkx.dfs_search(dag, [new_root], vis)
 
+    # remove nodes
+    for node in vis.to_remove:
+        dag.remove_node(node)
 
-# TODO: implement SlurmExecutor based on submitit
+    computable_subdag = dag.subgraph(list(rustworkx.ancestors(dag, new_root)) + [new_root])
+    # graphviz_draw(dag, edge_attr_fn=label_dag_edge).save("dag_final.png")
+    # print(new_root, dag.node_indices(), list(rustworkx.ancestors(dag, new_root)))
+    return computable_subdag

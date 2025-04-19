@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from concurrent.futures import Future
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
 
-from . import settings
 from .utils.cached_property import cached_property
 from .utils.det_hash import deterministic_hashing
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
+
     from .executor import Executor
     from .workspace import Workspace
 
@@ -101,7 +101,9 @@ class Task(Generic[R]):
         return args, kwargs  # pyright: ignore
 
     def is_cached(self, workspace: Workspace | None = None) -> bool:
-        workspace = workspace or settings.workspace
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.default()
         if self.properties.cacheable:
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
@@ -112,7 +114,9 @@ class Task(Generic[R]):
         ensure_cached: bool = False,
         ensure_deps_cached: bool = False,
     ) -> R:
-        workspace = workspace or settings.workspace
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.default()
 
         # run self.func
         # expect all subtasks to be cached, error if not
@@ -139,7 +143,9 @@ class Task(Generic[R]):
         """
         Submit task to executor to fully execute the task graph.
         """
-        executor = executor or settings.executor
+        from .executor import Executor  # avoids circular import
+
+        executor = executor or Executor.default()
         return executor.submit(task=self, workspace=workspace)  # type: ignore
 
     def result(self, workspace: Workspace | None = None) -> R:
@@ -153,7 +159,9 @@ class Task(Generic[R]):
         # TODO: how can we pass a Task.work_dir to Task.from(func(work_dir))
         # this is cyclic. we probably need a special object e.g. misen.WORK_DIR that is ignored by the hash and is realized as Task.work_dir.
         # we could do something similar to pass a Task.logger to a task
-        workspace = workspace or settings.workspace
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.default()
         return workspace.get_work_dir(self)
 
     def __hash__(self):
