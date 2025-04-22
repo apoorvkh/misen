@@ -55,6 +55,7 @@ dependencies = [
     { name = "dill" },
     { name = "ormsgpack" },
     { name = "rustworkx" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "xxhash" },
 ]
 
@@ -73,6 +74,7 @@ requires-dist = [
     { name = "dill", specifier = ">=0.3.6" },
     { name = "ormsgpack", specifier = ">=1.5.0" },
     { name = "rustworkx", specifier = ">=0.15.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1.0" },
     { name = "xxhash", specifier = ">=3.0.0" },
 ]
 

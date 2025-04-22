@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import copy
-import functools
-from abc import ABC
+from abc import abstractmethod
+from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 import rustworkx
 from rustworkx import PyDAG, topological_sort
 from rustworkx.visit import DFSVisitor, PruneSearch
+from typing_extensions import Self
+
+from misen.utils.from_params import FromParamsABC, ParamT
 
 from .task import Task
 from .workspace import Workspace
@@ -15,17 +18,33 @@ from .workspace import Workspace
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
+_builtin_executors = {
+    "local": "misen.executors.local:LocalExecutor",
+}
 
-class Executor(ABC):
+
+class Executor(FromParamsABC):
     @classmethod
-    @functools.cache
-    def default(cls) -> Executor:
-        raise NotImplementedError
-        # return LocalExecutor()
+    def from_params(cls, params: dict[str, ParamT] | None = None) -> Self:
+        if params is None:
+            params = {"type": "local"}
+        assert "type" in params and isinstance(params["type"], str)
+        executor_type = _builtin_executors.get(params["type"], params["type"])
+        module, class_name = executor_type.split(":", maxsplit=1)
+        executor_class: type[Self] = getattr(import_module(module), class_name)
+        kwargs = params.get("kwargs", {})
+        assert isinstance(kwargs, dict)
+        kwargs: dict[str, ParamT]
+        return executor_class(**kwargs)
+
+    @staticmethod
+    def settings_key() -> str:
+        return "executor"
 
     def computable_groups(self, task: Task, workspace: Workspace):
         return _computable_groups(task, workspace)
 
+    @abstractmethod
     def submit(self, task: Task, workspace: Workspace) -> Future:
         raise NotImplementedError
 
