@@ -8,9 +8,8 @@ from typing import TYPE_CHECKING, Any
 import rustworkx
 from rustworkx import PyDAG, topological_sort
 from rustworkx.visit import DFSVisitor, PruneSearch
-from typing_extensions import Self
 
-from misen.utils.from_params import FromParamsABC, ParamT
+from misen.utils.from_params import FromParamsABC
 
 from .task import Task
 from .workspace import Workspace
@@ -23,22 +22,26 @@ _builtin_executors = {
 }
 
 
-class Executor(FromParamsABC):
-    @classmethod
-    def from_params(cls, params: dict[str, ParamT] | None = None) -> Self:
-        if params is None:
-            params = {"type": "local"}
-        assert "type" in params and isinstance(params["type"], str)
-        executor_type = _builtin_executors.get(params["type"], params["type"])
-        module, class_name = executor_type.split(":", maxsplit=1)
-        executor_class: type[Self] = getattr(import_module(module), class_name)
-        kwargs = params.get("kwargs", {})
-        assert isinstance(kwargs, dict)
-        kwargs: dict[str, ParamT]
-        return executor_class(**kwargs)
+class Executor(FromParamsABC, kw_only=True):
+    type: str
 
-    @staticmethod
-    def settings_key() -> str:
+    @classmethod
+    def from_params(cls, params: dict) -> Executor:
+        executor_type = cls._from_params(params).type
+        executor_type = _builtin_executors.get(executor_type, executor_type)
+
+        module, class_name = executor_type.split(":", maxsplit=1)
+        executor_class = getattr(import_module(module), class_name)
+        assert isinstance(executor_class, type) and issubclass(executor_class, Executor)
+
+        return executor_class._from_params(params)
+
+    @classmethod
+    def default_params(cls) -> dict:
+        return {"type": "local"}
+
+    @classmethod
+    def toml_key(cls) -> str:
         return "executor"
 
     def computable_groups(self, task: Task, workspace: Workspace):
