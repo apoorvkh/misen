@@ -1,19 +1,35 @@
 from __future__ import annotations
 
-import functools
-from collections.abc import MutableMapping
-from typing import Any
+from importlib import import_module
 
-from .task import Task
+from misen.utils.from_params import FromParamsABC
+
+_builtin_workspaces = {
+    "memory": "misen.workspaces.memory:MemoryWorkspace",
+}
 
 
-class Workspace(MutableMapping[Task, Any]):
+class Workspace(FromParamsABC):#, MutableMapping[Task, Any]):
+    type: str
+
     @classmethod
-    @functools.cache
-    def default(cls) -> Workspace:
-        raise NotImplementedError
-        # settings
-        # return TestWorkSpace()
+    def from_params(cls, params: dict) -> Workspace:
+        workspace_type = cls.from_params(params).type
+        workspace_type = _builtin_workspaces.get(workspace_type, workspace_type)
+
+        module, class_name = workspace_type.split(":", maxsplit=1)
+        workspace_class = getattr(import_module(module), class_name)
+        assert isinstance(workspace_class, type) and issubclass(workspace_class, Workspace)
+
+        return workspace_class.from_params(params)
+
+    @classmethod
+    def default_params(cls) -> dict:
+        return {"type": "memory"}
+
+    @classmethod
+    def toml_key(cls) -> str:
+        return "workspace"
 
     def __len__(self):
         raise NotImplementedError

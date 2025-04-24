@@ -9,17 +9,11 @@ from ..workspace import Workspace
 
 
 class LocalExecutor(Executor):
-    def __init__(self):
-        pass
-
     def submit(self, task: Task, workspace: Workspace):
         return task._run(workspace=workspace, ensure_deps_cached=False)
 
 
 class MultithreadedLocalExecutor(Executor):
-    def __init__(self, num_procs=2):
-        self.num_procs = num_procs
-
     def submit(self, task: Task, workspace: Workspace):
         def execute_task_local(t: Task):
             return t._run(workspace=workspace, ensure_deps_cached=True)
