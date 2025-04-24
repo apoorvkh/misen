@@ -9,7 +9,7 @@ import rustworkx
 from rustworkx import PyDAG, topological_sort
 from rustworkx.visit import DFSVisitor, PruneSearch
 
-from misen.utils.from_params import FromParamsABC
+from misen.utils.from_params import FromParamsABC, TomlType
 
 from .task import Task
 from .workspace import Workspace
@@ -26,7 +26,7 @@ class Executor(FromParamsABC, kw_only=True):
     type: str
 
     @classmethod
-    def from_params(cls, params: dict) -> Executor:
+    def from_params(cls, params: dict[str, TomlType]) -> Executor:
         executor_type = cls._from_params(params).type
         executor_type = _builtin_executors.get(executor_type, executor_type)
 
@@ -37,7 +37,7 @@ class Executor(FromParamsABC, kw_only=True):
         return executor_class._from_params(params)
 
     @classmethod
-    def default_params(cls) -> dict:
+    def default_params(cls) -> dict[str, TomlType]:
         return {"type": "local"}
 
     @classmethod
