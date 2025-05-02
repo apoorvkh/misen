@@ -21,7 +21,7 @@ class Workspace(FromParamsABC):  # , MutableMapping[Task, Any]):
         workspace_class = getattr(import_module(module), class_name)
         assert isinstance(workspace_class, type) and issubclass(workspace_class, Workspace)
 
-        return workspace_class.from_params(params)
+        return workspace_class._from_params(params)
 
     @classmethod
     def default_params(cls) -> dict:

@@ -1,5 +1,6 @@
 # import asyncio
 import time
+from typing import TypedDict
 
 from misen import Executor, Experiment, Task, Workspace, task
 
@@ -63,17 +64,21 @@ if __name__ == "__main__":
     )
 
     class TestExperiment(Experiment):
-        def tasks(self) -> dict[str, Task]:
+        class ReturnType(TypedDict):
+            subresult: int
+            multresult: int
+
+        def tasks(self) -> ReturnType:
             a = Task(multiply, Task(ret, 2, 3, n="r1"), 4, n="m1")
 
             return {
-                "subresult": a,
+                "subresult": a.T,
                 "multresult": Task(
                     multiply,
                     a,
                     Task(ret, 6, 1, n="r2"),
                     n="m2",
-                ),
+                ).T,
             }
 
     class TestExperiment2(Experiment):
@@ -85,7 +90,7 @@ if __name__ == "__main__":
 
     # print(task_graph)
 
-    e = Executor.from_params(params={"type": "local"})  # MultithreadedLocalExecutor()
+    e = Executor.from_params(params={"type": "threaded", "num_procs": 2})  # MultithreadedLocalExecutor()
     ws = Workspace.from_params(params={"type": "memory"})
     # try:
     #     task_graph.result()
@@ -95,14 +100,15 @@ if __name__ == "__main__":
     exp = TestExperiment()
     print("run exp")
     exp.run(executor=e, workspace=ws)
+    # r = exp.tasks()["subresult"]
 
     exp2 = TestExperiment2()
     print("run exp2")
     exp2.run(executor=e, workspace=ws)
 
-    print(exp2.result(workspace=ws, step_name="subresult"))
-    print(exp2.result(workspace=ws, step_name="multresult"))
-    print(exp2.result(workspace=ws, step_name="final"))
+    print(exp2["subresult"].result(ws))
+    print(exp2["multresult"].result(ws))
+    print(exp2["final"].result(ws))
 
     # f = task_graph.run(workspace=ws, executor=e)
     # print(f)

@@ -103,7 +103,9 @@ class Task(Generic[R]):
     def is_cached(self, workspace: Workspace | None = None) -> bool:
         from .workspace import Workspace  # avoids circular import
 
-        workspace = workspace or Workspace.default()
+        if workspace is None:
+            workspace = Workspace.default()
+
         if self.properties.cacheable:
             return self in workspace
         return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
@@ -116,7 +118,8 @@ class Task(Generic[R]):
     ) -> R:
         from .workspace import Workspace  # avoids circular import
 
-        workspace = workspace or Workspace.default()
+        if workspace is None:
+            workspace = Workspace.default()
 
         # run self.func
         # expect all subtasks to be cached, error if not
@@ -145,7 +148,9 @@ class Task(Generic[R]):
         """
         from .executor import Executor  # avoids circular import
 
-        executor = executor or Executor.default()
+        if executor is None:
+            executor = Executor.default()
+
         return executor.submit(task=self, workspace=workspace)  # type: ignore
 
     def result(self, workspace: Workspace | None = None) -> R:
@@ -161,7 +166,9 @@ class Task(Generic[R]):
         # we could do something similar to pass a Task.logger to a task
         from .workspace import Workspace  # avoids circular import
 
-        workspace = workspace or Workspace.default()
+        if workspace is None:
+            workspace = Workspace.default()
+        
         return workspace.get_work_dir(self)
 
     def __hash__(self):

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 _builtin_executors = {
     "local": "misen.executors.local:LocalExecutor",
+    "threaded": "misen.executors.local:MultithreadedLocalExecutor"
 }
 
 

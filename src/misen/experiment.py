@@ -29,7 +29,7 @@ class Experiment(ABC):
         return self.tasks()[item]
 
     def run(self, workspace: Workspace | None, executor: Executor | None) -> None:
-        Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
+        Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor).result()
 
     @classmethod
     def cli(cls):

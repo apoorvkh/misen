@@ -4,10 +4,14 @@ from ..task import Task
 from ..workspace import Workspace
 
 
-class MemoryWorkspace(Workspace):
-    def __init__(self):
+class MemoryWorkspace(Workspace, dict=True):
+
+    def __post_init__(self):
         self.d = {}
         self.mtx = Lock()
+
+    def print(self):
+        print(self.d)
 
     def __len__(self):
         with self.mtx:

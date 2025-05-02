@@ -11,11 +11,14 @@ from ..workspace import Workspace
 
 class LocalExecutor(Executor):
     def submit(self, task: Task, workspace: Workspace) -> Future:
-        with ProcessPoolExecutor(max_workers=1) as p:
+        with ThreadPoolExecutor(max_workers=1) as p:
             return p.submit(task._run, workspace=workspace, ensure_deps_cached=False)
 
 
-class MultithreadedLocalExecutor(Executor):
+class MultithreadedLocalExecutor(Executor, dict=False):
+
+    num_procs: int
+
     def submit(self, task: Task, workspace: Workspace) -> Future:
         # def execute_task_local(t: Task):
         #     return t._run(workspace=workspace, ensure_deps_cached=True)
