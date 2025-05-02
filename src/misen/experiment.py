@@ -8,8 +8,8 @@ from .executor import Executor
 from .utils.cached_property import cached_property
 from .workspace import Workspace
 
-if TYPE_CHECKING:
-    from .task import Task
+# if TYPE_CHECKING:
+from .task import Task, task
 
 
 # TODO: encourage implementing as frozen dataclass
@@ -38,7 +38,7 @@ class Experiment(ABC):
 
     # just pull from cache, basically
     def result(self, workspace: Workspace, step_name: str):
-        self.step_graph()[step_name].result(workspace)
+        return self.step_graph()[step_name].result(workspace)
 
     @classmethod
     def cli(cls):

@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from misen import LocalExecutor, MultithreadedLocalExecutor, Task, task
+from misen import LocalExecutor, MultithreadedLocalExecutor, Task, task, Experiment
 from misen.workspace import TestWorkSpace
 
 
@@ -63,7 +63,28 @@ if __name__ == "__main__":
         n="m2",
     )
 
-    print(task_graph)
+    class TestExperiment(Experiment):
+        def step_graph(self) -> dict[str, Task]:
+            a = Task(multiply, Task(ret, 2, 3, n="r1"), 4, n="m1")
+
+            return {
+                "subresult": a,
+                "multresult": Task(
+                    multiply,
+                    a,
+                    Task(ret, 6, 1, n="r2"),
+                    n="m2",
+                ),
+            }
+
+    class TestExperiment2(Experiment):
+        def step_graph(self) -> dict[str, Task]:
+            subexp = TestExperiment().step_graph()
+            subexp["final"] = Task(multiply, subexp["subresult"], subexp["multresult"], n="final")
+
+            return subexp
+
+    # print(task_graph)
 
     e = MultithreadedLocalExecutor()
     ws = TestWorkSpace()
@@ -72,10 +93,22 @@ if __name__ == "__main__":
     # except:
     #     print("pass")
 
-    f = task_graph.run(workspace=ws, executor=e)
-    print(f)
-    r = asyncio.run(f())  # type: ignore
-    print(r)
+    exp = TestExperiment()
+    print("run exp")
+    exp.run(executor=e, workspace=ws)
+
+    exp2 = TestExperiment2()
+    print("run exp2")
+    exp2.run(executor=e, workspace=ws)
+
+    print(exp2.result(workspace=ws, step_name="subresult"))
+    print(exp2.result(workspace=ws, step_name="multresult"))
+    print(exp2.result(workspace=ws, step_name="final"))
+
+    # f = task_graph.run(workspace=ws, executor=e)
+    # print(f)
+    # r = f.result()  # type: ignore
+    # print(r)
     print(ws.d)
 
     # print(task_graph.result(ws, e))
