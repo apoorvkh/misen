@@ -8,6 +8,8 @@ from .utils.cached_property import cached_property
 from .utils.det_hash import deterministic_hashing
 
 if TYPE_CHECKING:
+    from concurrent.futures import Future
+
     from .executor import Executor
     from .workspace import Workspace
 
@@ -76,66 +78,8 @@ class Task(Generic[R]):
     def T(self) -> R:
         return self  # type: ignore
 
-    def __hash__(self):
-        """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
-        # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
-        # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
-        # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-        h = hash((self.properties.id, self.args, self.kwargs))
-        return int(h, 16)  # is this necessary?
-
-    def __getattribute__(self, name):
-        if name == "__hash__":
-            return cached_property(self, type(self).__hash__, key="__cached_hash__")
-        return super().__getattribute__(name)
-
     def __repr__(self):
         return f"Task(func={self.func.__module__}.{self.func.__qualname__}, args={self.args}, kwargs={self.kwargs}, hash={self.__hash__()})"
-
-    def is_cached(self, workspace: Workspace | None = None) -> bool:
-        # TODO: need a better name for this: this is basically "are sufficient computations pre-cached?"
-        if workspace is None:
-            return False
-        if self.properties.cacheable:
-            return self in workspace
-        return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
-
-    def _run(
-        self,
-        workspace: Workspace | None = None,
-        ensure_cached: bool = False,
-        ensure_deps_cached: bool = False,
-    ) -> R:
-        # run self.func
-        # expect all subtasks to be cached, error if not
-
-        if ensure_cached:
-            assert self.is_cached(workspace=workspace), "ensure_cached=True: expecting cached Task"
-
-        if (
-            self.properties.cacheable
-            and workspace is not None
-            and self.is_cached(workspace=workspace)
-        ):
-            return workspace[self]
-
-        args, kwargs = self._resolve_args(workspace=workspace, ensure_cached=ensure_deps_cached)
-
-        # TODO: fix typing?
-        execution_result = self.func(*args, **kwargs)  # pyright: ignore
-
-        if self.properties.cacheable and workspace is not None:
-            workspace[self] = execution_result
-
-        return execution_result
-
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None):
-        """
-        Submit task to executor to fully execute the task graph.
-        """
-        # TODO: executor cannot be None, but this is just until we have a LocalExecutor
-
-        return executor.submit(task=self, workspace=workspace)  # type: ignore
 
     def _resolve_args(
         self, workspace: Workspace | None = None, ensure_cached: bool = False
@@ -156,21 +100,79 @@ class Task(Generic[R]):
 
         return args, kwargs  # pyright: ignore
 
-    def result(self, workspace: Workspace | None = None, executor: Executor | None = None) -> R:
+    def is_cached(self, workspace: Workspace | None = None) -> bool:
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.default()
+        if self.properties.cacheable:
+            return self in workspace
+        return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
+
+    def _run(
+        self,
+        workspace: Workspace | None = None,
+        ensure_cached: bool = False,
+        ensure_deps_cached: bool = False,
+    ) -> R:
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.default()
+
+        # run self.func
+        # expect all subtasks to be cached, error if not
+
+        is_cached = self.is_cached(workspace=workspace)
+
+        if ensure_cached and self.properties.cacheable:
+            assert is_cached, "ensure_cached=True: expecting cached Task"
+
+        if self.properties.cacheable and is_cached:
+            return workspace[self]
+
+        args, kwargs = self._resolve_args(workspace=workspace, ensure_cached=ensure_deps_cached)
+
+        # TODO: fix typing? by returning tuple[P.args, P.kwargs] in _resolve_args
+        execution_result = self.func(*args, **kwargs)  # pyright: ignore
+
+        if self.properties.cacheable and workspace is not None:
+            workspace[self] = execution_result
+
+        return execution_result
+
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
+        """
+        Submit task to executor to fully execute the task graph.
+        """
+        from .executor import Executor  # avoids circular import
+
+        executor = executor or Executor.default()
+        return executor.submit(task=self, workspace=workspace)  # type: ignore
+
+    def result(self, workspace: Workspace | None = None) -> R:
         """
         Immediately get the result of cacheable tasks, or compute it if it's uncacheable.
         """
-        if self.properties.cacheable:
-            assert self.is_cached(workspace), "Cannot get result, cacheable task not cached."
-            return workspace[self]  # pyright: ignore
-
-        return self.run(workspace=workspace, executor=executor).result()
+        return self._run(workspace=workspace, ensure_cached=True, ensure_deps_cached=True)
 
     @property
     def work_dir(self, workspace: Workspace | None = None):
         # TODO: how can we pass a Task.work_dir to Task.from(func(work_dir))
         # this is cyclic. we probably need a special object e.g. misen.WORK_DIR that is ignored by the hash and is realized as Task.work_dir.
         # we could do something similar to pass a Task.logger to a task
-        if workspace is None:
-            return None
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.default()
         return workspace.get_work_dir(self)
+
+    def __hash__(self):
+        """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
+        # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
+        # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
+        # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
+        h = hash((self.properties.id, self.args, self.kwargs))
+        return int(h, 16)  # is this necessary?
+
+    def __getattribute__(self, name):
+        if name == "__hash__":
+            return cached_property(self, type(self).__hash__, key="__cached_hash__")
+        return super().__getattribute__(name)
