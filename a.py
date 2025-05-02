@@ -1,8 +1,7 @@
-import asyncio
+# import asyncio
 import time
 
-from misen import LocalExecutor, MultithreadedLocalExecutor, Task, task, Experiment
-from misen.workspace import TestWorkSpace
+from misen import Executor, Experiment, Task, Workspace, task
 
 
 @task(uuid="QuNP", cache=False)
@@ -64,7 +63,7 @@ if __name__ == "__main__":
     )
 
     class TestExperiment(Experiment):
-        def step_graph(self) -> dict[str, Task]:
+        def tasks(self) -> dict[str, Task]:
             a = Task(multiply, Task(ret, 2, 3, n="r1"), 4, n="m1")
 
             return {
@@ -78,16 +77,16 @@ if __name__ == "__main__":
             }
 
     class TestExperiment2(Experiment):
-        def step_graph(self) -> dict[str, Task]:
-            subexp = TestExperiment().step_graph()
+        def tasks(self) -> dict[str, Task]:
+            subexp = TestExperiment().tasks()
             subexp["final"] = Task(multiply, subexp["subresult"], subexp["multresult"], n="final")
 
             return subexp
 
     # print(task_graph)
 
-    e = MultithreadedLocalExecutor()
-    ws = TestWorkSpace()
+    e = Executor.from_params(params={"type": "local"})  # MultithreadedLocalExecutor()
+    ws = Workspace.from_params(params={"type": "memory"})
     # try:
     #     task_graph.result()
     # except:

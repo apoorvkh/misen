@@ -9,12 +9,12 @@ _builtin_workspaces = {
 }
 
 
-class Workspace(FromParamsABC):#, MutableMapping[Task, Any]):
+class Workspace(FromParamsABC):  # , MutableMapping[Task, Any]):
     type: str
 
     @classmethod
     def from_params(cls, params: dict) -> Workspace:
-        workspace_type = cls.from_params(params).type
+        workspace_type = cls._from_params(params).type
         workspace_type = _builtin_workspaces.get(workspace_type, workspace_type)
 
         module, class_name = workspace_type.split(":", maxsplit=1)
