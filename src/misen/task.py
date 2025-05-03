@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
+
+from msgspec import Struct
 
 from .utils.cached_property import cached_property
 from .utils.det_hash import deterministic_hashing
@@ -39,8 +39,8 @@ def task(
                 id=(uuid or func.__qualname__),
                 cacheable=cache,
                 version=version,
-                exclude=frozenset(exclude),
-                defaults=MappingProxyType(defaults),
+                exclude=exclude,
+                defaults=defaults,
             ),
         )
         return func
@@ -48,15 +48,14 @@ def task(
     return decorator
 
 
-@dataclass(frozen=True)
-class TaskProperties:
+class TaskProperties(Struct, frozen=True):
     """Dataclass for task properties. Attributes are immutable so that Task.__hash__ will be constant and cacheable."""
 
     id: str
     cacheable: bool = False
     version: int = 0
-    exclude: frozenset[str] = frozenset()
-    defaults: MappingProxyType = MappingProxyType({})
+    exclude: set[str] = set()
+    defaults: dict = {}
 
 
 class Task(Generic[R]):

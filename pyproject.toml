@@ -20,11 +20,11 @@ dependencies = [
     "dill>=0.3.6",
     "rustworkx>=0.15.0",
     "msgspec[toml]>=0.19.0",
+    "tyro",
 ]
 [dependency-groups]
-cli = ["tyro"]
 slurm = ["submitit>=1.5.0"]
-dev = ["ruff==0.11.2", "pyright[nodejs]==1.1.397", "pytest==8.3.3"]
+dev = ["ruff==0.11.2", "pyright[nodejs]==1.1.400", "pytest==8.3.3"]
 
 [tool.uv]
 managed = true
