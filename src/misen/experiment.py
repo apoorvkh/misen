@@ -39,8 +39,12 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
 
     @classmethod
     def cli(cls):
-        # build workspace, executor, experiment from CLI
-        executor = Executor()  # Executor(executor args)
-        workspace = Workspace()  # Workspace(workspace args)
-        experiment = cls()  # cls(experiment args)
+        executor, workspace, experiment = tyro.cli(
+            tuple[
+                Annotated[Executor, tyro.conf.arg(name="executor")],
+                Annotated[Workspace, tyro.conf.arg(name="workspace")],
+                Annotated[cls, tyro.conf.OmitArgPrefixes, tyro.conf.arg(name="experiment")],
+            ]
+        )
+
         experiment.run(workspace=workspace, executor=executor)
