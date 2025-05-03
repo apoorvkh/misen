@@ -23,6 +23,12 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         super().__init_subclass__(**kwargs)
         setattr(cls, "tasks", cache(cls.tasks))
 
+    def __getitem__(self, key: str) -> Task:
+        return self.tasks()[key]
+
+    def result(self, key: str, workspace: Workspace | None = None) -> object:
+        return self.tasks()[key].result(workspace=workspace)
+
     def run(self, workspace: Workspace | None, executor: Executor | None) -> None:
         Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
 
