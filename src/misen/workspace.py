@@ -9,7 +9,7 @@ _builtin_workspaces = {
 }
 
 
-class Workspace(FromParamsABC):#, MutableMapping[Task, Any]):
+class Workspace(FromParamsABC):  # , MutableMapping[Task, Any]):
     type: str
 
     @classmethod

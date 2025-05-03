@@ -86,13 +86,11 @@ dependencies = [
     { name = "msgspec", extra = ["toml"] },
     { name = "ormsgpack" },
     { name = "rustworkx" },
+    { name = "tyro" },
     { name = "xxhash" },
 ]
 
 [package.dev-dependencies]
-cli = [
-    { name = "tyro" },
-]
 dev = [
     { name = "pyright", extra = ["nodejs"] },
     { name = "pytest" },
@@ -108,13 +106,13 @@ requires-dist = [
     { name = "msgspec", extras = ["toml"], specifier = ">=0.19.0" },
     { name = "ormsgpack", specifier = ">=1.5.0" },
     { name = "rustworkx", specifier = ">=0.15.0" },
+    { name = "tyro" },
     { name = "xxhash", specifier = ">=3.0.0" },
 ]
 
 [package.metadata.requires-dev]
-cli = [{ name = "tyro" }]
 dev = [
-    { name = "pyright", extras = ["nodejs"], specifier = "==1.1.397" },
+    { name = "pyright", extras = ["nodejs"], specifier = "==1.1.400" },
     { name = "pytest", specifier = "==8.3.3" },
     { name = "ruff", specifier = "==0.11.2" },
 ]
@@ -306,15 +304,15 @@ wheels = [
 
 [[package]]
 name = "pyright"
-version = "1.1.397"
+version = "1.1.400"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "nodeenv" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/92/23/cefa10c9cb198e0858ed0b9233371d62bca880337f628e58f50dfdfb12f0/pyright-1.1.397.tar.gz", hash = "sha256:07530fd65a449e4b0b28dceef14be0d8e0995a7a5b1bb2f3f897c3e548451ce3", size = 3818998 }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/cb/c306618a02d0ee8aed5fb8d0fe0ecfed0dbf075f71468f03a30b5f4e1fe0/pyright-1.1.400.tar.gz", hash = "sha256:b8a3ba40481aa47ba08ffb3228e821d22f7d391f83609211335858bf05686bdb", size = 3846546 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/b5/98ec41e1e0ad5576ecd42c90ec363560f7b389a441722ea3c7207682dec7/pyright-1.1.397-py3-none-any.whl", hash = "sha256:2e93fba776e714a82b085d68f8345b01f91ba43e1ab9d513e79b70fc85906257", size = 5693631 },
+    { url = "https://files.pythonhosted.org/packages/c8/a5/5d285e4932cf149c90e3c425610c5efaea005475d5f96f1bfdb452956c62/pyright-1.1.400-py3-none-any.whl", hash = "sha256:c80d04f98b5a4358ad3a35e241dbf2a408eee33a40779df365644f8054d2517e", size = 5563460 },
 ]
 
 [package.optional-dependencies]
