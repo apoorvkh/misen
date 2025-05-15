@@ -1,35 +1,45 @@
 from __future__ import annotations
 
 from importlib import import_module
+from typing import Literal
 
-from misen.utils.from_params import FromParamsABC
+import msgspec
+from msgspec import Struct
 
-_builtin_workspaces = {
-    "memory": "misen.workspaces.memory:MemoryWorkspace",
-}
+from .settings import Settings
 
 
-class Workspace(FromParamsABC):  # , MutableMapping[Task, Any]):
-    type: str
+class Workspace(Struct, kw_only=True):
+    type: str | Literal["memory"] | None = None
 
-    @classmethod
-    def from_params(cls, params: dict) -> Workspace:
-        workspace_type = cls.from_params(params).type
-        workspace_type = _builtin_workspaces.get(workspace_type, workspace_type)
+    def resolve_type(self) -> type[Workspace] | None:
+        if self.type is None:
+            return None
 
-        module, class_name = workspace_type.split(":", maxsplit=1)
-        workspace_class = getattr(import_module(module), class_name)
-        assert isinstance(workspace_class, type) and issubclass(workspace_class, Workspace)
+        match self.type:
+            case "memory":
+                from .workspaces.memory import MemoryWorkspace
 
-        return workspace_class.from_params(params)
+                return MemoryWorkspace
 
-    @classmethod
-    def default_params(cls) -> dict:
-        return {"type": "memory"}
+        module, class_name = self.type.split(":", maxsplit=1)
+        return getattr(import_module(module), class_name)
 
-    @classmethod
-    def toml_key(cls) -> str:
-        return "workspace"
+    @staticmethod
+    def from_settings(settings: Settings = Settings()) -> Workspace:
+        if "workspace" in settings.toml_data:
+            workspace = msgspec.convert(settings.toml_data["workspace"], type=Workspace)
+            workspace_cls: type[Workspace] | None = workspace.resolve_type()
+            if workspace_cls is not None:
+                return msgspec.convert(
+                    settings.toml_data["workspace"],
+                    type=workspace_cls,
+                )
+
+        # fallback to default
+        from .workspaces.memory import MemoryWorkspace
+
+        return MemoryWorkspace()
 
     def __len__(self):
         raise NotImplementedError

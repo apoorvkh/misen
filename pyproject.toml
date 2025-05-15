@@ -19,8 +19,9 @@ dependencies = [
     "ormsgpack>=1.5.0",
     "dill>=0.3.6",
     "rustworkx>=0.15.0",
-    "msgspec[toml]>=0.19.0",
-    "tyro",
+    "msgspec>=0.19.0",
+    "tomli>=1.1.0 ; python_version < '3.11'",
+    "tyro>=0.9.20",
 ]
 [dependency-groups]
 slurm = ["submitit>=1.5.0"]
