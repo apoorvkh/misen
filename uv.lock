@@ -83,9 +83,10 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "dill" },
-    { name = "msgspec", extra = ["toml"] },
+    { name = "msgspec" },
     { name = "ormsgpack" },
     { name = "rustworkx" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "tyro" },
     { name = "xxhash" },
 ]
@@ -103,10 +104,11 @@ slurm = [
 [package.metadata]
 requires-dist = [
     { name = "dill", specifier = ">=0.3.6" },
-    { name = "msgspec", extras = ["toml"], specifier = ">=0.19.0" },
+    { name = "msgspec", specifier = ">=0.19.0" },
     { name = "ormsgpack", specifier = ">=1.5.0" },
     { name = "rustworkx", specifier = ">=0.15.0" },
-    { name = "tyro" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1.0" },
+    { name = "tyro", specifier = ">=0.9.20" },
     { name = "xxhash", specifier = ">=3.0.0" },
 ]
 
@@ -152,12 +154,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/53/2f/2b1c2b056894fbaa975f68f81e3014bb447516a8b010f1bed3fb0e016ed7/msgspec-0.19.0-cp313-cp313-musllinux_1_2_aarch64.whl", hash = "sha256:ac7f7c377c122b649f7545810c6cd1b47586e3aa3059126ce3516ac7ccc6a6a9", size = 213996 },
     { url = "https://files.pythonhosted.org/packages/aa/5a/4cd408d90d1417e8d2ce6a22b98a6853c1b4d7cb7669153e4424d60087f6/msgspec-0.19.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:a5bc1472223a643f5ffb5bf46ccdede7f9795078194f14edd69e3aab7020d327", size = 219087 },
     { url = "https://files.pythonhosted.org/packages/23/d8/f15b40611c2d5753d1abb0ca0da0c75348daf1252220e5dda2867bd81062/msgspec-0.19.0-cp313-cp313-win_amd64.whl", hash = "sha256:317050bc0f7739cb30d257ff09152ca309bf5a369854bbf1e57dffc310c1f20f", size = 187432 },
-]
-
-[package.optional-dependencies]
-toml = [
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "tomli-w" },
 ]
 
 [[package]]
@@ -430,15 +426,6 @@ wheels = [
 ]
 
 [[package]]
-name = "tomli-w"
-version = "1.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/19/75/241269d1da26b624c0d5e110e8149093c759b7a286138f4efd61a60e75fe/tomli_w-1.2.0.tar.gz", hash = "sha256:2dd14fac5a47c27be9cd4c976af5a12d87fb1f0b4512f81d69cce3b35ae25021", size = 7184 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c7/18/c86eb8e0202e32dd3df50d43d7ff9854f8e0603945ff398974c1d91ac1ef/tomli_w-1.2.0-py3-none-any.whl", hash = "sha256:188306098d013b691fcadc011abd66727d3c414c571bb01b1a174ba8c983cf90", size = 6675 },
-]
-
-[[package]]
 name = "typeguard"
 version = "4.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -461,7 +448,7 @@ wheels = [
 
 [[package]]
 name = "tyro"
-version = "0.9.19"
+version = "0.9.20"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -471,9 +458,9 @@ dependencies = [
     { name = "typeguard" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/73/80/a36ff11c133d74dcad97916c82bf8e2dcf224af004cfa1ca3a02f70a23d7/tyro-0.9.19.tar.gz", hash = "sha256:967d5f8640a5e636233d4be329e47f71837d645528eacdcf3d47fa229e3f8664", size = 270247 }
+sdist = { url = "https://files.pythonhosted.org/packages/67/84/6137c6b0bc0292be47a891d2daf8e955f2172241ce5efb516e5d6e8fae7b/tyro-0.9.20.tar.gz", hash = "sha256:1295d706e6c411bf41eb2acb995925f9a7fa2b6db81f6c48d66c4362cd3eb384", size = 283558 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/a3/f723574e6932fd35c7d4346dec8b50038fb66af3152e8960e710bdcd457d/tyro-0.9.19-py3-none-any.whl", hash = "sha256:07c91b720319f21a6ae65ef7c8c462b1778b82a6b810696ec9779bf80112cd19", size = 124344 },
+    { url = "https://files.pythonhosted.org/packages/0f/d3/c73ba65f572fd6bafc319350bee76a306414595a3290ed3a8aec7d6c8cc3/tyro-0.9.20-py3-none-any.whl", hash = "sha256:dfe95f1146f29877d384c537b36b1a3a40d67f0a4b5be9259090615d39ae8328", size = 125276 },
 ]
 
 [[package]]

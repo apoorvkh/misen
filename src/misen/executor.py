@@ -3,46 +3,54 @@ from __future__ import annotations
 import copy
 from abc import abstractmethod
 from importlib import import_module
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
+import msgspec
 import rustworkx
+from msgspec import Struct
 from rustworkx import PyDAG, topological_sort
 from rustworkx.visit import DFSVisitor, PruneSearch
 
-from misen.utils.from_params import FromParamsABC, TomlType
-
+from .settings import Settings
 from .task import Task
-from .workspace import Workspace
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
-_builtin_executors = {
-    "local": "misen.executors.local:LocalExecutor",
-}
+    from .workspace import Workspace
 
 
-class Executor(FromParamsABC, kw_only=True):
-    type: str
+class Executor(Struct, kw_only=True):
+    type: str | Literal["local"] | None = None
 
-    @classmethod
-    def from_params(cls, params: dict[str, TomlType]) -> Executor:
-        executor_type = cls._from_params(params).type
-        executor_type = _builtin_executors.get(executor_type, executor_type)
+    def resolve_type(self) -> type[Executor] | None:
+        if self.type is None:
+            return None
 
-        module, class_name = executor_type.split(":", maxsplit=1)
-        executor_class = getattr(import_module(module), class_name)
-        assert isinstance(executor_class, type) and issubclass(executor_class, Executor)
+        match self.type:
+            case "local":
+                from .executors.local import LocalExecutor
 
-        return executor_class._from_params(params)
+                return LocalExecutor
 
-    @classmethod
-    def default_params(cls) -> dict[str, TomlType]:
-        return {"type": "local"}
+        module, class_name = self.type.split(":", maxsplit=1)
+        return getattr(import_module(module), class_name)
 
-    @classmethod
-    def toml_key(cls) -> str:
-        return "executor"
+    @staticmethod
+    def from_settings(settings: Settings = Settings()) -> Executor:
+        if "executor" in settings.toml_data:
+            executor = msgspec.convert(settings.toml_data["executor"], type=Executor)
+            executor_cls: type[Executor] | None = executor.resolve_type()
+            if executor_cls is not None:
+                return msgspec.convert(
+                    settings.toml_data["executor"],
+                    type=executor_cls,
+                )
+
+        # fallback to default
+        from .executors.local import LocalExecutor
+
+        return LocalExecutor(i=99)
 
     def computable_groups(self, task: Task, workspace: Workspace):
         return _computable_groups(task, workspace)

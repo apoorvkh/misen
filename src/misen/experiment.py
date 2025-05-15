@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import sys
 from abc import abstractmethod
-from ast import literal_eval
+from dataclasses import dataclass
 from functools import cache
-from typing import Annotated, Generic, Literal, Mapping, TypeVar
+from typing import Generic, Literal, Mapping, TypeVar
 
 import tyro
 from msgspec import Struct
-from typing_extensions import Self
 
 from .executor import Executor
+from .settings import Settings  # noqa: TC001
 from .task import Task
 from .workspace import Workspace
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
+
+ExecutorT = TypeVar("ExecutorT", bound=Executor)
+WorkspaceT = TypeVar("WorkspaceT", bound=Workspace)
+ExperimentT = TypeVar("ExperimentT", bound="Experiment")
 
 
 class Experiment(Generic[TasksT], Struct, frozen=True):
@@ -35,27 +40,34 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
 
     @classmethod
-    def _cli_entrypoint(
-        cls,
-        executor_params: Annotated[str | None, tyro.conf.arg(name="executor", default=None)],
-        workspace_params: Annotated[str | None, tyro.conf.arg(name="workspace", default=None)],
-        experiment: tyro.conf.OmitArgPrefixes[Self],
-        command: tyro.conf.Positional[Literal["run", "count"]] = "run",
-    ):
-        if executor_params is None:
-            executor = Executor.default()
-        else:
-            executor = Executor.from_params(literal_eval(executor_params))
-
-        if workspace_params is None:
-            workspace = Workspace.default()
-        else:
-            workspace = Workspace.from_params(literal_eval(workspace_params))
-
-        match command:
-            case "run":
-                experiment.run(workspace=workspace, executor=executor)
-
-    @classmethod
     def cli(cls):
-        tyro.cli(cls._cli_entrypoint)
+        @dataclass
+        class Args(Generic[ExecutorT, WorkspaceT, ExperimentT]):
+            settings: Settings
+            executor: ExecutorT
+            workspace: WorkspaceT
+            experiment: tyro.conf.OmitArgPrefixes[ExperimentT]
+            command: Literal["run", "count"] = "run"
+
+        args, _ = tyro.cli(
+            Args[Executor, Workspace, cls],
+            args=[arg for arg in sys.argv if arg != "--help"],
+            return_unknown_args=True,
+        )
+        args = tyro.cli(
+            Args[
+                args.executor.resolve_type() or Executor,
+                args.workspace.resolve_type() or Workspace,
+                cls,
+            ]
+        )
+
+        if type(args.executor) is Executor:
+            args.executor = Executor.from_settings(settings=args.settings)
+
+        if type(args.workspace) is Workspace:
+            args.workspace = Workspace.from_settings(settings=args.settings)
+
+        match args.command:
+            case "run":
+                args.experiment.run(workspace=args.workspace, executor=args.executor)

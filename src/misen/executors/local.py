@@ -1,14 +1,20 @@
+from __future__ import annotations
+
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rustworkx import topological_sort
 
 from ..executor import Executor
-from ..task import Task
-from ..workspace import Workspace
+
+if TYPE_CHECKING:
+    from ..task import Task
+    from ..workspace import Workspace
 
 
-class LocalExecutor(Executor):
+class LocalExecutor(Executor, kw_only=True):
+    i: int
+
     def submit(self, task: Task, workspace: Workspace):
         return task._run(workspace=workspace, ensure_deps_cached=False)
 
