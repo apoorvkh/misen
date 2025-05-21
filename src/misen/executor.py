@@ -23,7 +23,25 @@ if TYPE_CHECKING:
 class Executor(Struct, kw_only=True):
     type: str | Literal["local"] | None = None
 
-    def resolve_type(self) -> type[Executor] | None:
+    @staticmethod
+    def load(settings: Settings | None = None) -> Executor:
+        settings = settings or Settings()
+
+        if "executor" in settings.toml_data:
+            executor = msgspec.convert(settings.toml_data["executor"], type=Executor)
+            executor_cls: type[Executor] | None = executor._resolve_type()
+            if executor_cls is not None:
+                return msgspec.convert(
+                    settings.toml_data["executor"],
+                    type=executor_cls,
+                )
+
+        # fallback to default
+        from .executors.local import LocalExecutor
+
+        return LocalExecutor(i=99)
+
+    def _resolve_type(self) -> type[Executor] | None:
         if self.type is None:
             return None
 
@@ -35,22 +53,6 @@ class Executor(Struct, kw_only=True):
 
         module, class_name = self.type.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
-
-    @staticmethod
-    def load(settings: Settings = Settings()) -> Executor:
-        if "executor" in settings.toml_data:
-            executor = msgspec.convert(settings.toml_data["executor"], type=Executor)
-            executor_cls: type[Executor] | None = executor.resolve_type()
-            if executor_cls is not None:
-                return msgspec.convert(
-                    settings.toml_data["executor"],
-                    type=executor_cls,
-                )
-
-        # fallback to default
-        from .executors.local import LocalExecutor
-
-        return LocalExecutor(i=99)
 
     def computable_groups(self, task: Task, workspace: Workspace):
         return _computable_groups(task, workspace)

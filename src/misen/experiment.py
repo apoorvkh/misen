@@ -56,8 +56,8 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         )
         args = tyro.cli(
             Args[
-                args.executor.resolve_type() or Executor,
-                args.workspace.resolve_type() or Workspace,
+                args.executor._resolve_type() or Executor,
+                args.workspace._resolve_type() or Workspace,
                 cls,
             ]
         )

@@ -1,5 +1,6 @@
 import os
 import sys
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -11,10 +12,10 @@ else:
     import tomli as tomllib
 
 
-class Settings(Struct):
+class Settings(Struct, dict=True):
     file: Path = Path(os.environ.get("MISEN_SETTINGS_FILE") or (Path.cwd() / "misen_settings.toml"))
 
-    @property
+    @cached_property
     def toml_data(self) -> dict[str, Any]:
         try:
             return tomllib.loads(self.file.read_bytes().decode())
