@@ -26,7 +26,7 @@ class Workspace(Struct, kw_only=True):
         return getattr(import_module(module), class_name)
 
     @staticmethod
-    def from_settings(settings: Settings = Settings()) -> Workspace:
+    def load(settings: Settings = Settings()) -> Workspace:
         if "workspace" in settings.toml_data:
             workspace = msgspec.convert(settings.toml_data["workspace"], type=Workspace)
             workspace_cls: type[Workspace] | None = workspace.resolve_type()

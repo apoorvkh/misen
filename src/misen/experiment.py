@@ -63,10 +63,10 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         )
 
         if type(args.executor) is Executor:
-            args.executor = Executor.from_settings(settings=args.settings)
+            args.executor = Executor.load(settings=args.settings)
 
         if type(args.workspace) is Workspace:
-            args.workspace = Workspace.from_settings(settings=args.settings)
+            args.workspace = Workspace.load(settings=args.settings)
 
         match args.command:
             case "run":
