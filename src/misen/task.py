@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
 
 from msgspec import Struct
@@ -80,8 +81,13 @@ class Task(Generic[R]):
     def __repr__(self):
         return f"Task(func={self.func.__module__}.{self.func.__qualname__}, args={self.args}, kwargs={self.kwargs}, hash={self.__hash__()})"
 
+    def dependencies(self) -> list[Task]:
+        return [arg for arg in chain(self.args, self.kwargs.values()) if isinstance(arg, Task)]
+
     def _resolve_args(
-        self, workspace: Workspace | None = None, ensure_cached: bool = False
+        self,
+        workspace: Workspace | None = None,
+        ensure_cached: bool = False,
     ) -> tuple:
         args = (
             v._run(workspace=workspace, ensure_cached=ensure_cached) if isinstance(v, Task) else v
@@ -99,13 +105,21 @@ class Task(Generic[R]):
 
         return args, kwargs  # pyright: ignore
 
+
+    # TODO: this is the actual "is_cached" function. should rename the other one
+    def is_cached_direct(self, workspace: Workspace | None = None) -> bool:
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.load()
+        return self.properties.cacheable and self in workspace
+
     def is_cached(self, workspace: Workspace | None = None) -> bool:
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
         if self.properties.cacheable:
             return self in workspace
-        return all((v.is_cached(workspace) for v in self.kwargs.values() if isinstance(v, Task)))
+        return all(t is t.is_cached(workspace) for t in self.dependencies())
 
     def _run(
         self,

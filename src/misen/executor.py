@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-import copy
 from abc import abstractmethod
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
-import rustworkx
 from msgspec import Struct
-from rustworkx import PyDAG, topological_sort
-from rustworkx.visit import DFSVisitor, PruneSearch
 
 from .settings import Settings
-from .task import Task
+from .workspace import Workspace
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
-    from .workspace import Workspace
+    from .task import Task
 
 
 class Executor(Struct, kw_only=True):
@@ -54,7 +50,8 @@ class Executor(Struct, kw_only=True):
         module, class_name = self.type.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
 
-    def computable_groups(self, task: Task, workspace: Workspace):
+    def computable_groups(self, task: Task, workspace: Workspace | None = None):
+        workspace = workspace or Workspace.load()
         return _computable_groups(task, workspace)
 
     @abstractmethod
@@ -62,105 +59,67 @@ class Executor(Struct, kw_only=True):
         raise NotImplementedError
 
 
-def _computable_groups(task: Task, workspace: Workspace):
+def _computable_groups(root: Task, workspace: Workspace) -> dict[Task, list[Task]]:
     """
     This function should partition (s.t. `task` and every cache=True Task is the root of a partition).
-    Then we should return the graph of partitions. Each partition should represented as a topologically-sorted list of its Tasks.
+    Then we should return the graph of partitions (i.e. a contracted graph of Tasks).
     """
-    # TODO: implement this here
+    import rustworkx
 
-    # this section builds `dag`: just reformating the task graph as a rustworkx PyDAG
-    dag = PyDAG()
+    hash_to_task: dict[int, Task] = {}
+    selected_nodes: set[int] = set()  # root and cacheable tasks
+    dag = rustworkx.PyDiGraph()
 
-    root = task
-    root_node = dag.add_node(root)
+    ### Build DAG via DFS
 
-    # more or less a 'seen' dictionary, for making sure that a single node can connect to multiple 'parents'
-    d = {}
+    hash_to_node: dict[int, int] = {}
+    stack: list[Task] = [root]
+    task_is_cached: dict[int, bool] = {}
 
-    def rec(cur: Task | Any, parent: int, kwarg: str):
-        # at the moment, I haven't turned constants into their own kind of Task
-        if isinstance(cur, Task):
-            # check if this node seen alr
-            if cur.__hash__() in d:
-                n = d[cur.__hash__()]
-            else:
-                # add it to the graph
-                n = dag.add_node(cur)
-                if cur.properties.cacheable:
-                    d[cur.__hash__()] = n
-                # recurse on children
-                for i, child in enumerate(cur.args):
-                    rec(child, n, f"_args_{i}")
-                for k, child in cur.kwargs.items():
-                    rec(child, n, k)
-            # edges contain the kwarg names...
-            dag.add_edge(n, parent, kwarg)
-        else:
-            # this is a leaf node (indegree 0)
-            n = dag.add_node(cur)
-            dag.add_edge(n, parent, kwarg)
+    root_hash = root.__hash__()
+    root_node = dag.add_node(root_hash)
+    hash_to_node[root_hash] = root_node
+    selected_nodes.add(root_node)
 
-    # Step 1: Construct DAG
-    for i, child in enumerate(task.args):
-        rec(child, root_node, f"_args_{i}")
-    for k, child in task.kwargs.items():
-        rec(child, root_node, k)
+    while stack:
+        task: Task = stack.pop()
+        task_hash: int = task.__hash__()
 
-    # Step 2: Copy DAG and snip outgoing edges from cacheable nodes,
-    #  compute connected components
+        # check if already visited; else visit
+        if task_hash in hash_to_task:
+            continue
+        hash_to_task[task_hash] = task
 
-    # graphviz_draw(dag).save("dag.png")
+        # from prior iteration
+        node = hash_to_node[task_hash]
 
-    # first, make note of the index of each node within the each node's data
-    for node in dag.node_indices():
-        dag[node] = (dag[node], node)
+        # select node if cacheable
+        if task.properties.cacheable:
+            selected_nodes.add(node)
 
-    dag_c = copy.copy(dag)
-    for src, dest in dag_c.edge_list():
-        t: Task | Any = dag_c.get_node_data(src)[0]
-        if isinstance(t, Task) and t.properties.cacheable:
-            dag_c.remove_edge(src, dest)
-    # graphviz_draw(dag, edge_attr_fn=label_dag_edge).save("dag_.png")
-    # graphviz_draw(dag_c, edge_attr_fn=label_dag_edge).save("dag__.png")
-    conn_comps = rustworkx.connected_components(dag_c.to_undirected())  # type: ignore
-    # print(conn_comps)
-    # Step 3: Contract connected components to their topological root node
+        # traverse children
+        for dep in task.dependencies():
+            dep: Task
+            dep_hash: int = dep.__hash__()
 
-    new_root = 0
-    i = 0
-    for conn_comp in conn_comps:
-        conn_comp_lst = list(reversed(list(conn_comp)))
-        sub_dag = dag.subgraph(conn_comp_lst)
-        sort = topological_sort(sub_dag)
-        conn_comp_root = sub_dag[sort[-1]][1]
-        new_node = dag.contract_nodes(conn_comp_lst, dag[conn_comp_root][0])
-        if conn_comp_root == 0:
-            new_root = new_node
-        # graphviz_draw(dag, edge_attr_fn=label_dag_edge).save(f"dag__{i}.png")
-        i += 1
+            # skip cached tasks
+            if dep_hash not in task_is_cached:
+                task_is_cached[dep_hash] = dep.is_cached_direct(workspace=workspace)
+            if task_is_cached[dep_hash]:
+                continue
 
-    # Step 4: Traverse and delete nodes that are already cached
-    # and get the connected component containing the root node
-    class CachedVisitor(DFSVisitor):
-        def __init__(self):
-            self.to_remove = []
+            # add dependent to graph if not already present
+            if dep_hash not in hash_to_node:
+                hash_to_node[dep_hash] = dag.add_node(dep_hash)
+                stack.append(dep)
+            dep_node = hash_to_node[dep_hash]
 
-        def tree_edge(self, edge):  # type: ignore
-            t: Task | Any = dag[edge[0]]
-            if isinstance(t, Task) and t.is_cached(workspace=workspace):
-                self.to_remove.append(edge[0])
-                raise PruneSearch()
+            # add edge from task to dep_task
+            dag.add_edge(node, dep_node, None)  # args: parent, child, edge_data
 
-    # find nodes to remove...
-    vis = CachedVisitor()
-    rustworkx.dfs_search(dag, [new_root], vis)
+    ### Retain only selected tasks (and the induced graph)
 
-    # remove nodes
-    for node in vis.to_remove:
-        dag.remove_node(node)
+    for node in set(dag.node_indices()) - selected_nodes:
+        dag.remove_node_retain_edges(node)
 
-    computable_subdag = dag.subgraph(list(rustworkx.ancestors(dag, new_root)) + [new_root])
-    # graphviz_draw(dag, edge_attr_fn=label_dag_edge).save("dag_final.png")
-    # print(new_root, dag.node_indices(), list(rustworkx.ancestors(dag, new_root)))
-    return computable_subdag
+    return dag
