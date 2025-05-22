@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
 
 from msgspec import Struct
 
-from .utils.cached_property import cached_property
 from .utils.det_hash import deterministic_hashing
 
 if TYPE_CHECKING:
@@ -179,13 +178,11 @@ class Task(Generic[R]):
 
     def __hash__(self):
         """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
-        # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
-        # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
-        # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-        h = hash((self.properties.id, self.args, self.kwargs))
-        return int(h, 16)  # is this necessary?
-
-    def __getattribute__(self, name):
-        if name == "__hash__":
-            return cached_property(self, type(self).__hash__, key="__cached_hash__")
-        return super().__getattribute__(name)
+        if not hasattr(self, "__cached_hash__"):
+            # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
+            # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
+            # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
+            h = hash((self.properties.id, self.args, self.kwargs))
+            h = int(h, 16)  # is this necessary?
+            self.__cached_hash__ = h
+        return self.__cached_hash__
