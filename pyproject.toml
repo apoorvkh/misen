@@ -16,7 +16,6 @@ license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "xxhash>=3.0.0",
-    "ormsgpack>=1.5.0",
     "dill>=0.3.6",
     "rustworkx>=0.15.0",
     "msgspec>=0.19.0",

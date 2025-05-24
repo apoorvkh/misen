@@ -76,7 +76,7 @@ def _distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Ta
 
     @cache
     def _is_cached(task: Task) -> bool:
-        return task.is_cached_direct(workspace=workspace)
+        return task.is_cached(workspace=workspace)
 
     task_node: dict[Task, int] = {root: dag.add_node(root)}
     stack: list[Task] = [root]

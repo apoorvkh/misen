@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
 
 from msgspec import Struct
 
-from .utils.det_hash import deterministic_hashing
+from .utils.det_hash import det_hash
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -104,21 +104,19 @@ class Task(Generic[R]):
 
         return args, kwargs  # pyright: ignore
 
-
-    # TODO: this is the actual "is_cached" function. should rename the other one
-    def is_cached_direct(self, workspace: Workspace | None = None) -> bool:
+    def is_cached(self, workspace: Workspace | None = None) -> bool:
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
         return self.properties.cacheable and self in workspace
 
-    def is_cached(self, workspace: Workspace | None = None) -> bool:
+    def is_subgraph_cached(self, workspace: Workspace | None = None) -> bool:
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
         if self.properties.cacheable:
             return self in workspace
-        return all(t is t.is_cached(workspace) for t in self.dependencies())
+        return all(t is t.is_subgraph_cached(workspace) for t in self.dependencies())
 
     def _run(
         self,
@@ -133,7 +131,7 @@ class Task(Generic[R]):
         # run self.func
         # expect all subtasks to be cached, error if not
 
-        is_cached = self.is_cached(workspace=workspace)
+        is_cached = self.is_subgraph_cached(workspace=workspace)
 
         if ensure_cached and self.properties.cacheable:
             assert is_cached, "ensure_cached=True: expecting cached Task"
@@ -179,9 +177,8 @@ class Task(Generic[R]):
     def __hash__(self):
         """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
         if not hasattr(self, "__cached_hash__"):
-            with deterministic_hashing():
-                # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
-                # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
-                # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-                self.__cached_hash__ = hash((self.properties.id, self.args, self.kwargs))
+            # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
+            # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
+            # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
+            self.__cached_hash__ = det_hash((self.properties.id, self.args, self.kwargs))
         return self.__cached_hash__
