@@ -78,7 +78,7 @@ except ImportError:
         return False
 
 
-def det_hash(obj, seed: int = 0) -> str:
+def det_hash(obj, seed: int = 0) -> int:
     obj_type = class_identifier(obj)
     obj_data = None
     ormsgpack_options = 0
@@ -128,7 +128,7 @@ def det_hash(obj, seed: int = 0) -> str:
             raise TypeError(f"Unhashable type: {obj_type}")
 
     serialized_data = ormsgpack.packb((obj_type, obj_data), option=ormsgpack_options)
-    return xxh3_64_hexdigest(serialized_data, seed=seed)
+    return int(xxh3_64_hexdigest(serialized_data, seed=seed), base=16)
 
 
 class deterministic_hashing:

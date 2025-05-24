@@ -60,6 +60,7 @@ class TaskProperties(Struct, frozen=True):
 
 class Task(Generic[R]):
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
+        # TODO: can we make func, args, kwargs immutable?
         self.func = func
         self.args = args
         self.kwargs = kwargs
@@ -70,8 +71,7 @@ class Task(Generic[R]):
         )
 
         # compute and cache the hash
-        with deterministic_hashing():
-            self.__hash__()
+        self.__hash__()
 
     @property
     def T(self) -> R:
@@ -179,10 +179,9 @@ class Task(Generic[R]):
     def __hash__(self):
         """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
         if not hasattr(self, "__cached_hash__"):
-            # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
-            # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
-            # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-            h = hash((self.properties.id, self.args, self.kwargs))
-            h = int(h, 16)  # is this necessary?
-            self.__cached_hash__ = h
+            with deterministic_hashing():
+                # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
+                # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
+                # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
+                self.__cached_hash__ = hash((self.properties.id, self.args, self.kwargs))
         return self.__cached_hash__
