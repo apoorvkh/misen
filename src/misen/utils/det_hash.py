@@ -23,6 +23,6 @@ def serialize(obj: Any) -> bytes:
     return dill.dumps((obj_type, obj))
 
 
-def det_hash(obj, seed: int = 0) -> int:
+def det_hash(obj: Any, seed: int = 0) -> int:
     serialized_data = serialize(obj)
     return xxh3_64_intdigest(serialized_data, seed=seed)

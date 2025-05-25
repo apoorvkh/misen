@@ -104,86 +104,54 @@ class Task(Generic[R]):
     def dependencies(self) -> list[Task]:
         return [arg for arg in self.bound_arguments.values() if isinstance(arg, Task)]
 
-    def _resolve_args(
-        self,
-        workspace: Workspace | None = None,
-        ensure_cached: bool = False,
-    ) -> tuple:
-        args = (
-            v._run(workspace=workspace, ensure_cached=ensure_cached) if isinstance(v, Task) else v
-            for v in self.args
-        )
-
-        kwargs = {
-            k: (
-                v._run(workspace=workspace, ensure_cached=ensure_cached)
-                if isinstance(v, Task)
-                else v
-            )
-            for k, v in self.kwargs.items()
-        }
-
-        return args, kwargs  # pyright: ignore
-
     def is_cached(self, workspace: Workspace | None = None) -> bool:
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
         return self.properties.cacheable and self in workspace
 
-    def is_subgraph_cached(self, workspace: Workspace | None = None) -> bool:
-        from .workspace import Workspace  # avoids circular import
-
-        workspace = workspace or Workspace.load()
+    def deps_cached(self, workspace: Workspace) -> bool:
         if self.properties.cacheable:
             return self in workspace
-        return all(t is t.is_subgraph_cached(workspace) for t in self.dependencies())
+        return all((not t.properties.cacheable or t in workspace) for t in self.dependencies())
 
-    def _run(
-        self,
-        workspace: Workspace | None = None,
-        ensure_cached: bool = False,
-        ensure_deps_cached: bool = False,
-    ) -> R:
-        from .workspace import Workspace  # avoids circular import
-
-        workspace = workspace or Workspace.load()
-
-        # run self.func
-        # expect all subtasks to be cached, error if not
-
-        is_cached = self.is_subgraph_cached(workspace=workspace)
-
-        if ensure_cached and self.properties.cacheable:
-            assert is_cached, "ensure_cached=True: expecting cached Task"
-
-        if self.properties.cacheable and is_cached:
+    def _run(self, workspace: Workspace) -> R:
+        if self.is_cached(workspace=workspace):
             return workspace[self]
 
-        args, kwargs = self._resolve_args(workspace=workspace, ensure_cached=ensure_deps_cached)
+        result = self.func(
+            *(v._run(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
+            **{
+                k: v._run(workspace=workspace) if isinstance(v, Task) else v
+                for k, v in self.kwargs.items()
+            },
+        )  # type: ignore
 
-        # TODO: fix typing? by returning tuple[P.args, P.kwargs] in _resolve_args
-        execution_result = self.func(*args, **kwargs)  # pyright: ignore
+        if self.properties.cacheable:
+            workspace[self] = result
 
-        if self.properties.cacheable and workspace is not None:
-            workspace[self] = execution_result
-
-        return execution_result
+        return result
 
     def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
         """
         Submit task to executor to fully execute the task graph.
         """
         from .executor import Executor  # avoids circular import
+        from .workspace import Workspace  # avoids circular import
 
         executor = executor or Executor.load()
-        return executor.submit(task=self, workspace=workspace)  # type: ignore
+        workspace = workspace or Workspace.load()
+        return executor.submit(task=self, workspace=workspace)
 
     def result(self, workspace: Workspace | None = None) -> R:
         """
         Immediately get the result of cacheable tasks, or compute it if it's uncacheable.
         """
-        return self._run(workspace=workspace, ensure_cached=True, ensure_deps_cached=True)
+        from .workspace import Workspace  # avoids circular import
+
+        workspace = workspace or Workspace.load()
+        assert self.deps_cached(workspace=workspace)
+        return self._run(workspace=workspace)
 
     @property
     def work_dir(self, workspace: Workspace | None = None):
