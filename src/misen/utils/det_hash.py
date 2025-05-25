@@ -18,7 +18,11 @@ def class_identifier(cls_or_obj: type | Any) -> str:
     return f"{module_name}.{cls.__qualname__}"
 
 
-def det_hash(obj, seed: int = 0) -> int:
+def serialize(obj: Any) -> bytes:
     obj_type = class_identifier(obj)
-    serialized_data = dill.dumps((obj_type, obj))
+    return dill.dumps((obj_type, obj))
+
+
+def det_hash(obj, seed: int = 0) -> int:
+    serialized_data = serialize(obj)
     return xxh3_64_intdigest(serialized_data, seed=seed)
