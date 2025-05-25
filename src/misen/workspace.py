@@ -6,7 +6,7 @@ from typing import Literal
 import msgspec
 from msgspec import Struct
 
-from . import Settings
+from .settings import Settings
 
 
 class Workspace(Struct, kw_only=True):

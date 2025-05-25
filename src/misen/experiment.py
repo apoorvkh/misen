@@ -9,8 +9,8 @@ from typing import Generic, Literal, Mapping, TypeVar
 import tyro
 from msgspec import Struct
 
-from . import Settings  # noqa: TC001
 from .executor import Executor
+from .settings import Settings  # noqa: TC001
 from .task import Task
 from .workspace import Workspace
 

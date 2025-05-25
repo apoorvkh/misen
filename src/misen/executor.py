@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 import msgspec
 from msgspec import Struct
 
-from . import Settings
+from .settings import Settings
 from .workspace import Workspace
 
 if TYPE_CHECKING:
