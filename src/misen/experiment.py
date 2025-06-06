@@ -36,7 +36,7 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
     def result(self, key: str, workspace: Workspace | None = None) -> object:
         return self.tasks()[key].result(workspace=workspace)
 
-    def run(self, workspace: Workspace | None, executor: Executor | None) -> None:
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> None:
         Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
 
     @classmethod
