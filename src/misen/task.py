@@ -167,13 +167,13 @@ class Task(Generic[R]):
             if isinstance(t, Task) and t.properties.cache_result
         )
 
-    def result(self, workspace: Workspace | None = None, ensure_deps_cached: bool = True) -> R:
+    def result(self, workspace: Workspace | None = None) -> R:
         """Compute or retrieve the Task result and cache it."""
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
 
-        if ensure_deps_cached and not self.deps_cached(workspace=workspace):
+        if not self.deps_cached(workspace=workspace):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
         if (
