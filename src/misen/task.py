@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from functools import cache
 from inspect import signature
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
@@ -24,8 +23,6 @@ R = TypeVar("R")
 
 
 class TaskProperties(Struct, frozen=True):
-    """Dataclass for task properties. Attributes are immutable so that Task.__hash__ will be constant and cacheable."""
-
     id: str
     cache_result: bool = False
     always_compute: bool = False
@@ -74,6 +71,7 @@ class Task(Generic[R]):
         "kwargs",
         "bound_arguments",
         "properties",
+        "_task_hash",
         "_initialized",
     )
 
@@ -92,11 +90,13 @@ class Task(Generic[R]):
             TaskProperties(f"{func.__module__}.{func.__qualname__}"),
         )
 
+        self._task_hash = self.__task_hash__()
+
         self._initialized = True
 
     def __setattr__(self, name: str, value: Any) -> None:
         if getattr(self, "_initialized", False) and name in self.__slots__:
-            raise AttributeError(f"Cannot modify {name} after initialization")
+            raise AttributeError(f"Cannot modify Task.{name} after initialization")
         super().__setattr__(name, value)
 
     @property
@@ -104,14 +104,16 @@ class Task(Generic[R]):
         return self  # type: ignore
 
     def __repr__(self):
-        return f"Task(func={self.func.__module__}.{self.func.__qualname__}, arguments={self.bound_arguments})"
+        # return f"Task(func={self.func.__module__}.{self.func.__qualname__}, arguments={self.bound_arguments}, hash={self.__task_hash__()})"
+        return f"Task(func={self.func.__module__}.{self.func.__qualname__}, hash={self.__task_hash__()})"
 
     def __hash__(self) -> int:
         return self.__task_hash__()
 
-    @cache
     def __task_hash__(self) -> int:
         """A hash that represents the Task object using its constituent task graph."""
+        if hasattr(self, "_task_hash"):
+            return self._task_hash
         return _hash(
             (
                 self.properties.id,
@@ -155,41 +157,43 @@ class Task(Generic[R]):
                 self.properties.cache_result
                 and self.__result_hash__(workspace=workspace) in workspace.results.keys()
             )
-        except (KeyError, RuntimeError):
+        except KeyError:
             return False
-
-    def dependencies(self) -> list[Task]:
-        return [arg for arg in self.bound_arguments.values() if isinstance(arg, Task)]
 
     def deps_cached(self, workspace: Workspace) -> bool:
         return all(
             t.is_cached(workspace=workspace)
-            for t in self.dependencies()
-            if t.properties.cache_result
+            for t in self.bound_arguments.values()
+            if isinstance(t, Task) and t.properties.cache_result
         )
 
-    def result(self, workspace: Workspace | None) -> R:
+    def result(self, workspace: Workspace | None = None, ensure_deps_cached: bool = True) -> R:
+        """Compute or retrieve the Task result and cache it."""
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
 
-        if not self.deps_cached(workspace=workspace):
-            raise RuntimeError(
-                f"Task {self} has dependencies which must be cached before computing the result."
-            )
+        if ensure_deps_cached and not self.deps_cached(workspace=workspace):
+            raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
-        if self.properties.cache_result and not self.properties.always_compute:
+        if (
+            self.properties.cache_result
+            and not self.properties.always_compute
+            and self.is_cached(workspace=workspace)
+        ):
             return self.properties.from_bytes(
                 workspace.results[self.__result_hash__(workspace=workspace)]
             )
-
-        result = self.func(
-            *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
-            **{
-                k: v.result(workspace=workspace) if isinstance(v, Task) else v
-                for k, v in self.kwargs.items()
-            },
-        )  # type: ignore
+        else:
+            result = self.func(
+                *tuple(
+                    v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args
+                ),
+                **{
+                    k: v.result(workspace=workspace) if isinstance(v, Task) else v
+                    for k, v in self.kwargs.items()
+                },
+            )  # type: ignore
 
         result_hash = _hash(result)
         workspace.result_hashes[self.__resolved_hash__(workspace=workspace)] = result_hash
