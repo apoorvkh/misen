@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
 from msgspec import Struct
 
 from .settings import Settings
+
+if TYPE_CHECKING:
+    from .task import ObjectHash, ResolvedHash, ResultHash, Task
 
 
 class Workspace(Struct, kw_only=True, dict=True):
@@ -44,30 +47,40 @@ class Workspace(Struct, kw_only=True, dict=True):
         return getattr(import_module(module), class_name)
 
     def __post_init__(self):
-        self.resolved_hashes = {}
-        self.result_hashes = {}
-        self.results = {}
+        self.resolved_hashes: dict[ObjectHash, ResolvedHash] = {}
+        self.result_hashes: dict[ResolvedHash, ResultHash] = {}
+        self.results: dict[ResultHash, bytes] = {}
 
-    # def __len__(self):
-    #     raise NotImplementedError
+    def get_resolved_hash(self, task: Task) -> ResolvedHash | None:
+        return self.resolved_hashes.get(task.__object_hash__())
 
-    # def __getitem__(self, key):
-    #     raise NotImplementedError
+    def set_resolved_hash(self, task: Task, h: ResolvedHash) -> None:
+        self.resolved_hashes[task.__object_hash__()] = h
 
-    # def __setitem__(self, key, item):
-    #     raise NotImplementedError
+    def get_result_hash(self, task: Task) -> ResultHash | None:
+        return self.result_hashes.get(task.__resolved_hash__(workspace=self))
 
-    # def __delitem__(self, key):
-    #     raise NotImplementedError
+    def set_result_hash(self, task: Task, h: ResultHash) -> None:
+        self.result_hashes[task.__resolved_hash__(workspace=self)] = h
 
-    # def __iter__(self):
-    #     raise NotImplementedError
+    def get_result(self, task: Task) -> bytes | None:
+        try:
+            return self.results.get(task.__result_hash__(workspace=self))
+        except RuntimeError:
+            return None
 
-    # def __contains__(self, key):
-    #     raise NotImplementedError
+    def set_result(self, task: Task, result: bytes) -> None:
+        self.results[task.__result_hash__(workspace=self)] = result
 
-    # def get(self, key, default=None):
-    #     raise NotImplementedError
+    def is_cached(self, task: Task) -> bool:
+        """Check if the result of the task is cached."""
+        try:
+            return (
+                task.properties.cache_result
+                and task.__result_hash__(workspace=self) in self.results.keys()
+            )
+        except RuntimeError:
+            return False
 
     # def get_logs(self, task):
     #     # TODO: A single task may be run multiple times and therefore have multiple logs.
