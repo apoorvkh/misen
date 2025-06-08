@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
+import dill
 import msgspec
 from msgspec import Struct
 
@@ -52,10 +53,10 @@ class Workspace(Struct, kw_only=True, dict=True):
         self.results: dict[ResultHash, bytes] = {}
 
     def get_resolved_hash(self, task: Task) -> ResolvedHash | None:
-        return self.resolved_hashes.get(task.__object_hash__())
+        return self.resolved_hashes.get(cast("ObjectHash", task.__hash__()))
 
     def set_resolved_hash(self, task: Task, h: ResolvedHash) -> None:
-        self.resolved_hashes[task.__object_hash__()] = h
+        self.resolved_hashes[cast("ObjectHash", task.__hash__())] = h
 
     def get_result_hash(self, task: Task) -> ResultHash | None:
         return self.result_hashes.get(task.__resolved_hash__(workspace=self))
@@ -63,14 +64,14 @@ class Workspace(Struct, kw_only=True, dict=True):
     def set_result_hash(self, task: Task, h: ResultHash) -> None:
         self.result_hashes[task.__resolved_hash__(workspace=self)] = h
 
-    def get_result(self, task: Task) -> bytes | None:
+    def get_result(self, task: Task) -> tuple[Callable[[bytes], Any], bytes] | None:
         try:
-            return self.results.get(task.__result_hash__(workspace=self))
-        except RuntimeError:
+            return dill.loads(self.results[task.__result_hash__(workspace=self)])
+        except (KeyError, RuntimeError):
             return None
 
-    def set_result(self, task: Task, result: bytes) -> None:
-        self.results[task.__result_hash__(workspace=self)] = result
+    def set_result(self, task: Task, result: tuple[Callable[[bytes], Any], bytes]) -> None:
+        self.results[task.__result_hash__(workspace=self)] = dill.dumps(result)
 
     def is_cached(self, task: Task) -> bool:
         """Check if the result of the task is cached."""

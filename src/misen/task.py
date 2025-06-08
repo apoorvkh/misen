@@ -3,7 +3,6 @@ from __future__ import annotations
 import itertools
 import sys
 from inspect import signature
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast
 
 import dill
@@ -66,16 +65,6 @@ def task(
 
 
 class Task(Generic[R]):
-    __slots__ = (
-        "properties",
-        "func",
-        "args",
-        "kwargs",
-        "arguments_for_hashing",
-        "_object_hash",
-        "_initialized",
-    )
-
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
         self.properties = getattr(
             func,
@@ -85,27 +74,7 @@ class Task(Generic[R]):
 
         self.func = func
         self.args = args
-        self.kwargs = MappingProxyType(kwargs)
-
-        bound_arguments = signature(func).bind(*args, **kwargs)
-        bound_arguments.apply_defaults()
-        self.arguments_for_hashing = MappingProxyType(
-            {
-                k: v
-                for k, v in bound_arguments.arguments.items()
-                if k not in self.properties.exclude
-                and (k not in self.properties.defaults or self.properties.defaults[k] != v)
-            }
-        )
-
-        self._object_hash = self.__object_hash__()
-
-        self._initialized = True
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if getattr(self, "_initialized", False) and name in self.__slots__:
-            raise AttributeError(f"Cannot modify Task.{name} after initialization")
-        super().__setattr__(name, value)
+        self.kwargs = kwargs
 
     @property
     def T(self) -> R:
@@ -120,6 +89,17 @@ class Task(Generic[R]):
                 ")",
             ]
         )
+
+    @property
+    def arguments_for_hashing(self) -> dict[str, Any]:
+        bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
+        bound_arguments.apply_defaults()
+        return {
+            k: v
+            for k, v in bound_arguments.arguments.items()
+            if k not in self.properties.exclude
+            and (k not in self.properties.defaults or self.properties.defaults[k] != v)
+        }
 
     def deps_cached(self, workspace: Workspace) -> bool:
         return all(
@@ -138,8 +118,9 @@ class Task(Generic[R]):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
         if self.properties.cache_result and not self.properties.always_compute:
-            if (result_bytes := workspace.get_result(task=self)) is not None:
-                return self.properties.from_bytes(result_bytes)
+            if (cached_result := workspace.get_result(task=self)) is not None:
+                from_bytes_fn, result_bytes = cached_result
+                return from_bytes_fn(result_bytes)
 
         result = self.func(
             *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
@@ -151,7 +132,10 @@ class Task(Generic[R]):
 
         workspace.set_result_hash(task=self, h=cast("ResultHash", _deterministic_hash(result)))
         if self.properties.cache_result:
-            workspace.set_result(task=self, result=self.properties.to_bytes(result))
+            workspace.set_result(
+                task=self,
+                result=(self.properties.from_bytes, self.properties.to_bytes(result)),
+            )
 
         return result
 
@@ -168,23 +152,17 @@ class Task(Generic[R]):
 
     def __hash__(self) -> int:
         """A hash that represents the Task object using its constituent task graph."""
-        return self.__object_hash__()
-
-    def __object_hash__(self) -> ObjectHash:
-        if hasattr(self, "_object_hash"):
-            return self._object_hash
-        return cast(
-            "ObjectHash",
-            _deterministic_hash(
+        if not hasattr(self, "_object_hash"):
+            self._object_hash = _deterministic_hash(
                 (
                     self.properties.id,
                     {
-                        k: (v.__object_hash__() if isinstance(v, Task) else _deterministic_hash(v))
+                        k: (v.__hash__() if isinstance(v, Task) else _deterministic_hash(v))
                         for k, v in self.arguments_for_hashing.items()
                     },
                 )
-            ),
-        )
+            )
+        return self._object_hash
 
     def __resolved_hash__(self, workspace: Workspace) -> ResolvedHash:
         """A hash that represents the Task object using its resolved arguments."""
@@ -196,9 +174,9 @@ class Task(Generic[R]):
                         self.properties.id,
                         {
                             k: (
-                                _deterministic_hash(v)
-                                if not isinstance(v, Task)
-                                else int(v.__result_hash__(workspace=workspace))
+                                v.__result_hash__(workspace=workspace)
+                                if isinstance(v, Task)
+                                else _deterministic_hash(v)
                             )
                             for k, v in self.arguments_for_hashing.items()
                         },
@@ -240,10 +218,13 @@ def _class_identifier(cls_or_obj: type | Any) -> str:
     return f"{module_name}.{cls.__qualname__}"
 
 
-def _deterministic_hash(obj: Any, seed: int = 0) -> int:
-    serialized_data = msgspec.json.encode(
+def _serialize(obj: Any) -> bytes:
+    return msgspec.json.encode(
         (_class_identifier(obj), obj),
         enc_hook=lambda o: (_class_identifier(o), dill.dumps(o)),
         order="sorted",
     )
-    return xxh3_64_intdigest(serialized_data, seed=seed)
+
+
+def _deterministic_hash(obj: Any, seed: int = 0) -> int:
+    return xxh3_64_intdigest(_serialize(obj), seed=seed)
