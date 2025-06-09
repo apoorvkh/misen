@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import itertools
-import sys
 from inspect import signature
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast
 
 import dill
-import msgspec
 from msgspec import Struct
-from xxhash import xxh3_64_intdigest
+
+from .utils.hashing import deterministic_hash
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
     from .executor import Executor
-    from .workspace import Workspace
+    from .workspace import ResolvedHash, ResultHash, Workspace
 
 __all__ = ["Task", "task"]
 
@@ -130,7 +129,7 @@ class Task(Generic[R]):
             },
         )  # type: ignore
 
-        workspace.set_result_hash(task=self, h=cast("ResultHash", _deterministic_hash(result)))
+        workspace.set_result_hash(task=self, h=cast("ResultHash", deterministic_hash(result)))
         if self.properties.cache_result:
             workspace.set_result(
                 task=self,
@@ -153,11 +152,11 @@ class Task(Generic[R]):
     def __hash__(self) -> int:
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "_object_hash"):
-            self._object_hash = _deterministic_hash(
+            self._object_hash = deterministic_hash(
                 (
                     self.properties.id,
                     {
-                        k: (v.__hash__() if isinstance(v, Task) else _deterministic_hash(v))
+                        k: (v.__hash__() if isinstance(v, Task) else deterministic_hash(v))
                         for k, v in self.arguments_for_hashing.items()
                     },
                 )
@@ -169,14 +168,14 @@ class Task(Generic[R]):
         if (resolved_hash := workspace.get_resolved_hash(task=self)) is None:
             resolved_hash = cast(
                 "ResolvedHash",
-                _deterministic_hash(
+                deterministic_hash(
                     (
                         self.properties.id,
                         {
                             k: (
                                 v.__result_hash__(workspace=workspace)
                                 if isinstance(v, Task)
-                                else _deterministic_hash(v)
+                                else deterministic_hash(v)
                             )
                             for k, v in self.arguments_for_hashing.items()
                         },
@@ -191,40 +190,3 @@ class Task(Generic[R]):
         if (_result_hash := workspace.get_result_hash(task=self)) is None:
             raise RuntimeError(f"{self} must be computed before retrieving the result hash.")
         return _result_hash
-
-
-class ObjectHash(int):
-    pass
-
-
-class ResolvedHash(int):
-    pass
-
-
-class ResultHash(int):
-    pass
-
-
-def _class_identifier(cls_or_obj: type | Any) -> str:
-    cls = cls_or_obj if isinstance(cls_or_obj, type) else type(cls_or_obj)
-    class_name = cls.__qualname__
-    module_name = cls.__module__
-    if module_name == "__main__":
-        module = sys.modules["__main__"]
-        if hasattr(module, "__file__") and module.__file__ is not None:
-            module_name = module.__file__.split("/")[-1].split(".")[0]
-        else:
-            return class_name
-    return f"{module_name}.{cls.__qualname__}"
-
-
-def _serialize(obj: Any) -> bytes:
-    return msgspec.json.encode(
-        (_class_identifier(obj), obj),
-        enc_hook=lambda o: (_class_identifier(o), dill.dumps(o)),
-        order="sorted",
-    )
-
-
-def _deterministic_hash(obj: Any, seed: int = 0) -> int:
-    return xxh3_64_intdigest(_serialize(obj), seed=seed)

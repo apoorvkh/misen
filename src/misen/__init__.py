@@ -1,7 +1,7 @@
 from .executor import Executor
 from .experiment import Experiment
-from .settings import Settings
 from .task import Task, task
+from .utils.settings import Settings
 from .workspace import Workspace
 
 __all__ = [

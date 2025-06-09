@@ -1,4 +1,3 @@
-from ..task import Task
 from ..workspace import Workspace
 
 

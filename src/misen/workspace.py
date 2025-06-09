@@ -7,10 +7,22 @@ import dill
 import msgspec
 from msgspec import Struct
 
-from .settings import Settings
+from .utils.settings import Settings
 
 if TYPE_CHECKING:
-    from .task import ObjectHash, ResolvedHash, ResultHash, Task
+    from .task import Task
+
+
+class ObjectHash(int):
+    pass
+
+
+class ResolvedHash(int):
+    pass
+
+
+class ResultHash(int):
+    pass
 
 
 class Workspace(Struct, kw_only=True, dict=True):
