@@ -11,7 +11,6 @@ from msgspec import Struct
 
 from .executor import Executor
 from .task import Task
-from .utils.settings import Settings  # noqa: TC001
 from .workspace import Workspace
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
@@ -41,6 +40,8 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
 
     @classmethod
     def cli(cls):
+        from .settings import Settings  # noqa: TC001
+
         @dataclass
         class Args(Generic[ExecutorT, WorkspaceT, ExperimentT]):
             settings: Settings

@@ -7,7 +7,7 @@ import dill
 import msgspec
 from msgspec import Struct
 
-from .utils.settings import Settings
+from .settings import Settings
 
 if TYPE_CHECKING:
     from .task import Task

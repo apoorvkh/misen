@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, ca
 
 import dill
 from msgspec import Struct
+from xxhash import xxh3_64_intdigest
 
-from .utils.hashing import deterministic_hash
+from .serialization_utils import serialize
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -85,6 +86,7 @@ class Task(Generic[R]):
                 f"Task({self.func.__module__}.{self.func.__qualname__}",
                 *(f", {a.__repr__()}" for a in self.args),
                 *(f", {k}={v.__repr__()}" for k, v in self.kwargs.items()),
+                # f", hash={self.__hash__()}",
                 ")",
             ]
         )
@@ -100,11 +102,14 @@ class Task(Generic[R]):
             and (k not in self.properties.defaults or self.properties.defaults[k] != v)
         }
 
+    def dependencies(self) -> list[Task]:
+        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
+
     def deps_cached(self, workspace: Workspace) -> bool:
         return all(
             workspace.is_cached(task=t)
-            for t in itertools.chain(self.args, self.kwargs.values())
-            if isinstance(t, Task) and t.properties.cache_result and not t.properties.always_compute
+            for t in self.dependencies()
+            if t.properties.cache_result and not t.properties.always_compute
         )
 
     def result(self, workspace: Workspace | None = None) -> R:
@@ -118,8 +123,11 @@ class Task(Generic[R]):
 
         if self.properties.cache_result and not self.properties.always_compute:
             if (cached_result := workspace.get_result(task=self)) is not None:
+                print(f"Getting from cache: {self}")
                 from_bytes_fn, result_bytes = cached_result
                 return from_bytes_fn(result_bytes)
+
+        print(f"Computing: {self}")
 
         result = self.func(
             *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
@@ -129,7 +137,7 @@ class Task(Generic[R]):
             },
         )  # type: ignore
 
-        workspace.set_result_hash(task=self, h=cast("ResultHash", deterministic_hash(result)))
+        workspace.set_result_hash(task=self, h=cast("ResultHash", _deterministic_hash(result)))
         if self.properties.cache_result:
             workspace.set_result(
                 task=self,
@@ -152,11 +160,11 @@ class Task(Generic[R]):
     def __hash__(self) -> int:
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "_object_hash"):
-            self._object_hash = deterministic_hash(
+            self._object_hash = _deterministic_hash(
                 (
                     self.properties.id,
                     {
-                        k: (v.__hash__() if isinstance(v, Task) else deterministic_hash(v))
+                        k: (v.__hash__() if isinstance(v, Task) else _deterministic_hash(v))
                         for k, v in self.arguments_for_hashing.items()
                     },
                 )
@@ -168,14 +176,14 @@ class Task(Generic[R]):
         if (resolved_hash := workspace.get_resolved_hash(task=self)) is None:
             resolved_hash = cast(
                 "ResolvedHash",
-                deterministic_hash(
+                _deterministic_hash(
                     (
                         self.properties.id,
                         {
                             k: (
                                 v.__result_hash__(workspace=workspace)
                                 if isinstance(v, Task)
-                                else deterministic_hash(v)
+                                else _deterministic_hash(v)
                             )
                             for k, v in self.arguments_for_hashing.items()
                         },
@@ -190,3 +198,7 @@ class Task(Generic[R]):
         if (_result_hash := workspace.get_result_hash(task=self)) is None:
             raise RuntimeError(f"{self} must be computed before retrieving the result hash.")
         return _result_hash
+
+
+def _deterministic_hash(obj: Any, seed: int = 0) -> int:
+    return xxh3_64_intdigest(serialize(obj), seed=seed)

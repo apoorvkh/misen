@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 import msgspec
 from msgspec import Struct
 
-from .utils.settings import Settings
+from .settings import Settings
 from .workspace import Workspace
 
 if TYPE_CHECKING:
@@ -76,7 +76,7 @@ def _distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Ta
 
     @cache
     def _is_cached(task: Task) -> bool:
-        return task.is_cached(workspace=workspace)
+        return workspace.is_cached(task=task)
 
     task_node: dict[Task, int] = {root: dag.add_node(root)}
     stack: list[Task] = [root]
