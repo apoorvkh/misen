@@ -13,8 +13,9 @@ from .serialization import serialize
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
+    from .caches import ResolvedHash, ResultHash
     from .executor import Executor
-    from .workspace import ResolvedHash, ResultHash, Workspace
+    from .workspace import Workspace
 
 __all__ = ["Task", "task"]
 
@@ -114,6 +115,7 @@ class Task(Generic[R]):
 
     def result(self, workspace: Workspace | None = None) -> R:
         """Compute or retrieve the Task result and cache it."""
+        from .caches import SerializedResult  # avoids circular import
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
@@ -122,12 +124,11 @@ class Task(Generic[R]):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
         if self.properties.cache_result and not self.properties.always_compute:
-            if (cached_result := workspace.get_result(task=self)) is not None:
-                print(f"Getting from cache: {self}")
-                from_bytes_fn, result_bytes = cached_result
-                return from_bytes_fn(result_bytes)
-
-        print(f"Computing: {self}")
+            try:
+                if (cached_result := workspace.results.get(self)) is not None:
+                    return cached_result.value()
+            except (KeyError, RuntimeError):
+                pass
 
         result = self.func(
             *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
@@ -137,11 +138,12 @@ class Task(Generic[R]):
             },
         )  # type: ignore
 
-        workspace.set_result_hash(task=self, h=cast("ResultHash", _deterministic_hash(result)))
+        workspace.result_hashes[self] = cast("ResultHash", _deterministic_hash(result))
+
         if self.properties.cache_result:
-            workspace.set_result(
-                task=self,
-                result=(self.properties.from_bytes, self.properties.to_bytes(result)),
+            workspace.results[self] = SerializedResult(
+                deserializer=self.properties.from_bytes,
+                data=self.properties.to_bytes(result),
             )
 
         return result
@@ -173,7 +175,7 @@ class Task(Generic[R]):
 
     def __resolved_hash__(self, workspace: Workspace) -> ResolvedHash:
         """A hash that represents the Task object using its resolved arguments."""
-        if (resolved_hash := workspace.get_resolved_hash(task=self)) is None:
+        if (resolved_hash := workspace.resolved_hashes.get(self)) is None:
             resolved_hash = cast(
                 "ResolvedHash",
                 _deterministic_hash(
@@ -190,14 +192,15 @@ class Task(Generic[R]):
                     )
                 ),
             )
-            workspace.set_resolved_hash(task=self, h=resolved_hash)
+            workspace.resolved_hashes[self] = resolved_hash
         return resolved_hash
 
     def __result_hash__(self, workspace: Workspace) -> ResultHash:
         """Getter for the hash of result, which is computed and stored in result()."""
-        if (_result_hash := workspace.get_result_hash(task=self)) is None:
-            raise RuntimeError(f"{self} must be computed before retrieving the result hash.")
-        return _result_hash
+        try:
+            return workspace.result_hashes[self]
+        except KeyError:
+            raise RuntimeError(f"{self} must be computed first.")
 
 
 def _deterministic_hash(obj: Any, seed: int = 0) -> int:
