@@ -8,7 +8,7 @@ import dill
 from msgspec import Struct
 from xxhash import xxh3_64_intdigest
 
-from .serialization_utils import serialize
+from .serialization import serialize
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
