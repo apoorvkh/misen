@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from itertools import chain
-from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar
+import itertools
+from inspect import signature
+from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast
 
+import dill
 from msgspec import Struct
+from xxhash import xxh3_64_intdigest
 
-from .utils.det_hash import deterministic_hashing
+from .serialization import serialize
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
+    from .caches import ResolvedHash, ResultHash
     from .executor import Executor
     from .workspace import Workspace
 
@@ -19,28 +23,41 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
+class TaskProperties(Struct, frozen=True):
+    id: str
+    cache_result: bool = False
+    always_compute: bool = False
+    version: int = 0
+    exclude: set[str] = set()
+    defaults: dict[str, Any] = {}
+    to_bytes: Callable[[Any], bytes] = dill.dumps
+    from_bytes: Callable[[bytes], Any] = dill.loads
+
+
 def task(
-    uuid: str | None = None,  # openssl rand -base64 3
-    cache: bool = False,
+    id: str | None = None,  # openssl rand -base64 3
+    cache_result: bool = False,
+    always_compute: bool = False,
     version: int = 0,
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
+    to_bytes: Callable[[R], bytes] = dill.dumps,
+    from_bytes: Callable[[bytes], R] = dill.loads,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    # Currently id is set as uuid (if specified) or f.__qualname__ (i.e. the function name)
-    # It is nice to ignore f.__module__ so that this function can be moved into different files
-    # TODO: In the future, it would also be nice to "import" tasks from other libraries
-    # In that case, we might want to consider the package it originates from?
-
+    # TODO: handle lambda
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         setattr(
             func,
-            "__task__",
+            "__task_properties__",
             TaskProperties(
-                id=(uuid or func.__qualname__),
-                cacheable=cache,
+                id=(id or f"{func.__module__}.{func.__qualname__}"),
+                cache_result=cache_result,
+                always_compute=always_compute,
                 version=version,
                 exclude=exclude,
                 defaults=defaults,
+                to_bytes=to_bytes,
+                from_bytes=from_bytes,
             ),
         )
         return func
@@ -48,140 +65,143 @@ def task(
     return decorator
 
 
-class TaskProperties(Struct, frozen=True):
-    """Dataclass for task properties. Attributes are immutable so that Task.__hash__ will be constant and cacheable."""
-
-    id: str
-    cacheable: bool = False
-    version: int = 0
-    exclude: set[str] = set()
-    defaults: dict = {}
-
-
 class Task(Generic[R]):
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
-        # TODO: can we make func, args, kwargs immutable?
+        self.properties = getattr(
+            func,
+            "__task_properties__",
+            TaskProperties(f"{func.__module__}.{func.__qualname__}"),
+        )
+
         self.func = func
         self.args = args
         self.kwargs = kwargs
-        self.properties = getattr(
-            self.func,
-            "__task__",
-            TaskProperties(id=f"{func.__module__}.{func.__qualname__}"),
-        )
-
-        # compute and cache the hash
-        self.__hash__()
 
     @property
     def T(self) -> R:
         return self  # type: ignore
 
     def __repr__(self):
-        return f"Task(func={self.func.__module__}.{self.func.__qualname__}, args={self.args}, kwargs={self.kwargs}, hash={self.__hash__()})"
-
-    def dependencies(self) -> list[Task]:
-        return [arg for arg in chain(self.args, self.kwargs.values()) if isinstance(arg, Task)]
-
-    def _resolve_args(
-        self,
-        workspace: Workspace | None = None,
-        ensure_cached: bool = False,
-    ) -> tuple:
-        args = (
-            v._run(workspace=workspace, ensure_cached=ensure_cached) if isinstance(v, Task) else v
-            for v in self.args
+        return "".join(
+            [
+                f"Task({self.func.__module__}.{self.func.__qualname__}",
+                *(f", {a.__repr__()}" for a in self.args),
+                *(f", {k}={v.__repr__()}" for k, v in self.kwargs.items()),
+                # f", hash={self.__hash__()}",
+                ")",
+            ]
         )
 
-        kwargs = {
-            k: (
-                v._run(workspace=workspace, ensure_cached=ensure_cached)
-                if isinstance(v, Task)
-                else v
-            )
-            for k, v in self.kwargs.items()
+    @property
+    def arguments_for_hashing(self) -> dict[str, Any]:
+        bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
+        bound_arguments.apply_defaults()
+        return {
+            k: v
+            for k, v in bound_arguments.arguments.items()
+            if k not in self.properties.exclude
+            and (k not in self.properties.defaults or self.properties.defaults[k] != v)
         }
 
-        return args, kwargs  # pyright: ignore
+    def dependencies(self) -> list[Task]:
+        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
 
+    def deps_cached(self, workspace: Workspace) -> bool:
+        return all(
+            workspace.is_cached(task=t)
+            for t in self.dependencies()
+            if t.properties.cache_result and not t.properties.always_compute
+        )
 
-    # TODO: this is the actual "is_cached" function. should rename the other one
-    def is_cached_direct(self, workspace: Workspace | None = None) -> bool:
-        from .workspace import Workspace  # avoids circular import
-
-        workspace = workspace or Workspace.load()
-        return self.properties.cacheable and self in workspace
-
-    def is_cached(self, workspace: Workspace | None = None) -> bool:
-        from .workspace import Workspace  # avoids circular import
-
-        workspace = workspace or Workspace.load()
-        if self.properties.cacheable:
-            return self in workspace
-        return all(t is t.is_cached(workspace) for t in self.dependencies())
-
-    def _run(
-        self,
-        workspace: Workspace | None = None,
-        ensure_cached: bool = False,
-        ensure_deps_cached: bool = False,
-    ) -> R:
+    def result(self, workspace: Workspace | None = None) -> R:
+        """Compute or retrieve the Task result and cache it."""
+        from .caches import SerializedResult  # avoids circular import
         from .workspace import Workspace  # avoids circular import
 
         workspace = workspace or Workspace.load()
 
-        # run self.func
-        # expect all subtasks to be cached, error if not
+        if not self.deps_cached(workspace=workspace):
+            raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
-        is_cached = self.is_cached(workspace=workspace)
+        if self.properties.cache_result and not self.properties.always_compute:
+            try:
+                if (cached_result := workspace.results.get(self)) is not None:
+                    return cached_result.value()
+            except (KeyError, RuntimeError):
+                pass
 
-        if ensure_cached and self.properties.cacheable:
-            assert is_cached, "ensure_cached=True: expecting cached Task"
+        result = self.func(
+            *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
+            **{
+                k: v.result(workspace=workspace) if isinstance(v, Task) else v
+                for k, v in self.kwargs.items()
+            },
+        )  # type: ignore
 
-        if self.properties.cacheable and is_cached:
-            return workspace[self]
+        workspace.result_hashes[self] = cast("ResultHash", _deterministic_hash(result))
 
-        args, kwargs = self._resolve_args(workspace=workspace, ensure_cached=ensure_deps_cached)
+        if self.properties.cache_result:
+            workspace.results[self] = SerializedResult(
+                deserializer=self.properties.from_bytes,
+                data=self.properties.to_bytes(result),
+            )
 
-        # TODO: fix typing? by returning tuple[P.args, P.kwargs] in _resolve_args
-        execution_result = self.func(*args, **kwargs)  # pyright: ignore
-
-        if self.properties.cacheable and workspace is not None:
-            workspace[self] = execution_result
-
-        return execution_result
+        return result
 
     def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
         """
         Submit task to executor to fully execute the task graph.
         """
         from .executor import Executor  # avoids circular import
-
-        executor = executor or Executor.load()
-        return executor.submit(task=self, workspace=workspace)  # type: ignore
-
-    def result(self, workspace: Workspace | None = None) -> R:
-        """
-        Immediately get the result of cacheable tasks, or compute it if it's uncacheable.
-        """
-        return self._run(workspace=workspace, ensure_cached=True, ensure_deps_cached=True)
-
-    @property
-    def work_dir(self, workspace: Workspace | None = None):
-        # TODO: how can we pass a Task.work_dir to Task.from(func(work_dir))
-        # this is cyclic. we probably need a special object e.g. misen.WORK_DIR that is ignored by the hash and is realized as Task.work_dir.
-        # we could do something similar to pass a Task.logger to a task
         from .workspace import Workspace  # avoids circular import
 
+        executor = executor or Executor.load()
         workspace = workspace or Workspace.load()
-        return workspace.get_work_dir(self)
+        return executor.submit(task=self, workspace=workspace)
 
-    def __hash__(self):
-        """Hashing function for task instance. Hash is cached (assuming this object and its attributes are immutable)."""
-        if not hasattr(self, "__cached_hash__"):
-            with deterministic_hashing():
-                # TODO: handle self.properties.exclude and self.properties.defaults in kwargs
-                # like SKIP_DEFAULT_ARGUMENTS and SKIP_ID_ARGUMENTS in
-                # https://ai2-tango.readthedocs.io/en/latest/api/components/step.html#tango.step.Step.SKIP_DEFAULT_ARGUMENTS
-                self.__cached_hash__ = hash((self.properties.id, self.args, self.kwargs))
-        return self.__cached_hash__
+    def __hash__(self) -> int:
+        """A hash that represents the Task object using its constituent task graph."""
+        if not hasattr(self, "_object_hash"):
+            self._object_hash = _deterministic_hash(
+                (
+                    self.properties.id,
+                    {
+                        k: (v.__hash__() if isinstance(v, Task) else _deterministic_hash(v))
+                        for k, v in self.arguments_for_hashing.items()
+                    },
+                )
+            )
+        return self._object_hash
+
+    def __resolved_hash__(self, workspace: Workspace) -> ResolvedHash:
+        """A hash that represents the Task object using its resolved arguments."""
+        if (resolved_hash := workspace.resolved_hashes.get(self)) is None:
+            resolved_hash = cast(
+                "ResolvedHash",
+                _deterministic_hash(
+                    (
+                        self.properties.id,
+                        {
+                            k: (
+                                v.__result_hash__(workspace=workspace)
+                                if isinstance(v, Task)
+                                else _deterministic_hash(v)
+                            )
+                            for k, v in self.arguments_for_hashing.items()
+                        },
+                    )
+                ),
+            )
+            workspace.resolved_hashes[self] = resolved_hash
+        return resolved_hash
+
+    def __result_hash__(self, workspace: Workspace) -> ResultHash:
+        """Getter for the hash of result, which is computed and stored in result()."""
+        try:
+            return workspace.result_hashes[self]
+        except KeyError:
+            raise RuntimeError(f"{self} must be computed first.")
+
+
+def _deterministic_hash(obj: Any, seed: int = 0) -> int:
+    return xxh3_64_intdigest(serialize(obj), seed=seed)

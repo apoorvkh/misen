@@ -10,7 +10,6 @@ import tyro
 from msgspec import Struct
 
 from .executor import Executor
-from .settings import Settings  # noqa: TC001
 from .task import Task
 from .workspace import Workspace
 
@@ -36,11 +35,13 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
     def result(self, key: str, workspace: Workspace | None = None) -> object:
         return self.tasks()[key].result(workspace=workspace)
 
-    def run(self, workspace: Workspace | None, executor: Executor | None) -> None:
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> None:
         Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
 
     @classmethod
     def cli(cls):
+        from .settings import Settings  # noqa: TC001
+
         @dataclass
         class Args(Generic[ExecutorT, WorkspaceT, ExperimentT]):
             settings: Settings

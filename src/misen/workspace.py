@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
 from msgspec import Struct
 
 from .settings import Settings
 
+if TYPE_CHECKING:
+    from .caches import (
+        AbstractResolvedHashCache,
+        AbstractResultCache,
+        AbstractResultHashCache,
+    )
+    from .task import Task
 
-class Workspace(Struct, kw_only=True):
+
+class Workspace(Struct, kw_only=True, dict=True):
     type: str | Literal["memory"] | None = None
 
     @staticmethod
@@ -43,32 +51,27 @@ class Workspace(Struct, kw_only=True):
         module, class_name = self.type.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
 
-    def __len__(self):
+    @property
+    def resolved_hashes(self) -> AbstractResolvedHashCache:
         raise NotImplementedError
 
-    def __getitem__(self, key):
+    @property
+    def result_hashes(self) -> AbstractResultHashCache:
         raise NotImplementedError
 
-    def __setitem__(self, key, item):
+    @property
+    def results(self) -> AbstractResultCache:
         raise NotImplementedError
 
-    def __delitem__(self, key):
-        raise NotImplementedError
+    def is_cached(self, task: Task) -> bool:
+        """Check if the result of the task is cached."""
+        return task.properties.cache_result and task in self.results
 
-    def __iter__(self):
-        raise NotImplementedError
+    # def get_logs(self, task):
+    #     # TODO: A single task may be run multiple times and therefore have multiple logs.
+    #     # How should we store and return logs?
+    #     raise NotImplementedError
 
-    def __contains__(self, key):
-        raise NotImplementedError
-
-    def get(self, key, default=None):
-        raise NotImplementedError
-
-    def get_logs(self, task):
-        # TODO: A single task may be run multiple times and therefore have multiple logs.
-        # How should we store and return logs?
-        raise NotImplementedError
-
-    def get_work_dir(self, task):
-        """Return a directory where the task can store working files. E.g. to cache intermediate results."""
-        raise NotImplementedError
+    # def get_work_dir(self, task):
+    #     """Return a directory where the task can store working files. E.g. to cache intermediate results."""
+    #     raise NotImplementedError
