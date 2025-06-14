@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from abc import ABC
 from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, Any, Callable, Iterator, cast
 
@@ -32,7 +33,7 @@ class SerializedResult:
         return self.deserializer(self.data)
 
 
-class AbstractResolvedHashCache(MutableMapping[Task, ResolvedHash]):
+class ResolvedHashCacheABC(MutableMapping[Task, ResolvedHash], ABC):
     mapping: MutableMapping[ObjectHash, ResolvedHash]
     workspace: Workspace
 
@@ -52,7 +53,7 @@ class AbstractResolvedHashCache(MutableMapping[Task, ResolvedHash]):
         raise NotImplementedError
 
 
-class AbstractResultHashCache(MutableMapping[Task, ResultHash]):
+class ResultHashCacheABC(MutableMapping[Task, ResultHash], ABC):
     mapping: MutableMapping[ResolvedHash, ResultHash]
     workspace: Workspace
 
@@ -72,7 +73,7 @@ class AbstractResultHashCache(MutableMapping[Task, ResultHash]):
         raise NotImplementedError
 
 
-class AbstractResultCache(MutableMapping[Task, SerializedResult]):
+class ResultCacheABC(MutableMapping[Task, SerializedResult], ABC):
     mapping: MutableMapping[ResultHash, bytes]
     workspace: Workspace
 

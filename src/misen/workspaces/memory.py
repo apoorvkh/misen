@@ -1,48 +1,44 @@
 from ..caches import (
-    AbstractResolvedHashCache,
-    AbstractResultCache,
-    AbstractResultHashCache,
+    ResolvedHashCacheABC,
+    ResultCacheABC,
+    ResultHashCacheABC,
 )
-from ..workspace import Workspace
+from ..workspace import Workspace, WorkspaceConfig
 
 
-class MemoryResolvedHashCache(AbstractResolvedHashCache):
+class MemoryResolvedHashCache(ResolvedHashCacheABC):
     def __init__(self, workspace: Workspace):
         super().__init__()
         self.workspace = workspace
         self.mapping = {}
 
 
-class MemoryResultHashCache(AbstractResultHashCache):
+class MemoryResultHashCache(ResultHashCacheABC):
     def __init__(self, workspace: Workspace):
         super().__init__()
         self.workspace = workspace
         self.mapping = {}
 
 
-class MemoryResultCache(AbstractResultCache):
+class MemoryResultCache(ResultCacheABC):
     def __init__(self, workspace: Workspace):
         super().__init__()
         self.workspace = workspace
         self.mapping = {}
 
 
-class MemoryWorkspace(Workspace, kw_only=True):
+class MemoryWorkspaceConfig(WorkspaceConfig):
     type = "memory"
+    i: int
 
-    def __post_init__(self):
-        self._resolved_hashes = MemoryResolvedHashCache(workspace=self)
-        self._result_hashes = MemoryResultHashCache(workspace=self)
-        self._results = MemoryResultCache(workspace=self)
 
-    @property
-    def resolved_hashes(self) -> MemoryResolvedHashCache:
-        return self._resolved_hashes
+class MemoryWorkspace(Workspace):
+    @staticmethod
+    def config_type() -> type[WorkspaceConfig]:
+        return MemoryWorkspaceConfig
 
-    @property
-    def result_hashes(self) -> MemoryResultHashCache:
-        return self._result_hashes
-
-    @property
-    def results(self) -> MemoryResultCache:
-        return self._results
+    def __init__(self, config: MemoryWorkspaceConfig):
+        super().__init__(config=config)
+        self.resolved_hashes = MemoryResolvedHashCache(workspace=self)
+        self.result_hashes = MemoryResultHashCache(workspace=self)
+        self.results = MemoryResultCache(workspace=self)

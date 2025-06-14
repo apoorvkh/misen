@@ -115,10 +115,12 @@ class Task(Generic[R]):
 
     def result(self, workspace: Workspace | None = None) -> R:
         """Compute or retrieve the Task result and cache it."""
-        from .caches import SerializedResult  # avoids circular import
-        from .workspace import Workspace  # avoids circular import
+        from .caches import SerializedResult
 
-        workspace = workspace or Workspace.load()
+        if workspace is None:
+            from .workspace import WorkspaceConfig
+
+            workspace = WorkspaceConfig().load()
 
         if not self.deps_cached(workspace=workspace):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
@@ -152,11 +154,18 @@ class Task(Generic[R]):
         """
         Submit task to executor to fully execute the task graph.
         """
-        from .executor import Executor  # avoids circular import
-        from .workspace import Workspace  # avoids circular import
+        from .workspace import WorkspaceConfig  # avoids circular import
 
-        executor = executor or Executor.load()
-        workspace = workspace or Workspace.load()
+        if executor is None:
+            from .executor import ExecutorConfig  # avoids circular import
+
+            executor = ExecutorConfig().load()
+
+        if workspace is None:
+            from .workspace import WorkspaceConfig
+
+            workspace = WorkspaceConfig().load()
+
         return executor.submit(task=self, workspace=workspace)
 
     def __hash__(self) -> int:

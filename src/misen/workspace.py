@@ -1,67 +1,43 @@
 from __future__ import annotations
 
-from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
-import msgspec
-from msgspec import Struct
-
-from .settings import Settings
+from .settings import ComponentABC, ConfigABC
 
 if TYPE_CHECKING:
     from .caches import (
-        AbstractResolvedHashCache,
-        AbstractResultCache,
-        AbstractResultHashCache,
+        ResolvedHashCacheABC,
+        ResultCacheABC,
+        ResultHashCacheABC,
     )
     from .task import Task
 
 
-class Workspace(Struct, kw_only=True, dict=True):
+class WorkspaceConfig(ConfigABC["WorkspaceConfig", "Workspace"], kw_only=True):
     type: str | Literal["memory"] | None = None
 
     @staticmethod
-    def load(settings: Settings | None = None) -> Workspace:
-        settings = settings or Settings()
+    def settings_key() -> str:
+        return "workspace"
 
-        if "workspace" in settings.toml_data:
-            workspace = msgspec.convert(settings.toml_data["workspace"], type=Workspace)
-            workspace_cls: type[Workspace] | None = workspace._resolve_type()
-            if workspace_cls is not None:
-                return msgspec.convert(
-                    settings.toml_data["workspace"],
-                    type=workspace_cls,
-                )
+    def default(self) -> WorkspaceConfig:
+        from .workspaces.memory import MemoryWorkspaceConfig
 
-        # fallback to default
-        from .workspaces.memory import MemoryWorkspace
+        return MemoryWorkspaceConfig(i=10)
 
-        return MemoryWorkspace()
-
-    def _resolve_type(self) -> type[Workspace] | None:
-        if self.type is None:
-            return None
-
+    def resolve_component_type(self) -> type[Workspace]:
         match self.type:
             case "memory":
                 from .workspaces.memory import MemoryWorkspace
 
                 return MemoryWorkspace
+        return super().resolve_component_type()
 
-        module, class_name = self.type.split(":", maxsplit=1)
-        return getattr(import_module(module), class_name)
 
-    @property
-    def resolved_hashes(self) -> AbstractResolvedHashCache:
-        raise NotImplementedError
-
-    @property
-    def result_hashes(self) -> AbstractResultHashCache:
-        raise NotImplementedError
-
-    @property
-    def results(self) -> AbstractResultCache:
-        raise NotImplementedError
+class Workspace(ComponentABC[WorkspaceConfig]):
+    resolved_hashes: ResolvedHashCacheABC
+    result_hashes: ResultHashCacheABC
+    results: ResultCacheABC
 
     def is_cached(self, task: Task) -> bool:
         """Check if the result of the task is cached."""

@@ -2,14 +2,10 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from functools import cache
-from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
-import msgspec
-from msgspec import Struct
-
-from .settings import Settings
-from .workspace import Workspace
+from .settings import ComponentABC, ConfigABC
+from .workspace import Workspace, WorkspaceConfig
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -17,42 +13,31 @@ if TYPE_CHECKING:
     from .task import Task
 
 
-class Executor(Struct, kw_only=True):
+class ExecutorConfig(ConfigABC["ExecutorConfig", "Executor"], kw_only=True):
     type: str | Literal["local"] | None = None
 
     @staticmethod
-    def load(settings: Settings | None = None) -> Executor:
-        settings = settings or Settings()
+    def settings_key() -> str:
+        return "executor"
 
-        if "executor" in settings.toml_data:
-            executor = msgspec.convert(settings.toml_data["executor"], type=Executor)
-            executor_cls: type[Executor] | None = executor._resolve_type()
-            if executor_cls is not None:
-                return msgspec.convert(
-                    settings.toml_data["executor"],
-                    type=executor_cls,
-                )
+    def default(self) -> ExecutorConfig:
+        from .executors.local import LocalExecutorConfig
 
-        # fallback to default
-        from .executors.local import LocalExecutor
+        return LocalExecutorConfig(i=99)
 
-        return LocalExecutor(i=99)
-
-    def _resolve_type(self) -> type[Executor] | None:
-        if self.type is None:
-            return None
-
+    def resolve_component_type(self) -> type[Executor]:
         match self.type:
             case "local":
                 from .executors.local import LocalExecutor
 
                 return LocalExecutor
+        return super().resolve_component_type()
 
-        module, class_name = self.type.split(":", maxsplit=1)
-        return getattr(import_module(module), class_name)
 
+class Executor(ComponentABC[ExecutorConfig]):
     def computable_groups(self, task: Task, workspace: Workspace | None = None):
-        workspace = workspace or Workspace.load()
+        if workspace is None:
+            workspace = WorkspaceConfig().load()
         return _distributable_tasks(task, workspace)
 
     @abstractmethod
