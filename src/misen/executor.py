@@ -4,7 +4,7 @@ from abc import abstractmethod
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
-from .settings import ConfigABC, TargetABC
+from .settings import ComponentABC, ConfigABC
 from .workspace import Workspace, WorkspaceConfig
 
 if TYPE_CHECKING:
@@ -25,19 +25,19 @@ class ExecutorConfig(ConfigABC["ExecutorConfig", "Executor"], kw_only=True):
 
         return LocalExecutorConfig(i=99)
 
-    def resolve_target_type(self) -> type[Executor]:
+    def resolve_component_type(self) -> type[Executor]:
         match self.type:
             case "local":
                 from .executors.local import LocalExecutor
 
                 return LocalExecutor
-        return super().resolve_target_type()
+        return super().resolve_component_type()
 
 
-class Executor(TargetABC[ExecutorConfig]):
+class Executor(ComponentABC[ExecutorConfig]):
     def computable_groups(self, task: Task, workspace: Workspace | None = None):
         if workspace is None:
-            workspace = WorkspaceConfig().load_target()
+            workspace = WorkspaceConfig().load()
         return _distributable_tasks(task, workspace)
 
     @abstractmethod

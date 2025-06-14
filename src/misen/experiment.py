@@ -77,8 +77,8 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
             ]
         )
 
-        executor = args.executor.load_target(settings=args.settings)
-        workspace = args.workspace.load_target(settings=args.settings)
+        executor = args.executor.load(settings=args.settings)
+        workspace = args.workspace.load(settings=args.settings)
 
         match args.command:
             case "run":

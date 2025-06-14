@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from .settings import ConfigABC, TargetABC
+from .settings import ComponentABC, ConfigABC
 
 if TYPE_CHECKING:
     from .caches import (
@@ -25,16 +25,16 @@ class WorkspaceConfig(ConfigABC["WorkspaceConfig", "Workspace"], kw_only=True):
 
         return MemoryWorkspaceConfig(i=10)
 
-    def resolve_target_type(self) -> type[Workspace]:
+    def resolve_component_type(self) -> type[Workspace]:
         match self.type:
             case "memory":
                 from .workspaces.memory import MemoryWorkspace
 
                 return MemoryWorkspace
-        return super().resolve_target_type()
+        return super().resolve_component_type()
 
 
-class Workspace(TargetABC[WorkspaceConfig]):
+class Workspace(ComponentABC[WorkspaceConfig]):
     resolved_hashes: ResolvedHashCacheABC
     result_hashes: ResultHashCacheABC
     results: ResultCacheABC

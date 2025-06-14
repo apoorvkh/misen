@@ -120,7 +120,7 @@ class Task(Generic[R]):
         if workspace is None:
             from .workspace import WorkspaceConfig
 
-            workspace = WorkspaceConfig().load_target()
+            workspace = WorkspaceConfig().load()
 
         if not self.deps_cached(workspace=workspace):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
@@ -159,12 +159,12 @@ class Task(Generic[R]):
         if executor is None:
             from .executor import ExecutorConfig  # avoids circular import
 
-            executor = ExecutorConfig().load_target()
+            executor = ExecutorConfig().load()
 
         if workspace is None:
             from .workspace import WorkspaceConfig
 
-            workspace = WorkspaceConfig().load_target()
+            workspace = WorkspaceConfig().load()
 
         return executor.submit(task=self, workspace=workspace)
 

@@ -26,28 +26,28 @@ class Settings(Struct, dict=True):
             return {}
 
 
-C = TypeVar("C", bound="ConfigABC")
+ConfigT = TypeVar("ConfigT", bound="ConfigABC")
 
 
-class TargetABC(Generic[C], ABC):
+class ComponentABC(Generic[ConfigT], ABC):
     @staticmethod
     @abstractmethod
-    def config_type() -> Type[C]:
+    def config_type() -> Type[ConfigT]:
         raise NotImplementedError
 
-    def __init__(self, config: C):
+    def __init__(self, config: ConfigT):
         self.config = config
 
 
-C = TypeVar("C", bound="ConfigABC")
-T = TypeVar("T", bound="TargetABC")
+ConfigT = TypeVar("ConfigT", bound="ConfigABC")
+ComponentT = TypeVar("ComponentT", bound="ComponentABC")
 
 
-class ConfigABC(Struct, Generic[C, T], kw_only=True):
+class ConfigABC(Struct, Generic[ConfigT, ComponentT], kw_only=True):
     type: str | None = None
 
     @abstractmethod
-    def default(self) -> C:
+    def default(self) -> ConfigT:
         raise NotImplementedError
 
     @staticmethod
@@ -55,7 +55,7 @@ class ConfigABC(Struct, Generic[C, T], kw_only=True):
     def settings_key() -> str:
         raise NotImplementedError
 
-    def from_settings(self, settings: Settings | None = None) -> C:
+    def from_settings(self, settings: Settings | None = None) -> ConfigT:
         if settings is None:
             settings = Settings()
         config_data = settings.toml_data.get(self.settings_key(), None)
@@ -64,20 +64,20 @@ class ConfigABC(Struct, Generic[C, T], kw_only=True):
             return msgspec.convert(config_data, type=config.resolve_config_type())
         return self.default()
 
-    def resolve_config_type(self) -> Type[C]:
-        return self.resolve_target_type().config_type()
+    def resolve_config_type(self) -> Type[ConfigT]:
+        return self.resolve_component_type().config_type()
 
-    def resolve_target_type(self) -> Type[T]:
+    def resolve_component_type(self) -> Type[ComponentT]:
         if self.type is None:
-            return self.from_settings().resolve_target_type()
+            return self.from_settings().resolve_component_type()
 
         module, class_name = self.type.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
 
-    def load_target(self, settings: Settings | None = None) -> T:
+    def load(self, settings: Settings | None = None) -> ComponentT:
         if self.type is None:
             config = self.from_settings(settings=settings)
         else:
             config = self
-        target_cls = config.resolve_target_type()
-        return cast("T", target_cls(config=config))
+        component_cls = config.resolve_component_type()
+        return cast("ComponentT", component_cls(config=config))
