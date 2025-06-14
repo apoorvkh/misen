@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from functools import cache
-from importlib import import_module
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, Literal
 
-import msgspec
-from msgspec import Struct
-
-from .settings import Settings
+from .settings import ConfigABC, TargetABC
 from .workspace import Workspace, WorkspaceConfig
 
 if TYPE_CHECKING:
@@ -17,60 +13,31 @@ if TYPE_CHECKING:
     from .task import Task
 
 
-class ExecutorConfig(Struct, kw_only=True):
+class ExecutorConfig(ConfigABC["ExecutorConfig", "Executor"], kw_only=True):
     type: str | Literal["local"] | None = None
+
+    @staticmethod
+    def settings_key() -> str:
+        return "executor"
 
     def default(self) -> ExecutorConfig:
         from .executors.local import LocalExecutorConfig
 
         return LocalExecutorConfig(i=99)
 
-    def from_settings(self, settings: Settings | None = None) -> ExecutorConfig:
-        if settings is None:
-            settings = Settings()
-
-        if (executor_toml := settings.toml_data.get("executor", None)) is not None:
-            config = msgspec.convert(executor_toml, type=ExecutorConfig)
-            return msgspec.convert(executor_toml, type=config.resolve_config_type())
-
-        return self.default()
-
-    def resolve_executor_type(self) -> type[Executor]:
-        if self.type is None:
-            return self.from_settings().resolve_executor_type()
-
+    def resolve_target_type(self) -> type[Executor]:
         match self.type:
             case "local":
                 from .executors.local import LocalExecutor
 
                 return LocalExecutor
-
-        module, class_name = self.type.split(":", maxsplit=1)
-        return getattr(import_module(module), class_name)
-
-    def resolve_config_type(self) -> type[ExecutorConfig]:
-        return self.resolve_executor_type().ConfigT
-
-    def load_executor(self, settings: Settings | None = None) -> Executor:
-        """Load the executor based on the configuration."""
-        if self.type is None:
-            config = self.from_settings(settings=settings)
-        else:
-            config = self
-        executor_cls = config.resolve_executor_type()
-        return executor_cls(config=config)
+        return super().resolve_target_type()
 
 
-class Executor(ABC):
-    ConfigT: ClassVar[type[ExecutorConfig]]
-
-    @abstractmethod
-    def __init__(self, config: ExecutorConfig):
-        raise NotImplementedError
-
+class Executor(TargetABC[ExecutorConfig]):
     def computable_groups(self, task: Task, workspace: Workspace | None = None):
         if workspace is None:
-            workspace = WorkspaceConfig().load_workspace()
+            workspace = WorkspaceConfig().load_target()
         return _distributable_tasks(task, workspace)
 
     @abstractmethod

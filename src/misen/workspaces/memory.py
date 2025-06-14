@@ -33,10 +33,12 @@ class MemoryWorkspaceConfig(WorkspaceConfig):
 
 
 class MemoryWorkspace(Workspace):
-    ConfigT = MemoryWorkspaceConfig
+    @staticmethod
+    def config_type() -> type[WorkspaceConfig]:
+        return MemoryWorkspaceConfig
 
     def __init__(self, config: MemoryWorkspaceConfig):
-        self.config = config
+        super().__init__(config=config)
         self.resolved_hashes = MemoryResolvedHashCache(workspace=self)
         self.result_hashes = MemoryResultHashCache(workspace=self)
         self.results = MemoryResultCache(workspace=self)

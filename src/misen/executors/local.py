@@ -12,16 +12,18 @@ if TYPE_CHECKING:
     from ..workspace import Workspace
 
 
-class LocalExecutorConfig(ExecutorConfig, kw_only=True):
+class LocalExecutorConfig(ExecutorConfig):
     type = "local"
     i: int
 
 
 class LocalExecutor(Executor):
-    ConfigT = LocalExecutorConfig
+    @staticmethod
+    def config_type() -> type[ExecutorConfig]:
+        return LocalExecutorConfig
 
     def __init__(self, config: LocalExecutorConfig):
-        self.config = config
+        super().__init__(config=config)
 
     def submit(self, task: Task, workspace: Workspace):
         return task.result(workspace=workspace)
