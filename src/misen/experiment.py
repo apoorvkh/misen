@@ -9,14 +9,15 @@ from typing import Generic, Literal, Mapping, TypeVar
 import tyro
 from msgspec import Struct
 
-from .executor import Executor
+from .executor import Executor, ExecutorConfig
+from .settings import Settings  # noqa: TC001
 from .task import Task
-from .workspace import Workspace
+from .workspace import Workspace, WorkspaceConfig
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
 
-ExecutorT = TypeVar("ExecutorT", bound=Executor)
-WorkspaceT = TypeVar("WorkspaceT", bound=Workspace)
+ExecutorConfigT = TypeVar("ExecutorConfigT", bound=ExecutorConfig)
+WorkspaceConfigT = TypeVar("WorkspaceConfigT", bound=WorkspaceConfig)
 ExperimentT = TypeVar("ExperimentT", bound="Experiment")
 
 
@@ -40,35 +41,45 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
 
     @classmethod
     def cli(cls):
-        from .settings import Settings  # noqa: TC001
-
         @dataclass
-        class Args(Generic[ExecutorT, WorkspaceT, ExperimentT]):
+        class BaseArgs:
             settings: Settings
-            executor: ExecutorT
-            workspace: WorkspaceT
-            experiment: tyro.conf.OmitArgPrefixes[ExperimentT]
-            command: Literal["run", "count"] = "run"
+            executor: ExecutorConfig
+            workspace: WorkspaceConfig
 
-        args, _ = tyro.cli(
-            Args[Executor, Workspace, cls],
+        base_args, _ = tyro.cli(
+            BaseArgs,
             args=[arg for arg in sys.argv if arg != "--help"],
             return_unknown_args=True,
         )
+
+        @dataclass
+        class Args(Generic[ExperimentT, ExecutorConfigT, WorkspaceConfigT]):
+            settings: Settings
+            experiment: tyro.conf.OmitArgPrefixes[ExperimentT]
+            executor: ExecutorConfigT
+            workspace: WorkspaceConfigT
+            command: Literal["run", "count"] = "run"
+
         args = tyro.cli(
             Args[
-                args.executor._resolve_type() or Executor,
-                args.workspace._resolve_type() or Workspace,
                 cls,
+                (
+                    base_args.executor.resolve_config_type()
+                    if base_args.executor.type is not None
+                    else ExecutorConfig
+                ),
+                (
+                    base_args.workspace.resolve_config_type()
+                    if base_args.workspace.type is not None
+                    else WorkspaceConfig
+                ),
             ]
         )
 
-        if type(args.executor) is Executor:
-            args.executor = Executor.load(settings=args.settings)
-
-        if type(args.workspace) is Workspace:
-            args.workspace = Workspace.load(settings=args.settings)
+        executor = args.executor.load_executor(settings=args.settings)
+        workspace = args.workspace.load_workspace(settings=args.settings)
 
         match args.command:
             case "run":
-                args.experiment.run(workspace=args.workspace, executor=args.executor)
+                args.experiment.run(workspace=workspace, executor=executor)

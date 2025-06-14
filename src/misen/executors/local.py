@@ -5,15 +5,23 @@ from typing import TYPE_CHECKING, Any
 
 from rustworkx import topological_sort
 
-from ..executor import Executor
+from ..executor import Executor, ExecutorConfig
 
 if TYPE_CHECKING:
     from ..task import Task
     from ..workspace import Workspace
 
 
-class LocalExecutor(Executor, kw_only=True):
+class LocalExecutorConfig(ExecutorConfig, kw_only=True):
+    type = "local"
     i: int
+
+
+class LocalExecutor(Executor):
+    ConfigT = LocalExecutorConfig
+
+    def __init__(self, config: LocalExecutorConfig):
+        self.config = config
 
     def submit(self, task: Task, workspace: Workspace):
         return task.result(workspace=workspace)

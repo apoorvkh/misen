@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from functools import cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import msgspec
 from msgspec import Struct
 
 from .settings import Settings
-from .workspace import Workspace
+from .workspace import Workspace, WorkspaceConfig
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -17,30 +17,27 @@ if TYPE_CHECKING:
     from .task import Task
 
 
-class Executor(Struct, kw_only=True):
+class ExecutorConfig(Struct, kw_only=True):
     type: str | Literal["local"] | None = None
 
-    @staticmethod
-    def load(settings: Settings | None = None) -> Executor:
-        settings = settings or Settings()
+    def default(self) -> ExecutorConfig:
+        from .executors.local import LocalExecutorConfig
 
-        if "executor" in settings.toml_data:
-            executor = msgspec.convert(settings.toml_data["executor"], type=Executor)
-            executor_cls: type[Executor] | None = executor._resolve_type()
-            if executor_cls is not None:
-                return msgspec.convert(
-                    settings.toml_data["executor"],
-                    type=executor_cls,
-                )
+        return LocalExecutorConfig(i=99)
 
-        # fallback to default
-        from .executors.local import LocalExecutor
+    def from_settings(self, settings: Settings | None = None) -> ExecutorConfig:
+        if settings is None:
+            settings = Settings()
 
-        return LocalExecutor(i=99)
+        if (executor_toml := settings.toml_data.get("executor", None)) is not None:
+            config = msgspec.convert(executor_toml, type=ExecutorConfig)
+            return msgspec.convert(executor_toml, type=config.resolve_config_type())
 
-    def _resolve_type(self) -> type[Executor] | None:
+        return self.default()
+
+    def resolve_executor_type(self) -> type[Executor]:
         if self.type is None:
-            return None
+            return self.from_settings().resolve_executor_type()
 
         match self.type:
             case "local":
@@ -51,8 +48,29 @@ class Executor(Struct, kw_only=True):
         module, class_name = self.type.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
 
+    def resolve_config_type(self) -> type[ExecutorConfig]:
+        return self.resolve_executor_type().ConfigT
+
+    def load_executor(self, settings: Settings | None = None) -> Executor:
+        """Load the executor based on the configuration."""
+        if self.type is None:
+            config = self.from_settings(settings=settings)
+        else:
+            config = self
+        executor_cls = config.resolve_executor_type()
+        return executor_cls(config=config)
+
+
+class Executor(ABC):
+    ConfigT: ClassVar[type[ExecutorConfig]]
+
+    @abstractmethod
+    def __init__(self, config: ExecutorConfig):
+        raise NotImplementedError
+
     def computable_groups(self, task: Task, workspace: Workspace | None = None):
-        workspace = workspace or Workspace.load()
+        if workspace is None:
+            workspace = WorkspaceConfig().load_workspace()
         return _distributable_tasks(task, workspace)
 
     @abstractmethod
