@@ -13,9 +13,8 @@ from .serialization import serialize
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
-    from .caches import ResolvedHash, ResultHash
     from .executor import Executor
-    from .workspace import Workspace
+    from .workspace import ResolvedHash, ResultHash, Workspace
 
 __all__ = ["Task", "task"]
 
@@ -115,7 +114,7 @@ class Task(Generic[R]):
 
     def result(self, workspace: Workspace | None = None) -> R:
         """Compute or retrieve the Task result and cache it."""
-        from .caches import SerializedResult
+        from .workspace import SerializedResult
 
         if workspace is None:
             from .workspace import WorkspaceConfig

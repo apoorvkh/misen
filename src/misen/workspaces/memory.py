@@ -1,9 +1,10 @@
-from ..caches import (
+from ..workspace import (
     ResolvedHashCacheABC,
     ResultCacheABC,
     ResultHashCacheABC,
+    Workspace,
+    WorkspaceConfig,
 )
-from ..workspace import Workspace, WorkspaceConfig
 
 
 class MemoryResolvedHashCache(ResolvedHashCacheABC):
