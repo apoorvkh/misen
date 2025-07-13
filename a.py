@@ -1,81 +1,71 @@
-import asyncio
-import time
+from __future__ import annotations
 
-from misen import LocalExecutor, MultithreadedLocalExecutor, Task, task
-from misen.workspace import TestWorkSpace
+from typing import TypedDict
 
+import msgspec
 
-@task(uuid="QuNP", cache=False)
-def add(addx, addy):
-    return addx + addy
-
-
-@task(uuid="add2", cache=True)
-def adds(addsx, addsy):
-    return addsx + addsy
+from misen import Settings, Task, task
+from misen.experiment import Experiment
+from misen.workspace import Workspace, WorkspaceConfig
+from misen.workspaces.memory import MemoryWorkspace, MemoryWorkspaceConfig
 
 
-@task(uuid="def", cache=True)
-def multiply(mulx, muly, mulz: int = 0, n="m", **mulkwargsx):
-    print(f"{n} multiplying for 1 second")
-    time.sleep(1)
-    print(f"{n} returning")
-    return mulx * muly
+@task(cache_result=True)
+def add(i: int, j: int) -> int:
+    return i + j
+
+@task(cache_result=True)
+def multiply(i: int, j: int) -> int:
+    return i * j
+
+@task(cache_result=True)
+def mod(i: int, j: int) -> int:
+    return i % j
 
 
-@task(uuid="delayret", cache=True)
-def ret(a, t, n="ret"):
-    print(f"{n} sleeping for {t} seconds")
-    time.sleep(t)
-    print(f"{n} returning")
-    return a
+class ReturnType(TypedDict):
+    first: Task[int]
+    second: Task[int]
+    third: Task[int]
 
 
-def double(dubx):
-    return dubx * 2
+class TimesTwoPlusTen(Experiment, frozen=True):
+    x: int
 
-
-# class MultiplyExperiment(Experiment):
-#     def calls(self):
-#         return multiply(add(double(1), 4), add(np.csingle(3), 4), hello=np.datetime64("2005-02-25"))
-
+    def tasks(self) -> ReturnType:
+        first_step = Task(add, self.x, 10)
+        second_step = Task(multiply, first_step.T, 2)
+        third_step = Task(multiply, 15, 2)
+        return ReturnType(
+            first=first_step,
+            second=second_step,
+            third=third_step,
+        )
 
 if __name__ == "__main__":
-    # a = adds(4,3)
-    # b = adds(2,1)
-    # task_graph: Task = multiply(
-    #     multiply(
-    #         add(
-    #             add(a, b),
-    #             double(1)),
-    #         b),
-    #     add(
-    #         add(
-    #             np.csingle(3),
-    #             a),
-    #         b),
-    #     hello=np.datetime64("2005-02-25"),
-    # )
-    task_graph = Task(
-        multiply,
-        Task(multiply, Task(ret, 2, 3, n="r1"), 4, n="m1"),
-        Task(ret, 6, 1, n="r2"),
-        n="m2",
-    )
+    workspace = MemoryWorkspace(config=MemoryWorkspaceConfig(i=10))
+    print(workspace)
 
-    print(task_graph)
+    workspace = MemoryWorkspaceConfig(i=20).load()
+    print(workspace)
 
-    e = MultithreadedLocalExecutor()
-    ws = TestWorkSpace()
-    # try:
-    #     task_graph.result()
-    # except:
-    #     print("pass")
 
-    f = task_graph.run(workspace=ws, executor=e)
-    print(f)
-    r = asyncio.run(f())  # type: ignore
-    print(r)
-    print(ws.d)
+    # workspace = WorkspaceConfig(type="memory").load()
+    # print(workspace)
 
-    # print(task_graph.result(ws, e))
+    workspace = WorkspaceConfig().load()
+    print(workspace)
+
+    # workspace = WorkspaceConfig().from_settings(settings=Settings())
+    # print(workspace)
+
+    # TimesTwoPlusTen.cli()
+    # print(msgspec.to_builtins(cfg, order="sorted"))
+
+    # print(MemoryWorkspaceConfig(i=10).load())
+    # print(MemoryWorkspaceConfig(i=10).load() is MemoryWorkspace(config=MemoryWorkspaceConfig(i=10)))
+    # print(WorkspaceConfig(type="misen.workspaces.memory:MemoryWorkspace").load() is MemoryWorkspace(config=MemoryWorkspaceConfig(i=10)))
+    # experiment = TimesTwoPlusTen(x=5)
+    # print(experiment.tasks()['first'].result())
+    # print(experiment.tasks()['second'].result())
+    # print(experiment.tasks()['third'].result())
