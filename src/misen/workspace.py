@@ -6,7 +6,7 @@ from typing import Any, Callable, Iterator, Literal, cast
 
 import dill
 
-from .settings import ComponentABC, ConfigABC
+from .settings import ConfigABC, ConfigurableABC
 from .task import Task
 
 
@@ -17,7 +17,8 @@ class WorkspaceConfig(ConfigABC["WorkspaceConfig", "Workspace"], kw_only=True):
     def settings_key() -> str:
         return "workspace"
 
-    def default(self) -> WorkspaceConfig:
+    @staticmethod
+    def default() -> WorkspaceConfig:
         from .workspaces.memory import MemoryWorkspaceConfig
 
         return MemoryWorkspaceConfig(i=10)
@@ -31,7 +32,7 @@ class WorkspaceConfig(ConfigABC["WorkspaceConfig", "Workspace"], kw_only=True):
         return super().resolve_component_type()
 
 
-class Workspace(ComponentABC[WorkspaceConfig]):
+class Workspace(ConfigurableABC[WorkspaceConfig]):
     resolved_hashes: ResolvedHashCacheABC
     result_hashes: ResultHashCacheABC
     results: ResultCacheABC

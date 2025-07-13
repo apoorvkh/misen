@@ -13,8 +13,8 @@ from .serialization import serialize
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
-    from .executor import Executor
-    from .workspace import ResolvedHash, ResultHash, Workspace
+    from .executor import Executor, ExecutorConfig
+    from .workspace import ResolvedHash, ResultHash, Workspace, WorkspaceConfig
 
 __all__ = ["Task", "task"]
 
@@ -112,14 +112,14 @@ class Task(Generic[R]):
             if t.properties.cache_result and not t.properties.always_compute
         )
 
-    def result(self, workspace: Workspace | None = None) -> R:
+    def result(self, workspace: Workspace | WorkspaceConfig | None = None) -> R:
         """Compute or retrieve the Task result and cache it."""
-        from .workspace import SerializedResult
+        from .workspace import SerializedResult, WorkspaceConfig
 
         if workspace is None:
-            from .workspace import WorkspaceConfig
-
             workspace = WorkspaceConfig().load()
+        elif isinstance(workspace, WorkspaceConfig):
+            workspace = workspace.load()
 
         if not self.deps_cached(workspace=workspace):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
@@ -149,21 +149,27 @@ class Task(Generic[R]):
 
         return result
 
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
+    def run(
+        self,
+        workspace: Workspace | WorkspaceConfig | None = None,
+        executor: Executor | ExecutorConfig | None = None,
+    ) -> Future:
         """
         Submit task to executor to fully execute the task graph.
         """
-        from .workspace import WorkspaceConfig  # avoids circular import
+        from .executor import ExecutorConfig
 
         if executor is None:
-            from .executor import ExecutorConfig  # avoids circular import
-
             executor = ExecutorConfig().load()
+        elif isinstance(executor, ExecutorConfig):
+            executor = executor.load()
+
+        from .workspace import WorkspaceConfig
 
         if workspace is None:
-            from .workspace import WorkspaceConfig
-
             workspace = WorkspaceConfig().load()
+        elif isinstance(workspace, WorkspaceConfig):
+            workspace = workspace.load()
 
         return executor.submit(task=self, workspace=workspace)
 

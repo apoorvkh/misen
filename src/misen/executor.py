@@ -4,10 +4,11 @@ from abc import abstractmethod
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
-from .settings import ComponentABC, ConfigABC
+from .settings import ConfigABC, ConfigurableABC
 from .workspace import Workspace, WorkspaceConfig
 
 if TYPE_CHECKING:
+    import builtins
     from concurrent.futures import Future
 
     from .task import Task
@@ -20,12 +21,13 @@ class ExecutorConfig(ConfigABC["ExecutorConfig", "Executor"], kw_only=True):
     def settings_key() -> str:
         return "executor"
 
-    def default(self) -> ExecutorConfig:
+    @staticmethod
+    def default() -> ExecutorConfig:
         from .executors.local import LocalExecutorConfig
 
         return LocalExecutorConfig(i=99)
 
-    def resolve_component_type(self) -> type[Executor]:
+    def resolve_component_type(self) -> builtins.type[Executor]:
         match self.type:
             case "local":
                 from .executors.local import LocalExecutor
@@ -34,7 +36,7 @@ class ExecutorConfig(ConfigABC["ExecutorConfig", "Executor"], kw_only=True):
         return super().resolve_component_type()
 
 
-class Executor(ComponentABC[ExecutorConfig]):
+class Executor(ConfigurableABC[ExecutorConfig]):
     def computable_groups(self, task: Task, workspace: Workspace | None = None):
         if workspace is None:
             workspace = WorkspaceConfig().load()
