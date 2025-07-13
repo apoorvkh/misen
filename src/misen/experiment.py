@@ -66,12 +66,12 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
                 cls,
                 (
                     base_args.executor.resolve_config_type()
-                    if base_args.executor.type is not None
+                    if base_args.executor.type != "auto"
                     else ExecutorConfig
                 ),
                 (
                     base_args.workspace.resolve_config_type()
-                    if base_args.workspace.type is not None
+                    if base_args.workspace.type != "auto"
                     else WorkspaceConfig
                 ),
             ]

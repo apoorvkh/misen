@@ -5,13 +5,16 @@ from collections.abc import MutableMapping
 from typing import Any, Callable, Iterator, Literal, cast
 
 import dill
+import msgspec
 
-from .settings import ConfigABC, ConfigurableABC
+from .settings import ConfigABC, ConfigurableABC, Settings
 from .task import Task
+
+_WORKSPACES = {}
 
 
 class WorkspaceConfig(ConfigABC["WorkspaceConfig", "Workspace"], kw_only=True):
-    type: str | Literal["memory"] | None = None
+    type: str | Literal["memory", "auto"] = "auto"
 
     @staticmethod
     def settings_key() -> str:
@@ -31,11 +34,34 @@ class WorkspaceConfig(ConfigABC["WorkspaceConfig", "Workspace"], kw_only=True):
                 return MemoryWorkspace
         return super().resolve_component_type()
 
+    def load(self, settings: Settings | None = None) -> Workspace:
+        if self.__class__ is WorkspaceConfig and self.type != "auto":
+            raise TypeError(
+                "Cannot load WorkspaceConfig directly unless type='auto'. Use a specific workspace config class."
+            )
+        return super().load(settings=settings)
+
 
 class Workspace(ConfigurableABC[WorkspaceConfig]):
     resolved_hashes: ResolvedHashCacheABC
     result_hashes: ResultHashCacheABC
     results: ResultCacheABC
+
+    def __new__(cls, config: WorkspaceConfig):
+        _config_dict = msgspec.to_builtins(config) | {
+            "type": f"{config.__module__}:{config.__class__.__qualname__}"
+        }
+        print("_config_dict", _config_dict)
+        _h = hash(msgspec.json.encode(config, order="sorted"))
+        if _h not in _WORKSPACES:
+            _WORKSPACES[_h] = super().__new__(cls)
+        return _WORKSPACES[_h]
+
+    def __init__(self, config: WorkspaceConfig):
+        if not hasattr(self, "_initialized"):
+            print("Initializing Workspace with config:", config)
+            super().__init__(config=config)
+            self._initialized = True
 
     def is_cached(self, task: Task) -> bool:
         """Check if the result of the task is cached."""

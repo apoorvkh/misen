@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 class ExecutorConfig(ConfigABC["ExecutorConfig", "Executor"], kw_only=True):
-    type: str | Literal["local"] | None = None
+    type: str | Literal["local", "auto"] = "auto"
 
     @staticmethod
     def settings_key() -> str:
