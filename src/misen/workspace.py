@@ -51,15 +51,13 @@ class Workspace(ConfigurableABC[WorkspaceConfig]):
         _config_dict = msgspec.to_builtins(config) | {
             "type": f"{config.__module__}:{config.__class__.__qualname__}"
         }
-        print("_config_dict", _config_dict)
-        _h = hash(msgspec.json.encode(config, order="sorted"))
+        _h = hash(msgspec.json.encode(_config_dict, order="sorted"))
         if _h not in _WORKSPACES:
             _WORKSPACES[_h] = super().__new__(cls)
         return _WORKSPACES[_h]
 
     def __init__(self, config: WorkspaceConfig):
         if not hasattr(self, "_initialized"):
-            print("Initializing Workspace with config:", config)
             super().__init__(config=config)
             self._initialized = True
 
