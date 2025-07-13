@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 
 class LocalExecutorConfig(ExecutorConfig):
-    type = "local"
     i: int
 
 

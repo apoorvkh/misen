@@ -29,7 +29,6 @@ class MemoryResultCache(ResultCacheABC):
 
 
 class MemoryWorkspaceConfig(WorkspaceConfig):
-    type = "memory"
     i: int
 
 
