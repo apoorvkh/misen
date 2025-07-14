@@ -1,45 +1,70 @@
 from __future__ import annotations
 
-from abc import abstractmethod
+import inspect
+from abc import ABC, ABCMeta, abstractmethod
 from functools import cache
+from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
-from .settings import ConfigABC, ConfigurableABC
-from .workspace import Workspace, WorkspaceConfig
+from .settings import Settings
+from .workspace import Workspace
 
 if TYPE_CHECKING:
-    import builtins
     from concurrent.futures import Future
 
     from .task import Task
 
 
-class ExecutorConfig(ConfigABC["ExecutorConfig", "Executor"], kw_only=True):
-    type: str | Literal["local", "auto"] = "auto"
+class ExecutorMeta(ABCMeta):
+    """
+    Metaclass that makes `inspect.signature(SubClass)` show the parameters of `SubClass.__init__`.
+    """
 
+    def __new__(mcls, name, bases, namespace, **kwds):
+        cls = super().__new__(mcls, name, bases, namespace, **kwds)
+        init_sig = inspect.signature(cls.__init__)
+        params = list(init_sig.parameters.values())[1:]
+        cls.__signature__ = init_sig.replace(parameters=params)  # type: ignore
+        return cls
+
+
+ExecutorType = str | Literal["auto", "local", "slurm"]
+
+
+class Executor(ABC, metaclass=ExecutorMeta):
     @staticmethod
-    def settings_key() -> str:
-        return "executor"
-
-    @staticmethod
-    def default() -> ExecutorConfig:
-        from .executors.local import LocalExecutorConfig
-
-        return LocalExecutorConfig(i=99)
-
-    def resolve_component_type(self) -> builtins.type[Executor]:
-        match self.type:
+    def resolve_type(t: ExecutorType) -> type["Executor"]:
+        match t:
+            case "auto":
+                return Executor
             case "local":
-                from .executors.local import LocalExecutor
+                from misen.executors.local import LocalExecutor
 
                 return LocalExecutor
-        return super().resolve_component_type()
+            case "slurm":
+                raise NotImplementedError
+            case _:
+                module, class_name = t.split(":", maxsplit=1)
+                return getattr(import_module(module), class_name)
 
+    @staticmethod
+    def auto(settings: Settings | None = None) -> "Executor":
+        if settings is None:
+            settings = Settings()
 
-class Executor(ConfigurableABC[ExecutorConfig]):
+        executor_type = settings.toml_data.get("executor_type", "auto")
+        executor_cls = Executor.resolve_type(executor_type)
+        if executor_cls is not Executor:
+            return executor_cls(**settings.toml_data.get("executor_kwargs", {}))
+
+        # default
+        from misen.executors.local import LocalExecutor
+
+        return LocalExecutor(i=20)
+
     def computable_groups(self, task: Task, workspace: Workspace | None = None):
         if workspace is None:
-            workspace = WorkspaceConfig().load()
+            workspace = Workspace.auto()
         return _distributable_tasks(task, workspace)
 
     @abstractmethod

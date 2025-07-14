@@ -9,15 +9,15 @@ from typing import Generic, Literal, Mapping, TypeVar
 import tyro
 from msgspec import Struct
 
-from .executor import Executor, ExecutorConfig
+from .executor import Executor, ExecutorType
 from .settings import Settings  # noqa: TC001
 from .task import Task
-from .workspace import Workspace, WorkspaceConfig
+from .workspace import Workspace, WorkspaceType
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
 
-ExecutorConfigT = TypeVar("ExecutorConfigT", bound=ExecutorConfig)
-WorkspaceConfigT = TypeVar("WorkspaceConfigT", bound=WorkspaceConfig)
+ExecutorT = TypeVar("ExecutorT", bound=Executor)
+WorkspaceT = TypeVar("WorkspaceT", bound=Workspace)
 ExperimentT = TypeVar("ExperimentT", bound="Experiment")
 
 
@@ -44,8 +44,8 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         @dataclass
         class BaseArgs:
             settings: Settings
-            executor: ExecutorConfig
-            workspace: WorkspaceConfig
+            executor_type: ExecutorType = "auto"
+            workspace_type: WorkspaceType = "auto"
 
         base_args, _ = tyro.cli(
             BaseArgs,
@@ -53,33 +53,36 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
             return_unknown_args=True,
         )
 
+        executor_cls = Executor.resolve_type(base_args.executor_type)
+        if executor_cls is Executor:
+            executor_cls = tyro.conf.Suppress[Executor]
+
+        workspace_cls = Workspace.resolve_type(base_args.workspace_type)
+        if workspace_cls is Workspace:
+            workspace_cls = tyro.conf.Suppress[Workspace]
+
         @dataclass
-        class Args(Generic[ExperimentT, ExecutorConfigT, WorkspaceConfigT]):
+        class Args(Generic[ExperimentT, ExecutorT, WorkspaceT]):
             settings: Settings
             experiment: tyro.conf.OmitArgPrefixes[ExperimentT]
-            executor: ExecutorConfigT
-            workspace: WorkspaceConfigT
+            executor: ExecutorT
+            workspace: WorkspaceT
+            workspace_type: WorkspaceType = "auto"
+            executor_type: ExecutorType = "auto"
             command: Literal["run", "count"] = "run"
 
-        args = tyro.cli(
-            Args[
-                cls,
-                (
-                    base_args.executor.resolve_config_type()
-                    if base_args.executor.type != "auto"
-                    else ExecutorConfig
-                ),
-                (
-                    base_args.workspace.resolve_config_type()
-                    if base_args.workspace.type != "auto"
-                    else WorkspaceConfig
-                ),
-            ]
-        )
+        args = tyro.cli(Args[cls, executor_cls, workspace_cls])
 
-        executor = args.executor.load(settings=args.settings)
-        workspace = args.workspace.load(settings=args.settings)
+        if args.executor_type == "auto":
+            executor = Executor.auto(settings=args.settings)
+        else:
+            executor = args.executor
+
+        if args.workspace_type == "auto":
+            workspace = Workspace.auto(settings=args.settings)
+        else:
+            workspace = args.workspace
 
         match args.command:
             case "run":
-                args.experiment.run(workspace=workspace, executor=executor)
+                args.experiment.run(executor=executor, workspace=workspace)

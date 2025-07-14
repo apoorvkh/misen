@@ -1,65 +1,75 @@
 from __future__ import annotations
 
-from abc import ABC
+import inspect
+from abc import ABC, ABCMeta
 from collections.abc import MutableMapping
+from importlib import import_module
 from typing import Any, Callable, Iterator, Literal, cast
 
 import dill
-import msgspec
 
-from .settings import ConfigABC, ConfigurableABC, Settings
-from .task import Task
-
-_WORKSPACES = {}
+from .settings import Settings
+from .task import Task, _deterministic_hash
 
 
-class WorkspaceConfig(ConfigABC["WorkspaceConfig", "Workspace"], kw_only=True):
-    type: str | Literal["memory", "auto"] = "auto"
+class WorkspaceMeta(ABCMeta):
+    """
+    Metaclass that turns every subclass into a *parameterised singleton* and
+    makes `inspect.signature(SubClass)` show the parameters of `SubClass.__init__`.
+    """
 
-    @staticmethod
-    def settings_key() -> str:
-        return "workspace"
+    _instances = {}
 
-    @staticmethod
-    def default() -> WorkspaceConfig:
-        from .workspaces.memory import MemoryWorkspaceConfig
+    def __new__(mcls, name, bases, namespace, **kwds):
+        cls = super().__new__(mcls, name, bases, namespace, **kwds)
+        init_sig = inspect.signature(cls.__init__)
+        params = list(init_sig.parameters.values())[1:]
+        cls.__signature__ = init_sig.replace(parameters=params)  # type: ignore
+        return cls
 
-        return MemoryWorkspaceConfig(i=10)
+    def __call__(cls, **kwargs):
+        key = _deterministic_hash(kwargs)
 
-    def resolve_component_type(self) -> type[Workspace]:
-        match self.type:
-            case "memory":
-                from .workspaces.memory import MemoryWorkspace
-
-                return MemoryWorkspace
-        return super().resolve_component_type()
-
-    def load(self, settings: Settings | None = None) -> Workspace:
-        if self.__class__ is WorkspaceConfig and self.type != "auto":
-            raise TypeError(
-                "Cannot load WorkspaceConfig directly unless type='auto'. Use a specific workspace config class."
-            )
-        return super().load(settings=settings)
+        if key not in WorkspaceMeta._instances:
+            WorkspaceMeta._instances[key] = super().__call__(**kwargs)
+        return WorkspaceMeta._instances[key]
 
 
-class Workspace(ConfigurableABC[WorkspaceConfig]):
+WorkspaceType = str | Literal["auto", "memory"]
+
+
+class Workspace(ABC, metaclass=WorkspaceMeta):
     resolved_hashes: ResolvedHashCacheABC
     result_hashes: ResultHashCacheABC
     results: ResultCacheABC
 
-    def __new__(cls, config: WorkspaceConfig):
-        _config_dict = msgspec.to_builtins(config) | {
-            "type": f"{config.__module__}:{config.__class__.__qualname__}"
-        }
-        _h = hash(msgspec.json.encode(_config_dict, order="sorted"))
-        if _h not in _WORKSPACES:
-            _WORKSPACES[_h] = super().__new__(cls)
-        return _WORKSPACES[_h]
+    @staticmethod
+    def resolve_type(t: WorkspaceType) -> type["Workspace"]:
+        match t:
+            case "auto":
+                return Workspace
+            case "memory":
+                from misen.workspaces.memory import MemoryWorkspace
 
-    def __init__(self, config: WorkspaceConfig):
-        if not hasattr(self, "_initialized"):
-            super().__init__(config=config)
-            self._initialized = True
+                return MemoryWorkspace
+            case _:
+                module, class_name = t.split(":", maxsplit=1)
+                return getattr(import_module(module), class_name)
+
+    @staticmethod
+    def auto(settings: Settings | None = None) -> "Workspace":
+        if settings is None:
+            settings = Settings()
+
+        workspace_type = settings.toml_data.get("workspace_type", "auto")
+        workspace_cls = Workspace.resolve_type(workspace_type)
+        if workspace_cls is not Workspace:
+            return workspace_cls(**settings.toml_data.get("workspace_kwargs", {}))
+
+        # default
+        from misen.workspaces.memory import MemoryWorkspace
+
+        return MemoryWorkspace(i=20)
 
     def is_cached(self, task: Task) -> bool:
         """Check if the result of the task is cached."""
