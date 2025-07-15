@@ -13,9 +13,8 @@ from .serialization import serialize
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
-    from .caches import ResolvedHash, ResultHash
     from .executor import Executor
-    from .workspace import Workspace
+    from .workspace import ResolvedHash, ResultHash, Workspace
 
 __all__ = ["Task", "task"]
 
@@ -115,12 +114,11 @@ class Task(Generic[R]):
 
     def result(self, workspace: Workspace | None = None) -> R:
         """Compute or retrieve the Task result and cache it."""
-        from .caches import SerializedResult
 
         if workspace is None:
-            from .workspace import WorkspaceConfig
+            from .workspace import Workspace
 
-            workspace = WorkspaceConfig().load()
+            workspace = Workspace.auto()
 
         if not self.deps_cached(workspace=workspace):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
@@ -142,6 +140,8 @@ class Task(Generic[R]):
 
         workspace.result_hashes[self] = cast("ResultHash", _deterministic_hash(result))
 
+        from .workspace import SerializedResult
+
         if self.properties.cache_result:
             workspace.results[self] = SerializedResult(
                 deserializer=self.properties.from_bytes,
@@ -150,21 +150,24 @@ class Task(Generic[R]):
 
         return result
 
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
+    def run(
+        self,
+        workspace: Workspace | None = None,
+        executor: Executor | None = None,
+    ) -> Future:
         """
         Submit task to executor to fully execute the task graph.
         """
-        from .workspace import WorkspaceConfig  # avoids circular import
 
         if executor is None:
-            from .executor import ExecutorConfig  # avoids circular import
+            from .executor import Executor
 
-            executor = ExecutorConfig().load()
+            executor = Executor.auto()
 
         if workspace is None:
-            from .workspace import WorkspaceConfig
+            from .workspace import Workspace
 
-            workspace = WorkspaceConfig().load()
+            workspace = Workspace.auto()
 
         return executor.submit(task=self, workspace=workspace)
 
