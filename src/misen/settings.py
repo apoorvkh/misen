@@ -12,8 +12,13 @@ else:
     import tomli as tomllib
 
 
+DEFAULT_SETTINGS_FILE = Path(
+    os.environ.get("MISEN_SETTINGS_FILE") or (Path.cwd() / "misen_settings.toml")
+)
+
+
 class Settings(Struct, dict=True):
-    file: Path = Path(os.environ.get("MISEN_SETTINGS_FILE") or (Path.cwd() / "misen_settings.toml"))
+    file: Path = DEFAULT_SETTINGS_FILE
 
     @cached_property
     def toml_data(self) -> dict[str, Any]:

@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import sys
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import make_dataclass
 from functools import cache
+from pathlib import Path
 from typing import Generic, Literal, Mapping, TypeVar
 
 import tyro
 from msgspec import Struct
 
 from .executor import Executor, ExecutorType
-from .settings import Settings  # noqa: TC001
+from .settings import DEFAULT_SETTINGS_FILE, Settings  # noqa: TC001
 from .task import Task
 from .workspace import Workspace, WorkspaceType
 
@@ -41,45 +42,39 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
 
     @classmethod
     def cli(cls):
-        @dataclass
-        class BaseArgs:
-            settings: Settings
-            executor_type: ExecutorType = "auto"
-            workspace_type: WorkspaceType = "auto"
+        _fields_without_defaults = []
+        _fields_with_defaults = [
+            ("command", Literal["run", "count"], "run"),
+            ("settings_file", Path, DEFAULT_SETTINGS_FILE),
+            ("executor_type", ExecutorType, "auto"),
+            ("workspace_type", WorkspaceType, "auto"),
+        ]
 
-        base_args, _ = tyro.cli(
-            BaseArgs,
+        args, _ = tyro.cli(
+            make_dataclass("", _fields_without_defaults + _fields_with_defaults),
             args=[arg for arg in sys.argv if arg != "--help"],
             return_unknown_args=True,
         )
 
-        executor_cls = Executor.resolve_type(base_args.executor_type)
-        if executor_cls is Executor:
-            executor_cls = tyro.conf.Suppress[Executor]
+        if args.executor_type != "auto":
+            _fields_without_defaults.append(("executor", Executor.resolve_type(args.executor_type)))
+        if args.workspace_type != "auto":
+            _fields_without_defaults.append(
+                ("workspace", Workspace.resolve_type(args.workspace_type))
+            )
+        _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))
 
-        workspace_cls = Workspace.resolve_type(base_args.workspace_type)
-        if workspace_cls is Workspace:
-            workspace_cls = tyro.conf.Suppress[Workspace]
+        args = tyro.cli(make_dataclass("", _fields_without_defaults + _fields_with_defaults))
 
-        @dataclass
-        class Args(Generic[ExperimentT, ExecutorT, WorkspaceT]):
-            settings: Settings
-            experiment: tyro.conf.OmitArgPrefixes[ExperimentT]
-            executor: ExecutorT
-            workspace: WorkspaceT
-            workspace_type: WorkspaceType = "auto"
-            executor_type: ExecutorType = "auto"
-            command: Literal["run", "count"] = "run"
-
-        args = tyro.cli(Args[cls, executor_cls, workspace_cls])
+        settings = Settings(file=args.settings_file)
 
         if args.executor_type == "auto":
-            executor = Executor.auto(settings=args.settings)
+            executor = Executor.auto(settings=settings)
         else:
             executor = args.executor
 
         if args.workspace_type == "auto":
-            workspace = Workspace.auto(settings=args.settings)
+            workspace = Workspace.auto(settings=settings)
         else:
             workspace = args.workspace
 
