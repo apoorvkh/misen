@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import inspect
-from abc import ABC, ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 from functools import cache
 from importlib import import_module
 from typing import TYPE_CHECKING, Literal
@@ -15,23 +14,10 @@ if TYPE_CHECKING:
     from .task import Task
 
 
-class ExecutorMeta(ABCMeta):
-    """
-    Metaclass that makes `inspect.signature(SubClass)` show the parameters of `SubClass.__init__`.
-    """
-
-    def __new__(mcls, name, bases, namespace, **kwds):
-        cls = super().__new__(mcls, name, bases, namespace, **kwds)
-        init_sig = inspect.signature(cls.__init__)
-        params = list(init_sig.parameters.values())[1:]
-        cls.__signature__ = init_sig.replace(parameters=params)  # type: ignore
-        return cls
-
-
 ExecutorType = str | Literal["auto", "local", "slurm"]
 
 
-class Executor(ABC, metaclass=ExecutorMeta):
+class Executor(ABC):
     @staticmethod
     def resolve_type(t: ExecutorType) -> type["Executor"]:
         match t:
