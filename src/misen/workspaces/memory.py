@@ -1,9 +1,9 @@
-from ..caches import (
+from ..workspace import (
     ResolvedHashCacheABC,
     ResultCacheABC,
     ResultHashCacheABC,
+    Workspace,
 )
-from ..workspace import Workspace, WorkspaceConfig
 
 
 class MemoryResolvedHashCache(ResolvedHashCacheABC):
@@ -27,18 +27,9 @@ class MemoryResultCache(ResultCacheABC):
         self.mapping = {}
 
 
-class MemoryWorkspaceConfig(WorkspaceConfig):
-    type = "memory"
-    i: int
-
-
 class MemoryWorkspace(Workspace):
-    @staticmethod
-    def config_type() -> type[WorkspaceConfig]:
-        return MemoryWorkspaceConfig
-
-    def __init__(self, config: MemoryWorkspaceConfig):
-        super().__init__(config=config)
+    def __init__(self, i: int):
+        self.i = i
         self.resolved_hashes = MemoryResolvedHashCache(workspace=self)
         self.result_hashes = MemoryResultHashCache(workspace=self)
         self.results = MemoryResultCache(workspace=self)

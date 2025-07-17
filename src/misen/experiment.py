@@ -2,29 +2,30 @@ from __future__ import annotations
 
 import sys
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import make_dataclass
 from functools import cache
+from pathlib import Path
 from typing import Generic, Literal, Mapping, TypeVar
 
 import tyro
 from msgspec import Struct
 
-from .executor import Executor, ExecutorConfig
-from .settings import Settings  # noqa: TC001
+from .executor import Executor, ExecutorType
+from .settings import DEFAULT_SETTINGS_FILE, Settings  # noqa: TC001
 from .task import Task
-from .workspace import Workspace, WorkspaceConfig
+from .workspace import Workspace, WorkspaceType
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
 
-ExecutorConfigT = TypeVar("ExecutorConfigT", bound=ExecutorConfig)
-WorkspaceConfigT = TypeVar("WorkspaceConfigT", bound=WorkspaceConfig)
+ExecutorT = TypeVar("ExecutorT", bound=Executor)
+WorkspaceT = TypeVar("WorkspaceT", bound=Workspace)
 ExperimentT = TypeVar("ExperimentT", bound="Experiment")
 
 
 class Experiment(Generic[TasksT], Struct, frozen=True):
     @abstractmethod
     def tasks(self) -> TasksT:
-        raise NotImplementedError(f"{self.__class__.__name__} must implement a tasks() method.")
+        raise NotImplementedError
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -41,45 +42,42 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
 
     @classmethod
     def cli(cls):
-        @dataclass
-        class BaseArgs:
-            settings: Settings
-            executor: ExecutorConfig
-            workspace: WorkspaceConfig
+        _fields_without_defaults = []
+        _fields_with_defaults = [
+            ("command", Literal["run", "count"], "run"),
+            ("settings_file", Path, DEFAULT_SETTINGS_FILE),
+            ("executor_type", ExecutorType, "auto"),
+            ("workspace_type", WorkspaceType, "auto"),
+        ]
 
-        base_args, _ = tyro.cli(
-            BaseArgs,
+        args, _ = tyro.cli(
+            make_dataclass("", _fields_without_defaults + _fields_with_defaults),
             args=[arg for arg in sys.argv if arg != "--help"],
             return_unknown_args=True,
         )
 
-        @dataclass
-        class Args(Generic[ExperimentT, ExecutorConfigT, WorkspaceConfigT]):
-            settings: Settings
-            experiment: tyro.conf.OmitArgPrefixes[ExperimentT]
-            executor: ExecutorConfigT
-            workspace: WorkspaceConfigT
-            command: Literal["run", "count"] = "run"
+        if args.executor_type != "auto":
+            _fields_without_defaults.append(("executor", Executor.resolve_type(args.executor_type)))
+        if args.workspace_type != "auto":
+            _fields_without_defaults.append(
+                ("workspace", Workspace.resolve_type(args.workspace_type))
+            )
+        _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))
 
-        args = tyro.cli(
-            Args[
-                cls,
-                (
-                    base_args.executor.resolve_config_type()
-                    if base_args.executor.type is not None
-                    else ExecutorConfig
-                ),
-                (
-                    base_args.workspace.resolve_config_type()
-                    if base_args.workspace.type is not None
-                    else WorkspaceConfig
-                ),
-            ]
-        )
+        args = tyro.cli(make_dataclass("", _fields_without_defaults + _fields_with_defaults))
 
-        executor = args.executor.load(settings=args.settings)
-        workspace = args.workspace.load(settings=args.settings)
+        settings = Settings(file=args.settings_file)
+
+        if args.executor_type == "auto":
+            executor = Executor.auto(settings=settings)
+        else:
+            executor = args.executor
+
+        if args.workspace_type == "auto":
+            workspace = Workspace.auto(settings=settings)
+        else:
+            workspace = args.workspace
 
         match args.command:
             case "run":
-                args.experiment.run(workspace=workspace, executor=executor)
+                args.experiment.run(executor=executor, workspace=workspace)
