@@ -35,7 +35,7 @@ class WorkspaceMeta(ABCMeta):
         return WorkspaceMeta._instances[key]
 
 
-WorkspaceType = str | Literal["auto", "memory"]
+WorkspaceType = str | Literal["auto", "memory", "disk"]
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
@@ -52,6 +52,10 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
                 from misen.workspaces.memory import MemoryWorkspace
 
                 return MemoryWorkspace
+            case "disk":
+                from misen.workspaces.disk import DiskWorkspace
+
+                return DiskWorkspace
             case _:
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
@@ -85,15 +89,19 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
     #     raise NotImplementedError
 
 
-class ObjectHash(int):
+class Hash(int):
     pass
 
 
-class ResolvedHash(int):
+class ObjectHash(Hash):
     pass
 
 
-class ResultHash(int):
+class ResolvedHash(Hash):
+    pass
+
+
+class ResultHash(Hash):
     pass
 
 

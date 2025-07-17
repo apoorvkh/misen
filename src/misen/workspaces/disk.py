@@ -3,31 +3,71 @@ from __future__ import annotations
 import os
 from datetime import timedelta
 from pathlib import Path
-from typing import MutableMapping
+from typing import MutableMapping, cast
 
+import lmdb
 from flufl.lock import Lock, NotLockedError  # pyright: ignore
 
-from ..caches import (
+from ..workspace import (
+    Hash,
     ResolvedHashCacheABC,
     ResultCacheABC,
     ResultHash,
     ResultHashCacheABC,
+    Workspace,
 )
-from ..workspace import Workspace, WorkspaceConfig
 
 
-class MemoryResolvedHashCache(ResolvedHashCacheABC):
-    def __init__(self, workspace: Workspace, new_workspace: bool = False):
+class LMDBMapping(MutableMapping[Hash, Hash]):
+    def __init__(self, database_dir: Path):
+        self.env = lmdb.open(str(database_dir), map_size=1_000_000_000, max_dbs=1)
+        self.db = self.env.open_db()
+
+    def __hash_encode(self, hash: Hash) -> bytes:
+        return hash.to_bytes(8, byteorder="big")
+
+    def __hash_decode(self, encoded_hash: bytes) -> Hash:
+        return cast("Hash", int.from_bytes(encoded_hash, byteorder="big"))
+
+    def __getitem__(self, key: Hash) -> Hash:
+        with self.env.begin(db=self.db) as txn:
+            value = txn.get(self.__hash_encode(key))
+            if value is None:
+                raise KeyError(f"Key {key} not found")
+            return self.__hash_decode(value)
+
+    def __setitem__(self, key: Hash, value: Hash):
+        with self.env.begin(db=self.db, write=True) as txn:
+            txn.put(self.__hash_encode(key), self.__hash_encode(value))
+
+    def __delitem__(self, key: Hash):
+        with self.env.begin(db=self.db, write=True) as txn:
+            if not txn.delete(self.__hash_encode(key)):
+                raise KeyError(f"Key {key} not found")
+
+    def __iter__(self):
+        with self.env.begin(db=self.db) as txn:
+            cursor = txn.cursor()
+            for encoded_key, _ in cursor:
+                yield self.__hash_decode(encoded_key)
+
+    def __len__(self):
+        with self.env.begin(db=self.db) as txn:
+            return txn.stat(db=self.db)["entries"]
+
+
+class DiskResolvedHashCache(ResolvedHashCacheABC):
+    def __init__(self, workspace: DiskWorkspace):
         super().__init__()
         self.workspace = workspace
-        self.mapping = {}
+        self.mapping = LMDBMapping(self.workspace.project_directory / "resolved_hash_cache")  # pyright: ignore
 
 
-class MemoryResultHashCache(ResultHashCacheABC):
-    def __init__(self, workspace: Workspace, new_workspace: bool = False):
+class DiskResultHashCache(ResultHashCacheABC):
+    def __init__(self, workspace: DiskWorkspace):
         super().__init__()
         self.workspace = workspace
-        self.mapping = {}
+        self.mapping = LMDBMapping(workspace.workspace_directory / "result_hash_cache")  # pyright: ignore
 
 
 class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
@@ -124,21 +164,10 @@ class DiskResultCache(ResultCacheABC):
         self.mapping = DiskResultCacheMapping(self)
 
 
-class DiskWorkspaceConfig(WorkspaceConfig):
-    type = "disk"
-    directory: str | None
-
-
 class DiskWorkspace(Workspace):
-    @staticmethod
-    def config_type() -> type[WorkspaceConfig]:
-        return DiskWorkspaceConfig
-
-    def __init__(self, config: DiskWorkspaceConfig):
-        super().__init__(config=config)
-
+    def __init__(self, directory: str):
         # open/create at specified directory or in CWD otherwise
-        self.project_directory = Path(config.directory if config.directory is not None else "./")
+        self.project_directory = Path(directory if directory is not None else "./")
         self.workspace_directory = self.project_directory / ".misen_workspace"
 
         # at the moment, only support one workspace per directory, TODO: support multiple
@@ -147,6 +176,6 @@ class DiskWorkspace(Workspace):
             os.mkdir(self.workspace_directory)
             new_workspace = True
 
-        self.resolved_hashes = MemoryResolvedHashCache(workspace=self, new_workspace=new_workspace)
-        self.result_hashes = MemoryResultHashCache(workspace=self, new_workspace=new_workspace)
+        self.resolved_hashes = DiskResolvedHashCache(workspace=self)
+        self.result_hashes = DiskResultHashCache(workspace=self)
         self.results = DiskResultCache(workspace=self, new_workspace=new_workspace)
