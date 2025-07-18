@@ -13,11 +13,11 @@ if TYPE_CHECKING:
 
 
 class LocalExecutor(Executor):
-    def __init__(self, i: int):
-        self.i = i
+    def __init__(self):
+        pass
 
     def submit(self, task: Task, workspace: Workspace):
-        return task.result(workspace=workspace)
+        return task.result(workspace=workspace, allow_uncached_deps=True)
 
 
 class MultithreadedLocalExecutor(Executor):
@@ -30,7 +30,9 @@ class MultithreadedLocalExecutor(Executor):
 
             # graphviz_draw(task_graph, edge_attr_fn=label_dag_edge).save("dag.png")
 
-            task_dict: dict[int, asyncio.Awaitable] = {}  # is this the right typing? # type: ignore
+            task_dict: dict[
+                int, asyncio.Awaitable
+            ] = {}  # is this the right typing? # type: ignore
 
             # go through tasks in topological order
             for node in topological_sort(task_graph):

@@ -2,21 +2,21 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-import msgspec
-
-from misen import Settings, Task, task
+from misen import Task, task
 from misen.experiment import Experiment
-from misen.workspace import Workspace, WorkspaceConfig
-from misen.workspaces.memory import MemoryWorkspace, MemoryWorkspaceConfig
+from misen.workspaces.disk import DiskWorkspace
+from misen.executors.local import LocalExecutor
 
 
 @task(cache_result=True)
 def add(i: int, j: int) -> int:
     return i + j
 
+
 @task(cache_result=True)
 def multiply(i: int, j: int) -> int:
     return i * j
+
 
 @task(cache_result=True)
 def mod(i: int, j: int) -> int:
@@ -42,30 +42,11 @@ class TimesTwoPlusTen(Experiment, frozen=True):
             third=third_step,
         )
 
+
 if __name__ == "__main__":
-    workspace = MemoryWorkspace(config=MemoryWorkspaceConfig(i=10))
-    print(workspace)
+    workspace = DiskWorkspace(directory="./")
+    executor = LocalExecutor()
 
-    workspace = MemoryWorkspaceConfig(i=20).load()
-    print(workspace)
-
-
-    # workspace = WorkspaceConfig(type="memory").load()
-    # print(workspace)
-
-    workspace = WorkspaceConfig().load()
-    print(workspace)
-
-    # workspace = WorkspaceConfig().from_settings(settings=Settings())
-    # print(workspace)
-
-    # TimesTwoPlusTen.cli()
-    # print(msgspec.to_builtins(cfg, order="sorted"))
-
-    # print(MemoryWorkspaceConfig(i=10).load())
-    # print(MemoryWorkspaceConfig(i=10).load() is MemoryWorkspace(config=MemoryWorkspaceConfig(i=10)))
-    # print(WorkspaceConfig(type="misen.workspaces.memory:MemoryWorkspace").load() is MemoryWorkspace(config=MemoryWorkspaceConfig(i=10)))
-    # experiment = TimesTwoPlusTen(x=5)
-    # print(experiment.tasks()['first'].result())
-    # print(experiment.tasks()['second'].result())
-    # print(experiment.tasks()['third'].result())
+    exp = TimesTwoPlusTen(2)
+    exp.run(workspace=workspace, executor=executor)
+    print(exp.result("second"))

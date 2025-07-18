@@ -103,7 +103,11 @@ class Task(Generic[R]):
         }
 
     def dependencies(self) -> list[Task]:
-        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
+        return [
+            t
+            for t in itertools.chain(self.args, self.kwargs.values())
+            if isinstance(t, Task)
+        ]
 
     def deps_cached(self, workspace: Workspace) -> bool:
         return all(
@@ -112,7 +116,9 @@ class Task(Generic[R]):
             if t.properties.cache_result and not t.properties.always_compute
         )
 
-    def result(self, workspace: Workspace | None = None) -> R:
+    def result(
+        self, workspace: Workspace | None = None, allow_uncached_deps: bool = False
+    ) -> R:
         """Compute or retrieve the Task result and cache it."""
 
         if workspace is None:
@@ -120,8 +126,10 @@ class Task(Generic[R]):
 
             workspace = Workspace.auto()
 
-        if not self.deps_cached(workspace=workspace):
-            raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
+        if (not self.deps_cached(workspace=workspace)) and not allow_uncached_deps:
+            raise RuntimeError(
+                f"{self} has dependencies which must be computed and cached first."
+            )
 
         if self.properties.cache_result and not self.properties.always_compute:
             try:
@@ -131,7 +139,10 @@ class Task(Generic[R]):
                 pass
 
         result = self.func(
-            *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
+            *tuple(
+                v.result(workspace=workspace) if isinstance(v, Task) else v
+                for v in self.args
+            ),
             **{
                 k: v.result(workspace=workspace) if isinstance(v, Task) else v
                 for k, v in self.kwargs.items()
@@ -178,7 +189,11 @@ class Task(Generic[R]):
                 (
                     self.properties.id,
                     {
-                        k: (v.__hash__() if isinstance(v, Task) else _deterministic_hash(v))
+                        k: (
+                            v.__hash__()
+                            if isinstance(v, Task)
+                            else _deterministic_hash(v)
+                        )
                         for k, v in self.arguments_for_hashing.items()
                     },
                 )
@@ -212,7 +227,9 @@ class Task(Generic[R]):
         try:
             return workspace.result_hashes[self]
         except KeyError:
-            raise RuntimeError(f"{self} must be computed first.")
+            raise KeyError(
+                f"{self} must be computed first."
+            )  # this has to be a keyerror, turns out, for the Mapping class's __contains__ implementation to return False
 
 
 def _deterministic_hash(obj: Any, seed: int = 0) -> int:

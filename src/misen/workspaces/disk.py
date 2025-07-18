@@ -60,14 +60,14 @@ class DiskResolvedHashCache(ResolvedHashCacheABC):
     def __init__(self, workspace: DiskWorkspace):
         super().__init__()
         self.workspace = workspace
-        self.mapping = LMDBMapping(self.workspace.project_directory / "resolved_hash_cache")  # pyright: ignore
+        self.mapping = LMDBMapping(self.workspace.workspace_directory / "resolved_hash_cache")  # pyright: ignore
 
 
 class DiskResultHashCache(ResultHashCacheABC):
     def __init__(self, workspace: DiskWorkspace):
         super().__init__()
         self.workspace = workspace
-        self.mapping = LMDBMapping(workspace.workspace_directory / "result_hash_cache")  # pyright: ignore
+        self.mapping = LMDBMapping(self.workspace.workspace_directory / "result_hash_cache")  # pyright: ignore
 
 
 class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
@@ -75,9 +75,9 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
         self.cache = cache
 
     def __aquire_lock(self, filename: Path) -> Lock:
-        item_lock_filename = filename / ".lock"
+        item_lock_filename = filename.name + ".lock"
 
-        lock = Lock(str(item_lock_filename), lifetime=timedelta(hours=1))
+        lock = Lock(item_lock_filename, lifetime=timedelta(hours=1))
         lock.lock()
 
         return lock
