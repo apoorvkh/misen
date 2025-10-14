@@ -78,7 +78,7 @@ class Task(Generic[R]):
 
     @property
     def T(self) -> R:
-        return self  # type: ignore
+        return cast("R", self)
 
     def __repr__(self):
         return "".join(
