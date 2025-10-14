@@ -24,7 +24,7 @@ R = TypeVar("R")
 
 class TaskProperties(Struct, frozen=True):
     id: str
-    cache_result: bool = False
+    cache: bool = False
     always_compute: bool = False
     version: int = 0
     exclude: set[str] = set()
@@ -35,7 +35,7 @@ class TaskProperties(Struct, frozen=True):
 
 def task(
     id: str | None = None,  # openssl rand -base64 3
-    cache_result: bool = False,
+    cache: bool = False,
     always_compute: bool = False,
     version: int = 0,
     exclude: set[str] = set(),
@@ -50,7 +50,7 @@ def task(
             "__task_properties__",
             TaskProperties(
                 id=(id or f"{func.__module__}.{func.__qualname__}"),
-                cache_result=cache_result,
+                cache=cache,
                 always_compute=always_compute,
                 version=version,
                 exclude=exclude,
@@ -109,7 +109,7 @@ class Task(Generic[R]):
         return all(
             workspace.is_cached(task=t)
             for t in self.dependencies()
-            if t.properties.cache_result and not t.properties.always_compute
+            if t.properties.cache and not t.properties.always_compute
         )
 
     def result(self, workspace: Workspace | None = None) -> R:
@@ -123,7 +123,7 @@ class Task(Generic[R]):
         if not self.deps_cached(workspace=workspace):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
-        if self.properties.cache_result and not self.properties.always_compute:
+        if self.properties.cache and not self.properties.always_compute:
             try:
                 if (cached_result := workspace.results.get(self)) is not None:
                     return cached_result.value()
@@ -142,7 +142,7 @@ class Task(Generic[R]):
 
         from .workspace import SerializedResult
 
-        if self.properties.cache_result:
+        if self.properties.cache:
             workspace.results[self] = SerializedResult(
                 deserializer=self.properties.from_bytes,
                 data=self.properties.to_bytes(result),
