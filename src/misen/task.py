@@ -5,10 +5,8 @@ from inspect import signature
 from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast
 
 import dill
+from misen_serialization import canonical_hash
 from msgspec import Struct
-from xxhash import xxh3_64_intdigest
-
-from .serialization import serialize
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
@@ -44,6 +42,7 @@ def task(
     from_bytes: Callable[[bytes], R] = dill.loads,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
+    # TODO: Callable has no __qualname__
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         setattr(
             func,
@@ -80,76 +79,6 @@ class Task(Generic[R]):
     def T(self) -> R:
         return cast("R", self)
 
-    def __repr__(self):
-        return "".join(
-            [
-                f"Task({self.func.__module__}.{self.func.__qualname__}",
-                *(f", {a.__repr__()}" for a in self.args),
-                *(f", {k}={v.__repr__()}" for k, v in self.kwargs.items()),
-                # f", hash={self.__hash__()}",
-                ")",
-            ]
-        )
-
-    @property
-    def arguments_for_hashing(self) -> dict[str, Any]:
-        bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
-        bound_arguments.apply_defaults()
-        return {
-            k: v
-            for k, v in bound_arguments.arguments.items()
-            if k not in self.properties.exclude
-            and (k not in self.properties.defaults or self.properties.defaults[k] != v)
-        }
-
-    def dependencies(self) -> list[Task]:
-        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
-
-    def deps_cached(self, workspace: Workspace) -> bool:
-        return all(
-            workspace.is_cached(task=t)
-            for t in self.dependencies()
-            if t.properties.cache and not t.properties.always_compute
-        )
-
-    def result(self, workspace: Workspace | None = None) -> R:
-        """Compute or retrieve the Task result and cache it."""
-
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
-        if not self.deps_cached(workspace=workspace):
-            raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
-
-        if self.properties.cache and not self.properties.always_compute:
-            try:
-                if (cached_result := workspace.results.get(self)) is not None:
-                    return cached_result.value()
-            except (KeyError, RuntimeError):
-                pass
-
-        result = self.func(
-            *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
-            **{
-                k: v.result(workspace=workspace) if isinstance(v, Task) else v
-                for k, v in self.kwargs.items()
-            },
-        )  # type: ignore
-
-        workspace.result_hashes[self] = cast("ResultHash", _deterministic_hash(result))
-
-        from .workspace import SerializedResult
-
-        if self.properties.cache:
-            workspace.results[self] = SerializedResult(
-                deserializer=self.properties.from_bytes,
-                data=self.properties.to_bytes(result),
-            )
-
-        return result
-
     def run(
         self,
         workspace: Workspace | None = None,
@@ -171,15 +100,95 @@ class Task(Generic[R]):
 
         return executor.submit(task=self, workspace=workspace)
 
+    def result(
+        self,
+        workspace: Workspace | None = None,
+        compute_if_uncached: bool = False,
+        compute_uncached_deps: bool = False,
+    ) -> R:
+        """Compute or retrieve the Task result and cache it."""
+
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        # TODO: can we move this below the other check?
+        if not compute_uncached_deps and not self._dependencies_cached(workspace=workspace):
+            raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
+
+        if self.properties.cache and not self.properties.always_compute:
+            try:
+                if (cached_result := workspace.results.get(self)) is not None:
+                    return cached_result.value()
+                else:
+                    raise RuntimeError(f"{self} is not cached")
+            except (KeyError, RuntimeError) as e:
+                if not compute_if_uncached:
+                    raise e
+
+        result = self.func(
+            *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
+            **{
+                k: v.result(workspace=workspace) if isinstance(v, Task) else v
+                for k, v in self.kwargs.items()
+            },
+        )  # type: ignore
+
+        workspace.result_hashes[self] = cast("ResultHash", canonical_hash(result))
+
+        from .workspace import SerializedResult
+
+        if self.properties.cache:
+            workspace.results[self] = SerializedResult(
+                deserializer=self.properties.from_bytes,
+                data=self.properties.to_bytes(result),
+            )
+
+        return result
+
+    def __repr__(self):
+        return "".join(
+            [
+                f"Task({self.func.__module__}.{self.func.__qualname__}",
+                *(f", {a.__repr__()}" for a in self.args),
+                *(f", {k}={v.__repr__()}" for k, v in self.kwargs.items()),
+                # f", hash={self.__hash__()}",
+                ")",
+            ]
+        )
+
+    @property
+    def _dependencies(self) -> list[Task]:
+        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
+
+    def _dependencies_cached(self, workspace: Workspace) -> bool:
+        return all(
+            workspace.is_cached(task=t)
+            for t in self._dependencies
+            if t.properties.cache and not t.properties.always_compute
+        )
+
+    @property
+    def _arguments_for_hashing(self) -> dict[str, Any]:
+        bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
+        bound_arguments.apply_defaults()
+        return {
+            k: v
+            for k, v in bound_arguments.arguments.items()
+            if k not in self.properties.exclude
+            and (k not in self.properties.defaults or self.properties.defaults[k] != v)
+        }
+
     def __hash__(self) -> int:
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "_object_hash"):
-            self._object_hash = _deterministic_hash(
+            self._object_hash = canonical_hash(
                 (
                     self.properties.id,
                     {
-                        k: (v.__hash__() if isinstance(v, Task) else _deterministic_hash(v))
-                        for k, v in self.arguments_for_hashing.items()
+                        k: (v.__hash__() if isinstance(v, Task) else canonical_hash(v))
+                        for k, v in self._arguments_for_hashing.items()
                     },
                 )
             )
@@ -187,19 +196,20 @@ class Task(Generic[R]):
 
     def __resolved_hash__(self, workspace: Workspace) -> ResolvedHash:
         """A hash that represents the Task object using its resolved arguments."""
-        if (resolved_hash := workspace.resolved_hashes.get(self)) is None:
+        resolved_hash = workspace.resolved_hashes.get(self)
+        if resolved_hash is None:
             resolved_hash = cast(
                 "ResolvedHash",
-                _deterministic_hash(
+                canonical_hash(
                     (
                         self.properties.id,
                         {
                             k: (
                                 v.__result_hash__(workspace=workspace)
                                 if isinstance(v, Task)
-                                else _deterministic_hash(v)
+                                else canonical_hash(v)
                             )
-                            for k, v in self.arguments_for_hashing.items()
+                            for k, v in self._arguments_for_hashing.items()
                         },
                     )
                 ),
@@ -213,7 +223,3 @@ class Task(Generic[R]):
             return workspace.result_hashes[self]
         except KeyError:
             raise RuntimeError(f"{self} must be computed first.")
-
-
-def _deterministic_hash(obj: Any, seed: int = 0) -> int:
-    return xxh3_64_intdigest(serialize(obj), seed=seed)

@@ -7,9 +7,10 @@ from importlib import import_module
 from typing import Any, Callable, Iterator, Literal, cast
 
 import dill
+from misen_serialization import canonical_hash
 
 from .settings import Settings
-from .task import Task, _deterministic_hash
+from .task import Task
 
 
 class WorkspaceMeta(ABCMeta):
@@ -28,7 +29,7 @@ class WorkspaceMeta(ABCMeta):
         return cls
 
     def __call__(cls, **kwargs):
-        key = _deterministic_hash(kwargs)
+        key = canonical_hash(kwargs)
 
         if key not in WorkspaceMeta._instances:
             WorkspaceMeta._instances[key] = super().__call__(**kwargs)
@@ -73,7 +74,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
 
     def is_cached(self, task: Task) -> bool:
         """Check if the result of the task is cached."""
-        return task.properties.cache_result and task in self.results
+        return task.properties.cache and task in self.results
 
     # def get_logs(self, task):
     #     # TODO: A single task may be run multiple times and therefore have multiple logs.

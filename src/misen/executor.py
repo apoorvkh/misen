@@ -48,7 +48,7 @@ class Executor(ABC):
 
         return LocalExecutor(i=20)
 
-    def computable_groups(self, task: Task, workspace: Workspace | None = None):
+    def _computable_groups(self, task: Task, workspace: Workspace | None = None):
         if workspace is None:
             workspace = Workspace.auto()
         return _distributable_tasks(task, workspace)
@@ -90,7 +90,7 @@ def _distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Ta
         node = task_node[task]
 
         # traverse children
-        for dep in task.dependencies():
+        for dep in task._dependencies:
             dep: Task
             # skip cached tasks
             if _is_cached(dep):
