@@ -50,8 +50,7 @@ class Executor(ABC):
                 return getattr(import_module(module), class_name)
 
     @abstractmethod
-    def submit(self, task: Task, workspace: Workspace) -> Future:
-        raise NotImplementedError
+    def submit(self, task: Task, workspace: Workspace) -> Future: ...
 
     def _computable_groups(self, task: Task, workspace: Workspace | None = None):
         if workspace is None:

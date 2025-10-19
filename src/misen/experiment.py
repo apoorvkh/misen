@@ -24,8 +24,7 @@ ExperimentT = TypeVar("ExperimentT", bound="Experiment")
 
 class Experiment(Generic[TasksT], Struct, frozen=True):
     @abstractmethod
-    def tasks(self) -> TasksT:
-        raise NotImplementedError
+    def tasks(self) -> TasksT: ...
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

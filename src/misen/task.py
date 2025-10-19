@@ -33,13 +33,13 @@ class TaskProperties(Struct, frozen=True):
 
 
 def task(
-    id: str | None = None,  # openssl rand -base64 3
+    id: str | None = None,  # TODO: command to fill these in when None
     cache: bool = False,
     always_compute: bool = False,
     version: int = 0,
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
-    to_bytes: Callable[[R], bytes] = dill.dumps,
+    to_bytes: Callable[[R], bytes] = dill.dumps,  # TODO: typing
     from_bytes: Callable[[bytes], R] = dill.loads,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda

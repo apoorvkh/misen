@@ -25,6 +25,15 @@ __all__ = [
 ]
 
 
+class ObjectHash(int): ...
+
+
+class ResolvedHash(int): ...
+
+
+class ResultHash(int): ...
+
+
 class WorkspaceMeta(ABCMeta):
     """
     Metaclass that turns every subclass into a *parameterised singleton* and
@@ -85,11 +94,12 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
 
+    @abstractmethod
     def get_work_dir(self, task: Task) -> Path:
         """Return a directory where the task can store working files. E.g. to cache intermediate results."""
-        raise NotImplementedError
+        ...
 
-    def __resolved_hash__(self, task: Task) -> ResolvedHash:
+    def _resolved_hash(self, task: Task) -> ResolvedHash:
         """A hash that represents the Task object using its resolved arguments."""
         resolved_hash = self.resolved_hashes.get(task)
         if resolved_hash is None:
@@ -100,7 +110,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
                         task.properties.id,
                         {
                             k: (
-                                self.__result_hash__(task=task)
+                                self._result_hash(task=task)
                                 if isinstance(v, Task)
                                 else canonical_hash(v)
                             )
@@ -112,24 +122,12 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
             self.resolved_hashes[task] = resolved_hash
         return resolved_hash
 
-    def __result_hash__(self, task: Task) -> ResultHash:
+    def _result_hash(self, task: Task) -> ResultHash:
         """Getter for the hash of result, which is computed and stored in result()."""
         try:
             return self.result_hashes[task]
         except KeyError:
             raise RuntimeError(f"{task} must be computed first.")
-
-
-class ObjectHash(int):
-    pass
-
-
-class ResolvedHash(int):
-    pass
-
-
-class ResultHash(int):
-    pass
 
 
 class SerializedResult:
@@ -173,16 +171,16 @@ class ResultHashCacheABC(MutableMapping[Task, ResultHash], ABC):
 
     def __getitem__(self, key: Task) -> ResultHash:
         try:
-            return self.mapping[self.workspace.__resolved_hash__(task=key)]
+            return self.mapping[self.workspace._resolved_hash(task=key)]
         except KeyError as e:
             raise KeyError(f"Task {key} not found in cache") from e
 
     def __setitem__(self, key: Task, value: ResultHash) -> None:
-        self.mapping[self.workspace.__resolved_hash__(task=key)] = value
+        self.mapping[self.workspace._resolved_hash(task=key)] = value
 
     def __delitem__(self, key: Task) -> None:
         try:
-            del self.mapping[self.workspace.__resolved_hash__(task=key)]
+            del self.mapping[self.workspace._resolved_hash(task=key)]
         except KeyError as e:
             raise KeyError(f"Task {key} not found in cache") from e
 
@@ -198,13 +196,13 @@ class ResultCacheABC(MutableMapping[Task, SerializedResult], ABC):
     workspace: Workspace
 
     def __getitem__(self, key: Task) -> SerializedResult:
-        return dill.loads(self.mapping[self.workspace.__result_hash__(task=key)])
+        return dill.loads(self.mapping[self.workspace._result_hash(task=key)])
 
     def __setitem__(self, key: Task, value: SerializedResult) -> None:
-        self.mapping[self.workspace.__result_hash__(task=key)] = dill.dumps(value)
+        self.mapping[self.workspace._result_hash(task=key)] = dill.dumps(value)
 
     def __delitem__(self, key: Task) -> None:
-        del self.mapping[self.workspace.__result_hash__(task=key)]
+        del self.mapping[self.workspace._result_hash(task=key)]
 
     def __len__(self) -> int:
         return len(self.mapping)
@@ -216,7 +214,7 @@ class ResultCacheABC(MutableMapping[Task, SerializedResult], ABC):
         if not isinstance(key, Task):
             return False
         try:
-            result_hash = self.workspace.__result_hash__(task=key)
+            result_hash = self.workspace._result_hash(task=key)
         except RuntimeError:
             return False
         return result_hash in self.mapping
@@ -226,25 +224,19 @@ class LogStoreABC(Mapping[Task, dict[str, str]], ABC):
     workspace: Workspace
 
     @abstractmethod
-    def __getitem__(self, key: Task) -> dict[str, str]:
-        raise NotImplementedError
+    def __getitem__(self, key: Task) -> dict[str, str]: ...
 
     @abstractmethod
-    def __setitem__(self, key: Task, value: dict[str, str]) -> None:
-        raise NotImplementedError
+    def __setitem__(self, key: Task, value: dict[str, str]) -> None: ...
 
     @abstractmethod
-    def __delitem__(self, key: Task) -> None:
-        raise NotImplementedError
+    def __delitem__(self, key: Task) -> None: ...
 
     @abstractmethod
-    def __len__(self) -> int:
-        raise NotImplementedError
+    def __len__(self) -> int: ...
 
     @abstractmethod
-    def __iter__(self) -> Iterator[Task]:
-        raise NotImplementedError
+    def __iter__(self) -> Iterator[Task]: ...
 
     @abstractmethod
-    def __contains__(self, key: object, /) -> bool:
-        raise NotImplementedError
+    def __contains__(self, key: object, /) -> bool: ...
