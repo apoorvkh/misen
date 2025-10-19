@@ -15,6 +15,9 @@ from .settings import DEFAULT_SETTINGS_FILE, Settings  # noqa: TC001
 from .task import Task
 from .workspace import Workspace, WorkspaceType
 
+__all__ = ["Experiment"]
+
+
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
 
 ExecutorT = TypeVar("ExecutorT", bound=Executor)

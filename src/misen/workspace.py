@@ -61,10 +61,17 @@ WorkspaceType: TypeAlias = str | Literal["auto", "memory"]
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
-    resolved_hashes: ResolvedHashCacheABC
-    result_hashes: ResultHashCacheABC
-    results: ResultCacheABC
-    logs: LogStoreABC
+    def __init__(
+        self,
+        resolved_hashes: ResolvedHashCacheABC,
+        result_hashes: ResultHashCacheABC,
+        results: ResultCacheABC,
+        logs: LogStoreABC,
+    ):
+        self.resolved_hashes = resolved_hashes
+        self.result_hashes = result_hashes
+        self.results = results
+        self.logs = logs
 
     @staticmethod
     def auto(settings: Settings | None = None) -> "Workspace":
