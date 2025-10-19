@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import inspect
-from abc import ABC, ABCMeta
+from abc import ABC, ABCMeta, abstractmethod
 from collections.abc import MutableMapping
 from importlib import import_module
-from typing import Any, Callable, Iterator, Literal, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Mapping, TypeAlias, cast
 
 import dill
 from misen_serialization import canonical_hash
 
 from .settings import Settings
 from .task import Task
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+__all__ = [
+    "Workspace",
+    "SerializedResult",
+    "ResolvedHashCacheABC",
+    "ResultHashCacheABC",
+    "ResultCacheABC",
+    "LogStoreABC",
+]
 
 
 class WorkspaceMeta(ABCMeta):
@@ -36,16 +48,32 @@ class WorkspaceMeta(ABCMeta):
         return WorkspaceMeta._instances[key]
 
 
-WorkspaceType = str | Literal["auto", "memory"]
+WorkspaceType: TypeAlias = str | Literal["auto", "memory"]
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
     resolved_hashes: ResolvedHashCacheABC
     result_hashes: ResultHashCacheABC
     results: ResultCacheABC
+    logs: LogStoreABC
 
     @staticmethod
-    def resolve_type(t: WorkspaceType) -> type["Workspace"]:
+    def auto(settings: Settings | None = None) -> "Workspace":
+        if settings is None:
+            settings = Settings()
+
+        workspace_type = settings.toml_data.get("workspace_type", "auto")
+        workspace_cls = Workspace._resolve_type(workspace_type)
+        if workspace_cls is not Workspace:
+            return workspace_cls(**settings.toml_data.get("workspace_kwargs", {}))
+
+        # default
+        from misen.workspaces.memory import MemoryWorkspace
+
+        return MemoryWorkspace(i=20)
+
+    @staticmethod
+    def _resolve_type(t: WorkspaceType) -> type["Workspace"]:
         match t:
             case "auto":
                 return Workspace
@@ -57,33 +85,39 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
 
-    @staticmethod
-    def auto(settings: Settings | None = None) -> "Workspace":
-        if settings is None:
-            settings = Settings()
+    def get_work_dir(self, task: Task) -> Path:
+        """Return a directory where the task can store working files. E.g. to cache intermediate results."""
+        raise NotImplementedError
 
-        workspace_type = settings.toml_data.get("workspace_type", "auto")
-        workspace_cls = Workspace.resolve_type(workspace_type)
-        if workspace_cls is not Workspace:
-            return workspace_cls(**settings.toml_data.get("workspace_kwargs", {}))
+    def __resolved_hash__(self, task: Task) -> ResolvedHash:
+        """A hash that represents the Task object using its resolved arguments."""
+        resolved_hash = self.resolved_hashes.get(task)
+        if resolved_hash is None:
+            resolved_hash = cast(
+                "ResolvedHash",
+                canonical_hash(
+                    (
+                        task.properties.id,
+                        {
+                            k: (
+                                self.__result_hash__(task=task)
+                                if isinstance(v, Task)
+                                else canonical_hash(v)
+                            )
+                            for k, v in task._arguments_for_hashing.items()
+                        },
+                    )
+                ),
+            )
+            self.resolved_hashes[task] = resolved_hash
+        return resolved_hash
 
-        # default
-        from misen.workspaces.memory import MemoryWorkspace
-
-        return MemoryWorkspace(i=20)
-
-    def is_cached(self, task: Task) -> bool:
-        """Check if the result of the task is cached."""
-        return task.properties.cache and task in self.results
-
-    # def get_logs(self, task):
-    #     # TODO: A single task may be run multiple times and therefore have multiple logs.
-    #     # How should we store and return logs?
-    #     raise NotImplementedError
-
-    # def get_work_dir(self, task):
-    #     """Return a directory where the task can store working files. E.g. to cache intermediate results."""
-    #     raise NotImplementedError
+    def __result_hash__(self, task: Task) -> ResultHash:
+        """Getter for the hash of result, which is computed and stored in result()."""
+        try:
+            return self.result_hashes[task]
+        except KeyError:
+            raise RuntimeError(f"{task} must be computed first.")
 
 
 class ObjectHash(int):
@@ -112,13 +146,19 @@ class ResolvedHashCacheABC(MutableMapping[Task, ResolvedHash], ABC):
     workspace: Workspace
 
     def __getitem__(self, key: Task) -> ResolvedHash:
-        return self.mapping[cast("ObjectHash", key.__hash__())]
+        try:
+            return self.mapping[cast("ObjectHash", key.__hash__())]
+        except KeyError as e:
+            raise KeyError(f"Task {key} not found in cache") from e
 
     def __setitem__(self, key: Task, value: ResolvedHash) -> None:
         self.mapping[cast("ObjectHash", key.__hash__())] = value
 
     def __delitem__(self, key: Task) -> None:
-        del self.mapping[cast("ObjectHash", key.__hash__())]
+        try:
+            del self.mapping[cast("ObjectHash", key.__hash__())]
+        except KeyError as e:
+            raise KeyError(f"Task {key} not found in cache") from e
 
     def __len__(self) -> int:
         return len(self.mapping)
@@ -132,13 +172,19 @@ class ResultHashCacheABC(MutableMapping[Task, ResultHash], ABC):
     workspace: Workspace
 
     def __getitem__(self, key: Task) -> ResultHash:
-        return self.mapping[key.__resolved_hash__(workspace=self.workspace)]
+        try:
+            return self.mapping[self.workspace.__resolved_hash__(task=key)]
+        except KeyError as e:
+            raise KeyError(f"Task {key} not found in cache") from e
 
     def __setitem__(self, key: Task, value: ResultHash) -> None:
-        self.mapping[key.__resolved_hash__(workspace=self.workspace)] = value
+        self.mapping[self.workspace.__resolved_hash__(task=key)] = value
 
     def __delitem__(self, key: Task) -> None:
-        del self.mapping[key.__resolved_hash__(workspace=self.workspace)]
+        try:
+            del self.mapping[self.workspace.__resolved_hash__(task=key)]
+        except KeyError as e:
+            raise KeyError(f"Task {key} not found in cache") from e
 
     def __len__(self) -> int:
         return len(self.mapping)
@@ -152,16 +198,53 @@ class ResultCacheABC(MutableMapping[Task, SerializedResult], ABC):
     workspace: Workspace
 
     def __getitem__(self, key: Task) -> SerializedResult:
-        return dill.loads(self.mapping[key.__result_hash__(workspace=self.workspace)])
+        return dill.loads(self.mapping[self.workspace.__result_hash__(task=key)])
 
     def __setitem__(self, key: Task, value: SerializedResult) -> None:
-        self.mapping[key.__result_hash__(workspace=self.workspace)] = dill.dumps(value)
+        self.mapping[self.workspace.__result_hash__(task=key)] = dill.dumps(value)
 
     def __delitem__(self, key: Task) -> None:
-        del self.mapping[key.__result_hash__(workspace=self.workspace)]
+        del self.mapping[self.workspace.__result_hash__(task=key)]
 
     def __len__(self) -> int:
         return len(self.mapping)
 
     def __iter__(self) -> Iterator[Task]:
+        raise NotImplementedError
+
+    def __contains__(self, key: object, /) -> bool:
+        if not isinstance(key, Task):
+            return False
+        try:
+            result_hash = self.workspace.__result_hash__(task=key)
+        except RuntimeError:
+            return False
+        return result_hash in self.mapping
+
+
+class LogStoreABC(Mapping[Task, dict[str, str]], ABC):
+    workspace: Workspace
+
+    @abstractmethod
+    def __getitem__(self, key: Task) -> dict[str, str]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def __setitem__(self, key: Task, value: dict[str, str]) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def __delitem__(self, key: Task) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def __len__(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def __iter__(self) -> Iterator[Task]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def __contains__(self, key: object, /) -> bool:
         raise NotImplementedError

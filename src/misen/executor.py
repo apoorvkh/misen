@@ -13,13 +13,29 @@ if TYPE_CHECKING:
 
     from .task import Task
 
+__all__ = ["Executor"]
 
 ExecutorType = str | Literal["auto", "local", "slurm"]
 
 
 class Executor(ABC):
     @staticmethod
-    def resolve_type(t: ExecutorType) -> type["Executor"]:
+    def auto(settings: Settings | None = None) -> "Executor":
+        if settings is None:
+            settings = Settings()
+
+        executor_type = settings.toml_data.get("executor_type", "auto")
+        executor_cls = Executor._resolve_type(executor_type)
+        if executor_cls is not Executor:
+            return executor_cls(**settings.toml_data.get("executor_kwargs", {}))
+
+        # default
+        from misen.executors.local import LocalExecutor
+
+        return LocalExecutor(i=20)
+
+    @staticmethod
+    def _resolve_type(t: ExecutorType) -> type["Executor"]:
         match t:
             case "auto":
                 return Executor
@@ -33,32 +49,17 @@ class Executor(ABC):
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
 
-    @staticmethod
-    def auto(settings: Settings | None = None) -> "Executor":
-        if settings is None:
-            settings = Settings()
-
-        executor_type = settings.toml_data.get("executor_type", "auto")
-        executor_cls = Executor.resolve_type(executor_type)
-        if executor_cls is not Executor:
-            return executor_cls(**settings.toml_data.get("executor_kwargs", {}))
-
-        # default
-        from misen.executors.local import LocalExecutor
-
-        return LocalExecutor(i=20)
-
-    def _computable_groups(self, task: Task, workspace: Workspace | None = None):
-        if workspace is None:
-            workspace = Workspace.auto()
-        return _distributable_tasks(task, workspace)
-
     @abstractmethod
     def submit(self, task: Task, workspace: Workspace) -> Future:
         raise NotImplementedError
 
+    def _computable_groups(self, task: Task, workspace: Workspace | None = None):
+        if workspace is None:
+            workspace = Workspace.auto()
+        return distributable_tasks(task, workspace)
 
-def _distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Task]]:
+
+def distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Task]]:
     """
     Given a DAG (represented by the root Task), this function should identify tasks that can be executed by distributed workers.
     Specifically, these are the cacheable tasks. This function should return a dependency graph of just those tasks and the root.
@@ -74,7 +75,7 @@ def _distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Ta
 
     @cache
     def _is_cached(task: Task) -> bool:
-        return workspace.is_cached(task=task)
+        return task.is_cached(workspace=workspace)
 
     task_node: dict[Task, int] = {root: dag.add_node(root)}
     stack: list[Task] = [root]

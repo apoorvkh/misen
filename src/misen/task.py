@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 from inspect import signature
-from typing import TYPE_CHECKING, Any, Callable, Generic, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, MutableMapping, ParamSpec, TypeVar, cast
 
 import dill
 from misen_serialization import canonical_hash
@@ -10,9 +10,10 @@ from msgspec import Struct
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
+    from pathlib import Path
 
     from .executor import Executor
-    from .workspace import ResolvedHash, ResultHash, Workspace
+    from .workspace import ResultHash, Workspace
 
 __all__ = ["Task", "task"]
 
@@ -79,11 +80,31 @@ class Task(Generic[R]):
     def T(self) -> R:
         return cast("R", self)
 
-    def run(
-        self,
-        workspace: Workspace | None = None,
-        executor: Executor | None = None,
-    ) -> Future:
+    def is_cached(self, workspace: Workspace | None = None) -> bool:
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        return self.properties.cache and self in workspace.results
+
+    def logs(self, workspace: Workspace | None = None) -> MutableMapping[str, str]:
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        return workspace.logs[self]
+
+    def work_dir(self, workspace: Workspace | None = None) -> Path:
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        return workspace.get_work_dir(task=self)
+
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
         """
         Submit task to executor to fully execute the task graph.
         """
@@ -113,19 +134,15 @@ class Task(Generic[R]):
 
             workspace = Workspace.auto()
 
-        # TODO: can we move this below the other check?
+        if self.properties.cache and not self.properties.always_compute:
+            if self.is_cached(workspace=workspace):
+                return workspace.results[self].value()
+
+            if not compute_if_uncached:
+                raise RuntimeError(f"{self} is not cached")
+
         if not compute_uncached_deps and not self._dependencies_cached(workspace=workspace):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
-
-        if self.properties.cache and not self.properties.always_compute:
-            try:
-                if (cached_result := workspace.results.get(self)) is not None:
-                    return cached_result.value()
-                else:
-                    raise RuntimeError(f"{self} is not cached")
-            except (KeyError, RuntimeError) as e:
-                if not compute_if_uncached:
-                    raise e
 
         result = self.func(
             *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
@@ -164,7 +181,7 @@ class Task(Generic[R]):
 
     def _dependencies_cached(self, workspace: Workspace) -> bool:
         return all(
-            workspace.is_cached(task=t)
+            t.is_cached(workspace=workspace)
             for t in self._dependencies
             if t.properties.cache and not t.properties.always_compute
         )
@@ -182,44 +199,15 @@ class Task(Generic[R]):
 
     def __hash__(self) -> int:
         """A hash that represents the Task object using its constituent task graph."""
-        if not hasattr(self, "_object_hash"):
-            self._object_hash = canonical_hash(
+        if not hasattr(self, "_hash"):
+            self._hash = canonical_hash(
                 (
                     self.properties.id,
+                    self.properties.version,
                     {
                         k: (v.__hash__() if isinstance(v, Task) else canonical_hash(v))
                         for k, v in self._arguments_for_hashing.items()
                     },
                 )
             )
-        return self._object_hash
-
-    def __resolved_hash__(self, workspace: Workspace) -> ResolvedHash:
-        """A hash that represents the Task object using its resolved arguments."""
-        resolved_hash = workspace.resolved_hashes.get(self)
-        if resolved_hash is None:
-            resolved_hash = cast(
-                "ResolvedHash",
-                canonical_hash(
-                    (
-                        self.properties.id,
-                        {
-                            k: (
-                                v.__result_hash__(workspace=workspace)
-                                if isinstance(v, Task)
-                                else canonical_hash(v)
-                            )
-                            for k, v in self._arguments_for_hashing.items()
-                        },
-                    )
-                ),
-            )
-            workspace.resolved_hashes[self] = resolved_hash
-        return resolved_hash
-
-    def __result_hash__(self, workspace: Workspace) -> ResultHash:
-        """Getter for the hash of result, which is computed and stored in result()."""
-        try:
-            return workspace.result_hashes[self]
-        except KeyError:
-            raise RuntimeError(f"{self} must be computed first.")
+        return self._hash
