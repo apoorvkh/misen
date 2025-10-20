@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import itertools
 from inspect import signature
-from typing import TYPE_CHECKING, Any, Callable, Generic, MutableMapping, ParamSpec, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    MutableMapping,
+    ParamSpec,
+    TypeVar,
+    cast,
+)
 
 import dill
 from misen_serialization import canonical_hash
@@ -15,7 +24,7 @@ if TYPE_CHECKING:
     from .executor import Executor
     from .workspace import ResultHash, Workspace
 
-__all__ = ["Task", "task"]
+__all__ = ["Task", "task", "resources"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -24,7 +33,6 @@ R = TypeVar("R")
 class TaskProperties(Struct, frozen=True):
     id: str
     cache: bool = False
-    always_compute: bool = False
     version: int = 0
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
@@ -35,7 +43,6 @@ class TaskProperties(Struct, frozen=True):
 def task(
     id: str | None = None,  # TODO: command to fill these in when None
     cache: bool = False,
-    always_compute: bool = False,
     version: int = 0,
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
@@ -51,12 +58,46 @@ def task(
             TaskProperties(
                 id=(id or f"{func.__module__}.{func.__qualname__}"),
                 cache=cache,
-                always_compute=always_compute,
                 version=version,
                 exclude=exclude,
                 defaults=defaults,
                 to_bytes=to_bytes,
                 from_bytes=from_bytes,
+            ),
+        )
+        return func
+
+    return decorator
+
+
+class TaskResources(Struct):
+    time: int | None = None  # walltime (minutes)
+    nodes: int = 1  # number of nodes
+    memory: int = 8  # memory in GB
+    cpus: int = 1  # number of logical cores
+    gpus: int = 0  # number of GPUs
+    gpu_memory: int | None = None  # memory (GB) per GPU
+
+
+def resources(
+    time: int | None = None,  # walltime (minutes)
+    nodes: int = 1,  # number of nodes
+    memory: int = 8,  # memory in GB
+    cpus: int = 1,  # number of logical cores
+    gpus: int = 0,  # number of GPUs
+    gpu_memory: int | None = None,  # memory (GB) per GPU
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        setattr(
+            func,
+            "__task_resources__",
+            TaskResources(
+                time=time,
+                nodes=nodes,
+                memory=memory,
+                cpus=cpus,
+                gpus=gpus,
+                gpu_memory=gpu_memory,
             ),
         )
         return func
@@ -71,6 +112,7 @@ class Task(Generic[R]):
             "__task_properties__",
             TaskProperties(f"{func.__module__}.{func.__qualname__}"),
         )
+        self.resources = getattr(func, "__task_resources__", TaskResources())
 
         self.func = func
         self.args = args
@@ -134,7 +176,7 @@ class Task(Generic[R]):
 
             workspace = Workspace.auto()
 
-        if self.properties.cache and not self.properties.always_compute:
+        if self.properties.cache:
             if self.is_cached(workspace=workspace):
                 return workspace.results[self].value()
 
@@ -181,9 +223,7 @@ class Task(Generic[R]):
 
     def _dependencies_cached(self, workspace: Workspace) -> bool:
         return all(
-            t.is_cached(workspace=workspace)
-            for t in self._dependencies
-            if t.properties.cache and not t.properties.always_compute
+            t.is_cached(workspace=workspace) for t in self._dependencies if t.properties.cache
         )
 
     @property
