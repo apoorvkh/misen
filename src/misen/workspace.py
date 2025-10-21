@@ -6,12 +6,8 @@ from collections.abc import MutableMapping
 from importlib import import_module
 from typing import (
     TYPE_CHECKING,
-    Any,
-    Callable,
-    Generic,
     Iterator,
     Literal,
-    Mapping,
     TypeAlias,
     TypeVar,
     cast,
@@ -27,6 +23,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = ["Workspace"]
+
+R = TypeVar("R")
 
 
 class WorkspaceMeta(ABCMeta):
@@ -56,9 +54,6 @@ WorkspaceType: TypeAlias = str | Literal["auto", "memory"]
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
-    results: MutableMapping[Task, SerializedResult]
-    logs: MutableMapping[Task, str]
-
     def __init__(
         self,
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
@@ -66,13 +61,19 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         result_cache: MutableMapping[ResultHash, bytes],
         log_store: MutableMapping[ResolvedTaskHash, str],
     ):
-        self.resolved_hash_cache = resolved_hash_cache
-        self.result_hash_cache = result_hash_cache
-        self.result_cache = result_cache
-        self.log_store = log_store
+        # session-only (non-persistent) caches
+        self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
+        self._result_hashes: dict[TaskHash, ResultHash] = {}
 
-        self.results = ResultMap(workspace=self)
-        self.logs = LogMap(workspace=self)
+        # workspace caches
+        self._resolved_hash_cache = resolved_hash_cache
+        self._result_hash_cache = result_hash_cache
+        self._result_cache = result_cache
+        self._log_store = log_store
+
+        # public accessors to workspace data
+        self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
+        self.logs: MutableMapping[Task, str] = LogMap(workspace=self)
 
     @staticmethod
     def auto(settings: Settings | None = None) -> "Workspace":
@@ -112,33 +113,33 @@ class ResultMap(MutableMapping[Task, SerializedResult]):
     def __init__(self, workspace: Workspace):
         self.workspace = workspace
 
-    def __getitem__(self, key: Task, /) -> SerializedResult:
-        result_hash = key.__result_hash__(workspace=self.workspace)
+    def __getitem__(self, key: Task[R], /) -> SerializedResult[R]:
+        result_hash = key._result_hash(workspace=self.workspace)
         try:
-            result = self.workspace.result_cache[result_hash]
+            result = self.workspace._result_cache[result_hash]
         except KeyError as e:
             raise KeyError(f"Result for task {key} not found in cache.") from e
         return cast("SerializedResult", dill.loads(result))
 
-    def __setitem__(self, key: Task, value: SerializedResult, /) -> None:
-        result_hash = key.__result_hash__(workspace=self.workspace)
-        self.workspace.result_cache[result_hash] = dill.dumps(value)
+    def __setitem__(self, key: Task[R], value: SerializedResult[R], /) -> None:
+        result_hash = key._result_hash(workspace=self.workspace)
+        self.workspace._result_cache[result_hash] = dill.dumps(value)
 
     def __delitem__(self, key: Task, /) -> None:
-        result_hash = key.__result_hash__(workspace=self.workspace)
-        del self.workspace.result_cache[result_hash]
+        result_hash = key._result_hash(workspace=self.workspace)
+        del self.workspace._result_cache[result_hash]
 
     def __iter__(self) -> Iterator[Task]:
         raise NotImplementedError
 
     def __len__(self) -> int:
-        return len(self.workspace.result_cache)
+        return len(self.workspace._result_cache)
 
     def __contains__(self, key: object, /) -> bool:
         if not isinstance(key, Task):
             return False
-        result_hash = key.__result_hash__(workspace=self.workspace)
-        return result_hash in self.workspace.result_cache
+        result_hash = key._result_hash(workspace=self.workspace)
+        return result_hash in self.workspace._result_cache
 
 
 class LogMap(MutableMapping[Task, str]):
@@ -146,25 +147,25 @@ class LogMap(MutableMapping[Task, str]):
         self.workspace = workspace
 
     def __getitem__(self, key: Task, /) -> str:
-        resolved_hash: ResolvedTaskHash = key.__resolved_hash__(workspace=self.workspace)
-        return self.workspace.log_store[resolved_hash]
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        return self.workspace._log_store[resolved_hash]
 
     def __setitem__(self, key: Task, value: str, /) -> None:
-        resolved_hash: ResolvedTaskHash = key.__resolved_hash__(workspace=self.workspace)
-        self.workspace.log_store[resolved_hash] = value
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        self.workspace._log_store[resolved_hash] = value
 
     def __delitem__(self, key: Task, /) -> None:
-        resolved_hash: ResolvedTaskHash = key.__resolved_hash__(workspace=self.workspace)
-        del self.workspace.log_store[resolved_hash]
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        del self.workspace._log_store[resolved_hash]
 
     def __iter__(self) -> Iterator[Task]:
         raise NotImplementedError
 
     def __len__(self) -> int:
-        return len(self.workspace.log_store)
+        return len(self.workspace._log_store)
 
     def __contains__(self, key: object, /) -> bool:
         if not isinstance(key, Task):
             return False
-        resolved_hash: ResolvedTaskHash = key.__resolved_hash__(workspace=self.workspace)
-        return resolved_hash in self.workspace.log_store
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        return resolved_hash in self.workspace._log_store

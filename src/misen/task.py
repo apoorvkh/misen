@@ -129,21 +129,9 @@ class Task(Generic[R]):
 
         return self.properties.cache and self in workspace.results
 
-    def logs(self, workspace: Workspace | None = None) -> str:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
-        return workspace.logs[self]
-
-    def work_dir(self, workspace: Workspace | None = None) -> Path:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
-        return workspace.get_work_dir(task=self)
+    @property
+    def _dependencies(self) -> list[Task]:
+        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
 
     def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
         """
@@ -176,13 +164,15 @@ class Task(Generic[R]):
             workspace = Workspace.auto()
 
         if self.properties.cache:
-            if self.is_cached(workspace=workspace):
-                return workspace.results[self].value()
+            if (serialized_result := workspace.results.get(self)) is not None:
+                return serialized_result.value()
 
             if not compute_if_uncached:
-                raise RuntimeError(f"{self} is not cached")
+                raise RuntimeError(f"{self} is not cached.")
 
-        if not compute_uncached_deps and not self._dependencies_cached(workspace=workspace):
+        if not compute_uncached_deps and any(
+            not t.is_cached(workspace=workspace) for t in self._dependencies
+        ):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
         result = self.func(
@@ -193,11 +183,12 @@ class Task(Generic[R]):
             },
         )  # type: ignore
 
-        workspace.result_hash_cache[self] = cast("ResultHash", canonical_hash(result))
-
-        from .workspace import SerializedResult
+        resolved_hash = self._resolved_hash(workspace=workspace)
+        workspace._result_hash_cache[resolved_hash] = cast("ResultHash", canonical_hash(result))
 
         if self.properties.cache:
+            from .workspace import SerializedResult
+
             workspace.results[self] = SerializedResult(
                 deserializer=self.properties.from_bytes,
                 data=self.properties.to_bytes(result),
@@ -205,24 +196,31 @@ class Task(Generic[R]):
 
         return result
 
+    def logs(self, workspace: Workspace | None = None) -> str:
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        return workspace.logs[self]
+
+    def work_dir(self, workspace: Workspace | None = None) -> Path:
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        return workspace.get_work_dir(task=self)
+
     def __repr__(self):
         return "".join(
             [
                 f"Task({self.func.__module__}.{self.func.__qualname__}",
                 *(f", {a.__repr__()}" for a in self.args),
                 *(f", {k}={v.__repr__()}" for k, v in self.kwargs.items()),
-                # f", hash={self.__hash__()}",
+                f", hash={self.__hash__()}",
                 ")",
             ]
-        )
-
-    @property
-    def _dependencies(self) -> list[Task]:
-        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
-
-    def _dependencies_cached(self, workspace: Workspace) -> bool:
-        return all(
-            t.is_cached(workspace=workspace) for t in self._dependencies if t.properties.cache
         )
 
     @property
@@ -251,38 +249,47 @@ class Task(Generic[R]):
             )
         return self._hash
 
-    def __resolved_hash__(self, workspace: Workspace) -> ResolvedTaskHash:
+    def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""
         task_hash: TaskHash = cast("TaskHash", self.__hash__())
-        resolved_hash: ResolvedTaskHash | None = workspace.resolved_hash_cache.get(task_hash)
-        if resolved_hash is None:
+
+        # fast session-only cache
+        if (resolved_hash := workspace._resolved_hashes.get(task_hash)) is not None:
+            return resolved_hash
+
+        # slower workspace cache
+        if (resolved_hash := workspace._resolved_hash_cache.get(task_hash)) is None:
+            hashed_arguments = {
+                k: (
+                    v._result_hash(workspace=workspace)
+                    if isinstance(v, Task)
+                    else canonical_hash(v)
+                )
+                for k, v in self._arguments_for_hashing.items()
+            }
             resolved_hash = cast(
                 "ResolvedTaskHash",
-                canonical_hash(
-                    (
-                        self.properties.id,
-                        self.properties.version,
-                        {
-                            k: (
-                                v.__result_hash__(workspace=workspace)
-                                if isinstance(v, Task)
-                                else canonical_hash(v)
-                            )
-                            for k, v in self._arguments_for_hashing.items()
-                        },
-                    )
-                ),
+                canonical_hash((self.properties.id, self.properties.version, hashed_arguments)),
             )
-            workspace.resolved_hash_cache[task_hash] = resolved_hash
+            workspace._resolved_hash_cache[task_hash] = resolved_hash
+
+        workspace._resolved_hashes[task_hash] = resolved_hash
         return resolved_hash
 
-    def __result_hash__(self, workspace: Workspace) -> ResultHash:
+    def _result_hash(self, workspace: Workspace) -> ResultHash:
         """Hash of the task's result object (getter from workspace cache)."""
         """Raises RuntimeError if the task has not been computed."""
-        resolved_hash: ResolvedTaskHash = self.__resolved_hash__(workspace=workspace)
-        result_hash: ResultHash | None = workspace.result_hash_cache.get(resolved_hash)
-        if result_hash is None:
+        # fast session-only cache
+        task_hash: TaskHash = cast("TaskHash", self.__hash__())
+        if (result_hash := workspace._result_hashes.get(task_hash)) is not None:
+            return result_hash
+
+        # slower workspace cache
+        resolved_hash: ResolvedTaskHash = self._resolved_hash(workspace=workspace)
+        if (result_hash := workspace._result_hash_cache.get(resolved_hash)) is None:
             raise RuntimeError(f"Task {self} must be computed first.")
+
+        workspace._result_hashes[task_hash] = result_hash
         return result_hash
 
 
@@ -295,10 +302,10 @@ class ResolvedTaskHash(int): ...
 class ResultHash(int): ...
 
 
-class SerializedResult:
-    def __init__(self, deserializer: Callable[[bytes], Any], data: bytes):
+class SerializedResult(Generic[R]):
+    def __init__(self, deserializer: Callable[[bytes], R], data: bytes):
         self.deserializer = deserializer
         self.data = data
 
-    def value(self) -> Any:
+    def value(self) -> R:
         return self.deserializer(self.data)
