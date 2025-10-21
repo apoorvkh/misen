@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from .executor import Executor
     from .workspace import ResultHash, Workspace
 
-__all__ = ["Task", "task", "resources"]
+__all__ = ["Task", "properties", "resources"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -39,7 +39,7 @@ class TaskProperties(Struct, frozen=True):
     from_bytes: Callable[[bytes], Any] = dill.loads
 
 
-def task(
+def properties(
     id: str | None = None,  # TODO: command to fill these in when None
     cache: bool = False,
     version: int = 0,
@@ -176,9 +176,18 @@ class Task(Generic[R]):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
         result = self.func(
-            *tuple(v.result(workspace=workspace) if isinstance(v, Task) else v for v in self.args),
+            *tuple(
+                v.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
+                if isinstance(v, Task)
+                else v
+                for v in self.args
+            ),
             **{
-                k: v.result(workspace=workspace) if isinstance(v, Task) else v
+                k: v.result(
+                    workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True
+                )
+                if isinstance(v, Task)
+                else v
                 for k, v in self.kwargs.items()
             },
         )  # type: ignore

@@ -114,10 +114,10 @@ class ResultMap(MutableMapping[Task, SerializedResult]):
         self.workspace = workspace
 
     def __getitem__(self, key: Task[R], /) -> SerializedResult[R]:
-        result_hash = key._result_hash(workspace=self.workspace)
         try:
+            result_hash = key._result_hash(workspace=self.workspace)
             result = self.workspace._result_cache[result_hash]
-        except KeyError as e:
+        except Exception as e:
             raise KeyError(f"Result for task {key} not found in cache.") from e
         return cast("SerializedResult", dill.loads(result))
 
