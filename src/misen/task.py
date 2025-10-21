@@ -7,7 +7,6 @@ from typing import (
     Any,
     Callable,
     Generic,
-    MutableMapping,
     ParamSpec,
     TypeVar,
     cast,
@@ -130,7 +129,7 @@ class Task(Generic[R]):
 
         return self.properties.cache and self in workspace.results
 
-    def logs(self, workspace: Workspace | None = None) -> MutableMapping[str, str]:
+    def logs(self, workspace: Workspace | None = None) -> str:
         if workspace is None:
             from .workspace import Workspace
 
@@ -194,7 +193,7 @@ class Task(Generic[R]):
             },
         )  # type: ignore
 
-        workspace.result_hashes[self] = cast("ResultHash", canonical_hash(result))
+        workspace.result_hash_cache[self] = cast("ResultHash", canonical_hash(result))
 
         from .workspace import SerializedResult
 
@@ -251,3 +250,55 @@ class Task(Generic[R]):
                 )
             )
         return self._hash
+
+    def __resolved_hash__(self, workspace: Workspace) -> ResolvedTaskHash:
+        """A hash that represents the Task object using its resolved arguments."""
+        task_hash: TaskHash = cast("TaskHash", self.__hash__())
+        resolved_hash: ResolvedTaskHash | None = workspace.resolved_hash_cache.get(task_hash)
+        if resolved_hash is None:
+            resolved_hash = cast(
+                "ResolvedTaskHash",
+                canonical_hash(
+                    (
+                        self.properties.id,
+                        self.properties.version,
+                        {
+                            k: (
+                                v.__result_hash__(workspace=workspace)
+                                if isinstance(v, Task)
+                                else canonical_hash(v)
+                            )
+                            for k, v in self._arguments_for_hashing.items()
+                        },
+                    )
+                ),
+            )
+            workspace.resolved_hash_cache[task_hash] = resolved_hash
+        return resolved_hash
+
+    def __result_hash__(self, workspace: Workspace) -> ResultHash:
+        """Hash of the task's result object (getter from workspace cache)."""
+        """Raises RuntimeError if the task has not been computed."""
+        resolved_hash: ResolvedTaskHash = self.__resolved_hash__(workspace=workspace)
+        result_hash: ResultHash | None = workspace.result_hash_cache.get(resolved_hash)
+        if result_hash is None:
+            raise RuntimeError(f"Task {self} must be computed first.")
+        return result_hash
+
+
+class TaskHash(int): ...
+
+
+class ResolvedTaskHash(int): ...
+
+
+class ResultHash(int): ...
+
+
+class SerializedResult:
+    def __init__(self, deserializer: Callable[[bytes], Any], data: bytes):
+        self.deserializer = deserializer
+        self.data = data
+
+    def value(self) -> Any:
+        return self.deserializer(self.data)
