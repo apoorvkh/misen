@@ -23,8 +23,18 @@ dependencies = [
     "misen_serialization"
 ]
 [dependency-groups]
+dev = [
+    "ruff==0.11.2",
+    "pyright[nodejs]==1.1.400",
+    "pytest==8.3.3",
+]
 slurm = ["submitit>=1.5.0"]
-dev = ["ruff==0.11.2", "pyright[nodejs]==1.1.400", "pytest==8.3.3", "ty"]
+docs = [
+  "sphinx==7.4.7",
+  "furo==2024.8.6",
+  "myst-parser==3.0.1",
+  "sphinx-toolbox==3.8.2",
+]
 
 [tool.uv.sources]
 misen-serialization = { workspace = true }
