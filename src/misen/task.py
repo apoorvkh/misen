@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from .executor import Executor
     from .workspace import ResultHash, Workspace
 
-__all__ = ["Task", "properties", "resources"]
+__all__ = ["Task", "task", "resources"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -39,7 +39,7 @@ class TaskProperties(Struct, frozen=True):
     from_bytes: Callable[[bytes], Any] = dill.loads
 
 
-def properties(
+def task(
     id: str | None = None,  # TODO: command to fill these in when None
     cache: bool = False,
     version: int = 0,
