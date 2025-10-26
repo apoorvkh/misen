@@ -3,6 +3,7 @@ from typing import Any, Callable, Type
 
 import dill
 import msgspec.json
+from xxhash import xxh3_64_intdigest
 
 from ._attrs import is_attrs_class
 from ._builtins import register_serializer_for_builtin_types
@@ -19,6 +20,10 @@ def serialize(obj: Any) -> bytes:
     serializer = _get_serializer(obj)
     payload = serializer(obj)
     return msgspec_serializer((type_name, payload))
+
+
+def canonical_hash(obj: Any, seed: int = 0) -> int:
+    return xxh3_64_intdigest(serialize(obj), seed=seed)
 
 
 _SERIALIZERS: dict[Type, Callable[[Any], bytes]] = {}
@@ -55,4 +60,4 @@ def _get_serializer(obj: Any) -> Callable[[Any], bytes]:
     return dill.dumps
 
 
-__all__ = ["msgspec_serializer", "serialize", "register_serializer"]
+__all__ = ["canonical_hash", "msgspec_serializer", "serialize", "register_serializer"]

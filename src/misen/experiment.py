@@ -15,6 +15,9 @@ from .settings import DEFAULT_SETTINGS_FILE, Settings  # noqa: TC001
 from .task import Task
 from .workspace import Workspace, WorkspaceType
 
+__all__ = ["Experiment"]
+
+
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
 
 ExecutorT = TypeVar("ExecutorT", bound=Executor)
@@ -24,8 +27,7 @@ ExperimentT = TypeVar("ExperimentT", bound="Experiment")
 
 class Experiment(Generic[TasksT], Struct, frozen=True):
     @abstractmethod
-    def tasks(self) -> TasksT:
-        raise NotImplementedError
+    def tasks(self) -> TasksT: ...
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -57,10 +59,12 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         )
 
         if args.executor_type != "auto":
-            _fields_without_defaults.append(("executor", Executor.resolve_type(args.executor_type)))
+            _fields_without_defaults.append(
+                ("executor", Executor._resolve_type(args.executor_type))
+            )
         if args.workspace_type != "auto":
             _fields_without_defaults.append(
-                ("workspace", Workspace.resolve_type(args.workspace_type))
+                ("workspace", Workspace._resolve_type(args.workspace_type))
             )
         _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))
 

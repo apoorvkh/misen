@@ -1,7 +1,7 @@
 from .executor import Executor
 from .experiment import Experiment
 from .settings import Settings
-from .task import Task, task
+from .task import Task, properties
 from .workspace import Workspace
 
 __all__ = [
@@ -9,6 +9,6 @@ __all__ = [
     "Experiment",
     "Settings",
     "Task",
-    "task",
+    "properties",
     "Workspace",
 ]

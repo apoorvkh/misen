@@ -12,9 +12,10 @@ else:
     import tomli as tomllib
 
 
-DEFAULT_SETTINGS_FILE = Path(
-    os.environ.get("MISEN_SETTINGS_FILE") or (Path.cwd() / "misen_settings.toml")
-)
+__all__ = ["Settings"]
+
+
+DEFAULT_SETTINGS_FILE = Path(os.environ.get("MISEN_SETTINGS_FILE") or (Path.cwd() / "misen.toml"))
 
 
 class Settings(Struct, dict=True):

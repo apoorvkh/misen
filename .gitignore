@@ -3,6 +3,9 @@
 log_folder/
 test_db/
 
+docs/source/README.md
+docs/source/contributing.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
