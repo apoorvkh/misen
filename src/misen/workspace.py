@@ -54,9 +54,41 @@ WorkspaceType: TypeAlias = str | Literal["auto", "memory", "disk"]
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
-    resolved_hashes: ResolvedHashCacheABC
-    result_hashes: ResultHashCacheABC
-    results: ResultCacheABC
+    def __init__(
+        self,
+        resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
+        result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
+        result_cache: MutableMapping[ResultHash, bytes],
+        log_store: MutableMapping[ResolvedTaskHash, str],
+    ):
+        # session-only (non-persistent) caches
+        self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
+        self._result_hashes: dict[TaskHash, ResultHash] = {}
+
+        # workspace caches
+        self._resolved_hash_cache = resolved_hash_cache
+        self._result_hash_cache = result_hash_cache
+        self._result_cache = result_cache
+        self._log_store = log_store
+
+        # public accessors to workspace data
+        self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
+        self.logs: MutableMapping[Task, str] = LogMap(workspace=self)
+
+    @staticmethod
+    def auto(settings: Settings | None = None) -> "Workspace":
+        if settings is None:
+            settings = Settings()
+
+        workspace_type = settings.toml_data.get("workspace_type", "auto")
+        workspace_cls = Workspace._resolve_type(workspace_type)
+        if workspace_cls is not Workspace:
+            return workspace_cls(**settings.toml_data.get("workspace_kwargs", {}))
+
+        # default
+        from misen.workspaces.memory import MemoryWorkspace
+
+        return MemoryWorkspace(i=20)
 
     @staticmethod
     def _resolve_type(t: WorkspaceType) -> type["Workspace"]:
