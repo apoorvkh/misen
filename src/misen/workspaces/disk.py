@@ -33,7 +33,7 @@ class LMDBMapping(MutableMapping[KT, VT]):
             value = txn.get(self.__hash_encode(key))
             if value is None:
                 raise KeyError(f"Key {key} not found")
-            return cast(VT, self.__hash_decode(value, self.__orig_class__.__args__[1]))  # type: ignore
+            return cast("VT", self.__hash_decode(value, self.__orig_class__.__args__[1]))  # type: ignore
 
     def __setitem__(self, key: KT, value: VT):
         with self.env.begin(db=self.db, write=True) as txn:
