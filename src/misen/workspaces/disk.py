@@ -8,7 +8,7 @@ from typing import MutableMapping, TypeVar, cast
 import lmdb
 from flufl.lock import Lock, NotLockedError  # pyright: ignore
 
-from ..task import Hash, ResolvedTaskHash, ResultHash, TaskHash
+from ..task import Hash, ResolvedTaskHash, ResultHash, Task, TaskHash
 from ..workspace import (
     Workspace,
 )
@@ -185,3 +185,8 @@ class DiskWorkspace(Workspace):
         # self.resolved_hashes = DiskResolvedHashCache(workspace=self)
         # self.result_hashes = DiskResultHashCache(workspace=self)
         # self.results = DiskResultCache(workspace=self, new_workspace=new_workspace)
+
+    def get_work_dir(self, task: Task) -> Path:
+        d = self.workspace_directory / "task" / str(task._resolved_hash(workspace=self))
+        d.mkdir(exist_ok=True)
+        return d

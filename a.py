@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import TypedDict
 
 from misen import Task, task
+from misen.executors.local import LocalExecutor
 from misen.experiment import Experiment
 from misen.workspaces.disk import DiskWorkspace
-from misen.executors.local import LocalExecutor
 
 
 @task(cache_result=True)
