@@ -21,7 +21,8 @@ dependencies = [
     "tomli>=1.1.0 ; python_version < '3.11'",
     "tyro>=0.9.20",
     "flufl-lock>=8.2.0",
-    "misen_serialization"
+    "misen_serialization",
+    "lmdb>=1.7.5",
 ]
 [dependency-groups]
 dev = [
