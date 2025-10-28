@@ -37,6 +37,10 @@ class TaskProperties(Struct, frozen=True):
     defaults: dict[str, Any] = {}
     to_bytes: Callable[[Any], bytes] = dill.dumps
     from_bytes: Callable[[bytes], Any] = dill.loads
+    process_bound: bool = False
+
+    def __post_init__(self):
+        assert not (self.cache and self.process_bound)
 
 
 def task(
@@ -47,6 +51,7 @@ def task(
     defaults: dict[str, Any] = {},
     to_bytes: Callable[[R], bytes] = dill.dumps,  # TODO: typing
     from_bytes: Callable[[bytes], R] = dill.loads,
+    process_bound: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
@@ -62,6 +67,7 @@ def task(
                 defaults=defaults,
                 to_bytes=to_bytes,
                 from_bytes=from_bytes,
+                process_bound=process_bound,
             ),
         )
         return func
