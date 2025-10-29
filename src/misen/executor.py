@@ -6,12 +6,10 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
 from .settings import Settings
-from .workspace import Workspace
 
 if TYPE_CHECKING:
-    from concurrent.futures import Future
-
     from .task import Task
+    from .workspace import Workspace
 
 __all__ = ["Executor"]
 
@@ -50,15 +48,14 @@ class Executor(ABC):
                 return getattr(import_module(module), class_name)
 
     @abstractmethod
-    def submit(self, task: Task, workspace: Workspace) -> Future: ...
+    def _submit(self, dependency_graph: dict[Task, set[Task]], workspace: Workspace) -> None: ...
 
-    def _computable_groups(self, task: Task, workspace: Workspace | None = None):
-        if workspace is None:
-            workspace = Workspace.auto()
-        return distributable_tasks(task, workspace)
+    def submit(self, task: Task, workspace: Workspace) -> None:
+        distributable_graph = distributable_tasks(task, workspace)
+        self._submit(distributable_graph, workspace)
 
 
-def distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Task]]:
+def distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, set[Task]]:
     """
     Given a DAG (represented by the root Task), this function should identify tasks that can be executed by distributed workers.
     Specifically, these are the cacheable tasks. This function should return a dependency graph of just those tasks and the root.
@@ -107,10 +104,10 @@ def distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, list[Tas
 
     ### Retain only root & cachable tasks (and the induced graph minor)
 
-    nodes_to_remove = dag.filter_nodes(lambda task: not (task.properties.cacheable or task == root))
+    nodes_to_remove = dag.filter_nodes(lambda task: not (task.properties.cache or task == root))
     for node in nodes_to_remove:
         dag.remove_node_retain_edges(node)
 
     ### Return as adjacency list
 
-    return {dag.get_node_data(node): dag.successors(node) for node in dag.node_indices()}
+    return {dag.get_node_data(node): set(dag.successors(node)) for node in dag.node_indices()}
