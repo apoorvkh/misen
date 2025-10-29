@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import submitit
 
 from ..executor import Executor
@@ -6,9 +8,10 @@ from ..workspace import Workspace
 
 
 class SlurmExecutor(Executor):
-    def __init__(self) -> None:
-        self.slurm_executor = submitit.SlurmExecutor(folder=".submitit")
-        super().__init__()
+    def __init__(self, folder: Path = Path(".submitit")) -> None:
+        self.slurm_executor = submitit.SlurmExecutor(folder=folder)
+
+    # TODO: figure out a unified interface
 
     def _submit(self, dependency_graph: dict[Task, set[Task]], workspace: Workspace) -> None:
         unmet_deps: dict[Task, set[Task]] = {t: d.copy() for t, d in dependency_graph.items()}
@@ -34,6 +37,8 @@ class SlurmExecutor(Executor):
                 gpus_per_node=task.resources.gpus,
                 dependency=dependency,
             )
+
+            # TODO: new implementation for task.result with multiprocessing
 
             job = self.slurm_executor.submit(
                 task.result,

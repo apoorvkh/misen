@@ -29,6 +29,9 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
+# TODO: consider process_bound
+
+
 class TaskProperties(Struct, frozen=True):
     id: str
     cache: bool = False
@@ -41,6 +44,9 @@ class TaskProperties(Struct, frozen=True):
 
     def __post_init__(self):
         assert not (self.cache and self.process_bound)
+
+
+# TODO: maybe to/from bytes should default to canonical serialization?
 
 
 def task(
@@ -82,6 +88,9 @@ class TaskResources(Struct):
     cpus: int = 1  # number of logical cores
     gpus: int = 0  # number of GPUs
     gpu_memory: int | None = None  # memory (GB) per GPU
+
+
+# TODO: resources as a function of arguments
 
 
 def resources(

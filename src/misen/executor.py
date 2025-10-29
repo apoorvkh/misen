@@ -30,7 +30,7 @@ class Executor(ABC):
         # default
         from misen.executors.local import LocalExecutor
 
-        return LocalExecutor(i=20)
+        return LocalExecutor()
 
     @staticmethod
     def _resolve_type(t: ExecutorType) -> type["Executor"]:
@@ -42,13 +42,19 @@ class Executor(ABC):
 
                 return LocalExecutor
             case "slurm":
-                raise NotImplementedError
+                from misen.executors.slurm import SlurmExecutor
+
+                return SlurmExecutor
             case _:
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
 
+    # Should return a Future for each task
+
     @abstractmethod
     def _submit(self, dependency_graph: dict[Task, set[Task]], workspace: Workspace) -> None: ...
+
+    # Should return a Future for the primary task
 
     def submit(self, task: Task, workspace: Workspace) -> None:
         distributable_graph = distributable_tasks(task, workspace)
