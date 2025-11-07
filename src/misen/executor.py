@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Executor"]
 
+ExecutorType: TypeAlias = str | Literal["auto", "local", "slurm"]
 
 T = TypeVar("T")
 AdjacencyList: TypeAlias = dict[T, set[T]]
@@ -46,7 +47,7 @@ class Executor(Generic[JobT], ABC):
         return SlurmExecutor()
 
     @staticmethod
-    def _resolve_type(t: str | Literal["auto", "local", "slurm"]) -> type[Executor]:
+    def _resolve_type(t: ExecutorType) -> type[Executor]:
         match t:
             case "auto":
                 return Executor

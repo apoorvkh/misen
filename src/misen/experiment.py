@@ -40,6 +40,7 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         return self.tasks()[key].result(workspace=workspace)
 
     def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> None:
+        # TODO: note empty lambda task is submitted as well
         Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
 
     @classmethod
