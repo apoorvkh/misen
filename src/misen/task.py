@@ -17,16 +17,18 @@ from misen_serialization import canonical_hash
 from msgspec import Struct
 
 if TYPE_CHECKING:
-    from concurrent.futures import Future
     from pathlib import Path
 
-    from .executor import Executor
+    from .executor import AdjacencyList, Executor, Job
     from .workspace import ResultHash, Workspace
 
 __all__ = ["Task", "task", "resources"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+# TODO: consider process_bound
 
 
 class TaskProperties(Struct, frozen=True):
@@ -37,6 +39,13 @@ class TaskProperties(Struct, frozen=True):
     defaults: dict[str, Any] = {}
     to_bytes: Callable[[Any], bytes] = dill.dumps
     from_bytes: Callable[[bytes], Any] = dill.loads
+    process_bound: bool = False
+
+    def __post_init__(self):
+        assert not (self.cache and self.process_bound)
+
+
+# TODO: maybe to/from bytes should default to canonical serialization?
 
 
 def task(
@@ -47,6 +56,7 @@ def task(
     defaults: dict[str, Any] = {},
     to_bytes: Callable[[R], bytes] = dill.dumps,  # TODO: typing
     from_bytes: Callable[[bytes], R] = dill.loads,
+    process_bound: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
@@ -62,6 +72,7 @@ def task(
                 defaults=defaults,
                 to_bytes=to_bytes,
                 from_bytes=from_bytes,
+                process_bound=process_bound,
             ),
         )
         return func
@@ -76,6 +87,9 @@ class TaskResources(Struct):
     cpus: int = 1  # number of logical cores
     gpus: int = 0  # number of GPUs
     gpu_memory: int | None = None  # memory (GB) per GPU
+
+
+# TODO: resources as a function of arguments
 
 
 def resources(
@@ -133,9 +147,12 @@ class Task(Generic[R]):
     def _dependencies(self) -> list[Task]:
         return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
 
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
+    def run(
+        self, workspace: Workspace | None = None, executor: Executor | None = None
+    ) -> AdjacencyList[Job]:
         """
-        Submit task to executor to fully execute the task graph.
+        Submit task to an executor and return a mapping from each distributable task to its
+        dependency set and runtime job status handle.
         """
 
         if executor is None:
