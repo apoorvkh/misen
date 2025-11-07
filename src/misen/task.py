@@ -17,10 +17,9 @@ from misen_serialization import canonical_hash
 from msgspec import Struct
 
 if TYPE_CHECKING:
-    from concurrent.futures import Future
     from pathlib import Path
 
-    from .executor import Executor
+    from .executor import AdjacencyList, Executor, Job
     from .workspace import ResultHash, Workspace
 
 __all__ = ["Task", "task", "resources"]
@@ -148,9 +147,12 @@ class Task(Generic[R]):
     def _dependencies(self) -> list[Task]:
         return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
 
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> Future:
+    def run(
+        self, workspace: Workspace | None = None, executor: Executor | None = None
+    ) -> AdjacencyList[Job]:
         """
-        Submit task to executor to fully execute the task graph.
+        Submit task to an executor and return a mapping from each distributable task to its
+        dependency set and runtime job status handle.
         """
 
         if executor is None:

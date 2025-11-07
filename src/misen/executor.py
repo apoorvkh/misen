@@ -1,24 +1,34 @@
 from __future__ import annotations
 
+import functools
 from abc import ABC, abstractmethod
 from functools import cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Callable, Generic, Literal, TypeAlias, TypeVar
 
 from .settings import Settings
 
 if TYPE_CHECKING:
-    from .task import Task
+    from .task import Task, TaskResources
     from .workspace import Workspace
 
 __all__ = ["Executor"]
 
-ExecutorType = str | Literal["auto", "local", "slurm"]
+
+T = TypeVar("T")
+AdjacencyList: TypeAlias = dict[T, set[T]]
 
 
-class Executor(ABC):
+class Job(ABC):
+    pass
+
+
+JobT = TypeVar("JobT", bound="Job")
+
+
+class Executor(Generic[JobT], ABC):
     @staticmethod
-    def auto(settings: Settings | None = None) -> "Executor":
+    def auto(settings: Settings | None = None) -> Executor:
         if settings is None:
             settings = Settings()
 
@@ -28,19 +38,20 @@ class Executor(ABC):
             return executor_cls(**settings.toml_data.get("executor_kwargs", {}))
 
         # default
-        from misen.executors.local import LocalExecutor
+        # from misen.executors.local import LocalExecutor
 
-        return LocalExecutor()
+        # return LocalExecutor()
+        from misen.executors.slurm import SlurmExecutor
+
+        return SlurmExecutor()
 
     @staticmethod
-    def _resolve_type(t: ExecutorType) -> type["Executor"]:
+    def _resolve_type(t: str | Literal["auto", "local", "slurm"]) -> type[Executor]:
         match t:
             case "auto":
                 return Executor
             case "local":
-                from misen.executors.local import LocalExecutor
-
-                return LocalExecutor
+                raise NotImplementedError("LocalExecutor is not implemented yet")
             case "slurm":
                 from misen.executors.slurm import SlurmExecutor
 
@@ -49,19 +60,50 @@ class Executor(ABC):
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
 
-    # Should return a Future for each task
-
     @abstractmethod
-    def _submit(self, dependency_graph: dict[Task, set[Task]], workspace: Workspace) -> None: ...
+    def _submit(
+        self, function: Callable, resources: TaskResources, dependencies: set[JobT]
+    ) -> JobT: ...
 
-    # Should return a Future for the primary task
+    def submit(self, task: Task, workspace: Workspace) -> AdjacencyList[JobT]:
+        task_graph: AdjacencyList[Task] = distributable_tasks(task, workspace)
 
-    def submit(self, task: Task, workspace: Workspace) -> None:
-        distributable_graph = distributable_tasks(task, workspace)
-        self._submit(distributable_graph, workspace)
+        remaining_deps: AdjacencyList[Task] = {t: d.copy() for t, d in task_graph.items()}
+        jobs: dict[Task, JobT] = {}
+
+        while len(remaining_deps) > 0:
+            task = next(k for k, v in remaining_deps.items() if len(v) == 0)
+            del remaining_deps[task]
+            for t in remaining_deps.keys():
+                remaining_deps[t].discard(task)
+
+            # TODO: new implementation for task.result with multiprocessing
+
+            execution_fn = functools.partial(
+                task.result,
+                workspace=workspace,
+                compute_if_uncached=True,
+                compute_uncached_deps=True,
+            )
+
+            # TODO: use union of task resources
+
+            resources = task.resources
+
+            dependencies = {jobs[d] for d in task_graph[task]}
+
+            jobs[task] = self._submit(
+                execution_fn,
+                resources=resources,
+                dependencies=dependencies,
+            )
+
+        job_graph: AdjacencyList[JobT] = {jobs[t]: {jobs[d] for d in task_graph[t]} for t in jobs}
+
+        return job_graph
 
 
-def distributable_tasks(root: Task, workspace: Workspace) -> dict[Task, set[Task]]:
+def distributable_tasks(root: Task, workspace: Workspace) -> AdjacencyList[Task]:
     """
     Given a DAG (represented by the root Task), this function should identify tasks that can be executed by distributed workers.
     Specifically, these are the cacheable tasks. This function should return a dependency graph of just those tasks and the root.
