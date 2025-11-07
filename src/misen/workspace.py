@@ -53,6 +53,9 @@ class WorkspaceMeta(ABCMeta):
 WorkspaceType: TypeAlias = str | Literal["auto", "memory", "disk"]
 
 
+# TODO: support polling task status from Workspace
+
+
 class Workspace(ABC, metaclass=WorkspaceMeta):
     def __init__(
         self,
@@ -142,8 +145,14 @@ class ResultMap(MutableMapping[Task, SerializedResult]):
     def __contains__(self, key: object, /) -> bool:
         if not isinstance(key, Task):
             return False
-        result_hash = key._result_hash(workspace=self.workspace)
+        try:
+            result_hash = key._result_hash(workspace=self.workspace)
+        except RuntimeError:
+            return False
         return result_hash in self.workspace._result_cache
+
+
+# TODO: decide how to store logs
 
 
 class LogMap(MutableMapping[Task, str]):

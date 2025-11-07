@@ -6,6 +6,8 @@ test_db/
 docs/source/README.md
 docs/source/contributing.md
 
+.submitit
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
