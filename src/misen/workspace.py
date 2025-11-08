@@ -91,7 +91,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         # default
         from misen.workspaces.memory import MemoryWorkspace
 
-        return MemoryWorkspace(i=20)
+        return MemoryWorkspace()
 
     @staticmethod
     def _resolve_type(t: WorkspaceType) -> type["Workspace"]:

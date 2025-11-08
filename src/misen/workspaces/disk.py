@@ -82,9 +82,16 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
             return txn.get(key.encode()) is not None
 
 
+# Notes about implementation
+
+# processes should use flufl.lock for writing. This lock (1) requires processes to have synchronized clocks,
+# which I think is fine, and (2) have a lifetime (e.g. lock is invalid after 90s). In the ResultCache case,
+# we may want to hold a lock for >90s. In that case, I think we can have another thread that renews the lock every 80s.
+
+
 class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
-    def __init__(self, result_cache_directory: Path):
-        self.result_cache_directory = result_cache_directory
+    def __init__(self, directory: Path):
+        self.directory = directory
 
     def __aquire_lock(self, filename: Path) -> Lock:
         item_lock_filename = filename.name + ".lock"
@@ -95,7 +102,8 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
         return lock
 
     def __get_key_filename(self, key: ResultHash) -> Path:
-        return self.result_cache_directory / f"result_{str(key)}"
+        key_hex = f"{key:016x}"  # zero-padded 16 hex chars
+        return self.directory / key_hex[:2] / f"{key_hex}.dill"
 
     def __setitem__(self, key: ResultHash, value: bytes):
         item_filename = self.__get_key_filename(key)
@@ -150,14 +158,12 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
         # do not remove the lock file for now, it has a race condition
 
     def __iter__(self):
-        for path in self.result_cache_directory.iterdir():
+        for path in self.directory.iterdir():
             if path.is_file() and path.name.startswith("result_"):
                 yield ResultHash(path.name[7:])
 
     def __len__(self) -> int:
-        return len(
-            list(filter(lambda x: x.startswith("result_"), os.listdir(self.result_cache_directory)))
-        )
+        return len(list(filter(lambda x: x.startswith("result_"), os.listdir(self.directory))))
 
 
 class DiskWorkspace(Workspace):
@@ -178,7 +184,7 @@ class DiskWorkspace(Workspace):
                 self.workspace_directory / "result_hash_cache.mdb"
             ),
             result_cache=DiskResultCacheMapping(
-                result_cache_directory=self.workspace_directory / "result_cache"
+                directory=self.workspace_directory / "result_cache"
             ),
             log_store={},
         )
