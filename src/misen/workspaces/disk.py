@@ -166,30 +166,28 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
         return len(list(filter(lambda x: x.startswith("result_"), os.listdir(self.directory))))
 
 
-class DiskWorkspace(Workspace):
-    def __init__(self, directory: str):
-        # open/create at specified directory or in CWD otherwise
-        self.project_directory = Path(directory if directory is not None else "./")
-        self.workspace_directory = self.project_directory / ".misen_workspace"
+# TODO: since we use flufl.lock, we should have a check in DiskWorkspace.__init__ to ensure the system clock is NTP synchronized
 
-        # at the moment, only support one workspace per directory, TODO: support multiple
-        if not self.workspace_directory.exists():
-            os.mkdir(self.workspace_directory)
+
+class DiskWorkspace(Workspace):
+    def __init__(self, directory: Path = Path(".misen")):
+        self.directory = directory
+
+        self.directory.mkdir(exist_ok=True)
 
         super().__init__(
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](
-                self.workspace_directory / "resolved_hash_cache.mdb"
+                self.directory / "resolved_hash_cache.mdb"
             ),
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](
-                self.workspace_directory / "result_hash_cache.mdb"
+                self.directory / "result_hash_cache.mdb"
             ),
-            result_cache=DiskResultCacheMapping(
-                directory=self.workspace_directory / "result_cache"
-            ),
+            result_cache=DiskResultCacheMapping(self.directory / "result_cache"),
             log_store={},
         )
 
     def get_work_dir(self, task: Task) -> Path:
-        d = self.workspace_directory / "task" / str(task._resolved_hash(workspace=self))
+        key_hex = f"{task._resolved_hash(workspace=self):016x}"  # zero-padded 16 hex chars
+        d = self.directory / "work" / key_hex[:2] / f"{key_hex}"
         d.mkdir(exist_ok=True)
         return d
