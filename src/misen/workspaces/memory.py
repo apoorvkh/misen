@@ -10,9 +10,11 @@ from ..workspace import (
 __all__ = ["MemoryWorkspace"]
 
 
+# TODO: note incompatibility with distributed executors
+
+
 class MemoryWorkspace(Workspace):
-    def __init__(self, i: int):
-        self.i = i
+    def __init__(self):
         super().__init__(
             resolved_hash_cache={},
             result_hash_cache={},

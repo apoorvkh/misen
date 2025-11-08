@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 from datetime import timedelta
 from pathlib import Path
-from typing import MutableMapping, TypeVar, cast
+from typing import Generator, Generic, MutableMapping, TypeVar
 
 import lmdb
-from flufl.lock import Lock, NotLockedError  # pyright: ignore
+from flufl.lock._lockfile import Lock, NotLockedError
 
 from ..task import Hash, ResolvedTaskHash, ResultHash, Task, TaskHash
 from ..workspace import (
@@ -17,56 +17,69 @@ KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
 
 
-class LMDBMapping(MutableMapping[KT, VT]):
-    def __init__(self, database_dir: Path):
-        self.env = lmdb.open(str(database_dir), map_size=1_000_000_000, max_dbs=1)
-        self.db = self.env.open_db()
+class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
+    _key_type: type[KT]
+    _value_type: type[VT]
 
-    def __hash_encode(self, hash: Hash) -> bytes:
-        return hash.to_bytes(8, byteorder="big")
+    def __class_getitem__(cls, item: tuple[type[KT], type[VT]]):
+        """Subclass dynamically bound to KT, VT."""
+        key_t, val_t = item
+        return type(
+            f"{cls.__name__}[{key_t.__name__},{val_t.__name__}]",
+            (cls,),
+            {
+                "_key_type": key_t,
+                "_value_type": val_t,
+                "__module__": cls.__module__,
+            },
+        )
 
-    def __hash_decode(self, encoded_hash: bytes, typ: type[Hash]) -> Hash:
-        return typ(int.from_bytes(encoded_hash, byteorder="big"))
+    def __init__(self, database_path: Path):
+        if not hasattr(self, "_key_type") or not hasattr(self, "_value_type"):
+            raise TypeError("Construct as LMDBMapping[KeyType, ValueType](...)")
+
+        # TODO: implement the lock (using flufl.lock)
+
+        self.env = lmdb.Environment(
+            database_path,
+            subdir=False,
+            lock=False,
+            map_size=2**28,  # 256 MiB
+            max_dbs=1,
+        )
 
     def __getitem__(self, key: KT) -> VT:
-        with self.env.begin(db=self.db) as txn:
-            value = txn.get(self.__hash_encode(key))
-            if value is None:
-                raise KeyError(f"Key {key} not found")
-            return cast("VT", self.__hash_decode(value, self.__orig_class__.__args__[1]))  # type: ignore
+        with self.env.begin() as txn:
+            v: bytes | None = txn.get(key.encode(), default=None)  # type: ignore
+            if v is None:
+                raise KeyError(key)
+            return self._value_type.decode(v)
 
-    def __setitem__(self, key: KT, value: VT):
-        with self.env.begin(db=self.db, write=True) as txn:
-            txn.put(self.__hash_encode(key), self.__hash_encode(value))
+    def __setitem__(self, key: KT, value: VT) -> None:
+        _key, _value = key.encode(), value.encode()
+        with self.env.begin(write=True) as txn:
+            txn.put(_key, _value)
 
-    def __delitem__(self, key: KT):
-        with self.env.begin(db=self.db, write=True) as txn:
-            if not txn.delete(self.__hash_encode(key)):
-                raise KeyError(f"Key {key} not found")
+    def __delitem__(self, key: KT) -> None:
+        _key = key.encode()
+        with self.env.begin(write=True) as txn:
+            success = txn.delete(_key)
+        if not success:
+            raise KeyError(key)
 
-    def __iter__(self):
-        with self.env.begin(db=self.db) as txn:
-            cursor = txn.cursor()
-            for encoded_key, _ in cursor:
-                yield cast("KT", self.__hash_decode(encoded_key, self.__orig_class__.__args__[0]))  # type: ignore
+    def __iter__(self) -> Generator[KT]:
+        with self.env.begin() as txn:
+            for k, _ in txn.cursor():
+                yield self._key_type.decode(k)
 
-    def __len__(self):
-        with self.env.begin(db=self.db) as txn:
-            return txn.stat(db=self.db)["entries"]
+    def __len__(self) -> int:
+        return self.env.stat()["entries"]
 
-
-# class DiskResolvedHashCache(MutableMapping[TaskHash, ResolvedTaskHash]):
-#     def __init__(self, workspace: DiskWorkspace):
-#         super().__init__()
-#         self.workspace = workspace
-#         self.mapping = LMDBMapping(self.workspace.workspace_directory / "resolved_hash_cache")  # pyright: ignore
-
-
-# class DiskResultHashCache(MutableMapping[ResolvedTaskHash, ResultHash]):
-#     def __init__(self, workspace: DiskWorkspace):
-#         super().__init__()
-#         self.workspace = workspace
-#         self.mapping = LMDBMapping(self.workspace.workspace_directory / "result_hash_cache")  # pyright: ignore
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, self._key_type):
+            return False
+        with self.env.begin() as txn:
+            return txn.get(key.encode()) is not None
 
 
 class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
@@ -147,18 +160,6 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
         )
 
 
-# class DiskResultCache(MutableMapping[ResultHash, bytes]):
-#     def __init__(self, workspace: DiskWorkspace, new_workspace: bool = False):
-#         super().__init__()
-#         self.workspace = workspace
-#         self.result_cache_directory = workspace.workspace_directory / "result_cache"
-
-#         if new_workspace:
-#             os.mkdir(self.result_cache_directory)
-
-#         self.mapping = DiskResultCacheMapping(self)
-
-
 class DiskWorkspace(Workspace):
     def __init__(self, directory: str):
         # open/create at specified directory or in CWD otherwise
@@ -171,20 +172,16 @@ class DiskWorkspace(Workspace):
 
         super().__init__(
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](
-                database_dir=self.workspace_directory / "resolved_hash_cache"
+                self.workspace_directory / "resolved_hash_cache.mdb"
             ),
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](
-                database_dir=self.workspace_directory / "result_hash_cache"
+                self.workspace_directory / "result_hash_cache.mdb"
             ),
             result_cache=DiskResultCacheMapping(
                 result_cache_directory=self.workspace_directory / "result_cache"
             ),
             log_store={},
         )
-
-        # self.resolved_hashes = DiskResolvedHashCache(workspace=self)
-        # self.result_hashes = DiskResultHashCache(workspace=self)
-        # self.results = DiskResultCache(workspace=self, new_workspace=new_workspace)
 
     def get_work_dir(self, task: Task) -> Path:
         d = self.workspace_directory / "task" / str(task._resolved_hash(workspace=self))
