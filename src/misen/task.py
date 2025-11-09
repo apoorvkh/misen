@@ -211,7 +211,7 @@ class Task(Generic[R]):
         )  # type: ignore
 
         resolved_hash = self._resolved_hash(workspace=workspace)
-        workspace._result_hash_cache[resolved_hash] = cast("ResultHash", canonical_hash(result))
+        workspace._result_hash_cache[resolved_hash] = ResultHash(canonical_hash(result))
 
         if self.properties.cache:
             from .workspace import SerializedResult
@@ -278,7 +278,7 @@ class Task(Generic[R]):
 
     def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""
-        task_hash: TaskHash = cast("TaskHash", self.__hash__())
+        task_hash: TaskHash = TaskHash(self.__hash__())
 
         # fast session-only cache
         if (resolved_hash := workspace._resolved_hashes.get(task_hash)) is not None:
@@ -294,8 +294,7 @@ class Task(Generic[R]):
                 )
                 for k, v in self._arguments_for_hashing.items()
             }
-            resolved_hash = cast(
-                "ResolvedTaskHash",
+            resolved_hash = ResolvedTaskHash(
                 canonical_hash((self.properties.id, self.properties.version, hashed_arguments)),
             )
             workspace._resolved_hash_cache[task_hash] = resolved_hash
@@ -307,7 +306,7 @@ class Task(Generic[R]):
         """Hash of the task's result object (getter from workspace cache)."""
         """Raises RuntimeError if the task has not been computed."""
         # fast session-only cache
-        task_hash: TaskHash = cast("TaskHash", self.__hash__())
+        task_hash: TaskHash = TaskHash(self.__hash__())
         if (result_hash := workspace._result_hashes.get(task_hash)) is not None:
             return result_hash
 
