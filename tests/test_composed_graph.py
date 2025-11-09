@@ -1,5 +1,4 @@
-from misen import Task, Workspace, task
-from misen.executor import distributable_tasks
+from misen import Task, task
 from misen.executors.slurm import SlurmExecutor
 from misen.workspaces.memory import MemoryWorkspace
 
@@ -12,7 +11,7 @@ def add(a: float, b: float) -> float:
 
 @task(cache=True)
 def multiply(a: float, b: float) -> float:
-    print(f"Running multiply with {a}, {b}")
+    print(f"[CACHE] Running multiply with {a}, {b}")
     return a * b
 
 
@@ -24,7 +23,7 @@ def square(x: float) -> float:
 
 @task(cache=True)
 def sum_list(numbers: list[float]) -> float:
-    print(f"Running sum_list with {numbers}")
+    print(f"[CACHE] Running sum_list with {numbers}")
     return sum(numbers)
 
 
@@ -37,7 +36,7 @@ def mean(numbers: list[float]) -> float:
 
 @task(cache=True)
 def variance(numbers: list[float]) -> float:
-    print(f"Running variance with {numbers}")
+    print(f"[CACHE] Running variance with {numbers}")
     mean_val = mean(numbers)
     squared_diffs = [square(x - mean_val) for x in numbers]
     return sum_list(squared_diffs) / len(numbers)
@@ -73,9 +72,6 @@ def graph() -> Task:
 
 
 if __name__ == "__main__":
-    workspace = MemoryWorkspace(i=0)
+    workspace = MemoryWorkspace()
     executor = SlurmExecutor()
-    graph_task = graph()
-    print(graph_task)
-    print(distributable_tasks(graph_task, workspace))
-    executor.submit(graph_task, workspace=workspace)
+    executor.submit(graph(), workspace=workspace)
