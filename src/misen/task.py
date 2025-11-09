@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .executor import AdjacencyList, Executor, Job
-    from .workspace import ResultHash, Workspace
+    from .workspace import ResultHash, Workspace, WorkspaceParameters
 
 __all__ = ["Task", "task", "resources"]
 
@@ -170,7 +170,7 @@ class Task(Generic[R]):
 
     def result(
         self,
-        workspace: Workspace | None = None,
+        workspace: Workspace | WorkspaceParameters | None = None,
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
     ) -> R:
@@ -180,6 +180,11 @@ class Task(Generic[R]):
             from .workspace import Workspace
 
             workspace = Workspace.auto()
+        else:
+            from .workspace import WorkspaceParameters
+
+            if isinstance(workspace, WorkspaceParameters):
+                workspace = workspace.construct()
 
         if self.properties.cache:
             if (serialized_result := workspace.results.get(self)) is not None:

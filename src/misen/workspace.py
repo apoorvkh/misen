@@ -53,6 +53,16 @@ class WorkspaceMeta(ABCMeta):
 WorkspaceType: TypeAlias = str | Literal["auto", "memory", "disk"]
 
 
+class WorkspaceParameters:
+    def __init__(self, type: type[Workspace], *args, **kwargs):
+        self.type = type
+        self.args = args
+        self.kwargs = kwargs
+
+    def construct(self) -> Workspace:
+        return self.type(*self.args, **self.kwargs)
+
+
 # TODO: support polling task status from Workspace
 
 
@@ -92,6 +102,9 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         from misen.workspaces.memory import MemoryWorkspace
 
         return MemoryWorkspace()
+
+    @abstractmethod
+    def to_params(self) -> WorkspaceParameters: ...
 
     @staticmethod
     def _resolve_type(t: WorkspaceType) -> type["Workspace"]:

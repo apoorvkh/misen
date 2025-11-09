@@ -9,9 +9,7 @@ import lmdb
 from flufl.lock._lockfile import Lock, NotLockedError
 
 from ..task import Hash, ResolvedTaskHash, ResultHash, Task, TaskHash
-from ..workspace import (
-    Workspace,
-)
+from ..workspace import Workspace, WorkspaceParameters
 
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
@@ -185,6 +183,9 @@ class DiskWorkspace(Workspace):
             result_cache=DiskResultCacheMapping(self.directory / "result_cache"),
             log_store={},
         )
+
+    def to_params(self) -> WorkspaceParameters:
+        return WorkspaceParameters(DiskWorkspace, directory=self.directory)
 
     def get_work_dir(self, task: Task) -> Path:
         key_hex = f"{task._resolved_hash(workspace=self):016x}"  # zero-padded 16 hex chars

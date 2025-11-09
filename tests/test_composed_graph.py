@@ -1,5 +1,6 @@
 from misen import Task, task
 from misen.executors.slurm import SlurmExecutor
+from misen.workspaces.disk import DiskWorkspace
 from misen.workspaces.memory import MemoryWorkspace
 
 
@@ -72,6 +73,6 @@ def graph() -> Task:
 
 
 if __name__ == "__main__":
-    workspace = MemoryWorkspace()
+    workspace = DiskWorkspace()
     executor = SlurmExecutor()
     executor.submit(graph(), workspace=workspace)

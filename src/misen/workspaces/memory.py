@@ -3,9 +3,7 @@ from functools import cache
 from pathlib import Path
 
 from ..task import Task
-from ..workspace import (
-    Workspace,
-)
+from ..workspace import Workspace, WorkspaceParameters
 
 __all__ = ["MemoryWorkspace"]
 
@@ -21,6 +19,9 @@ class MemoryWorkspace(Workspace):
             result_cache={},
             log_store={},
         )
+
+    def to_params(self) -> WorkspaceParameters:
+        return WorkspaceParameters(MemoryWorkspace)
 
     @cache
     def _temp_workspace_dir() -> Path:

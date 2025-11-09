@@ -67,6 +67,8 @@ class Executor(Generic[JobT], ABC):
     ) -> JobT: ...
 
     def submit(self, task: Task, workspace: Workspace) -> AdjacencyList[JobT]:
+        workspace_params = workspace.to_params()
+
         task_graph: AdjacencyList[Task] = distributable_tasks(task, workspace)
 
         remaining_deps: AdjacencyList[Task] = {t: d.copy() for t, d in task_graph.items()}
@@ -82,7 +84,7 @@ class Executor(Generic[JobT], ABC):
 
             execution_fn = functools.partial(
                 task.result,
-                workspace=workspace,
+                workspace=workspace_params,
                 compute_if_uncached=True,
                 compute_uncached_deps=True,
             )
