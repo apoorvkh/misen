@@ -41,7 +41,7 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
         # TODO: implement the lock (using flufl.lock)
 
         self.env = lmdb.Environment(
-            database_path,
+            str(database_path),
             subdir=False,
             lock=False,
             map_size=2**28,  # 256 MiB
