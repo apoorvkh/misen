@@ -181,7 +181,6 @@ class DiskWorkspace(Workspace):
                 self.directory / "result_hash_cache.mdb"
             ),
             result_cache=DiskResultCacheMapping(self.directory / "result_cache"),
-            log_store={},
         )
 
     def to_params(self) -> WorkspaceParameters:

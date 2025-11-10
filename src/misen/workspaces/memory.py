@@ -17,7 +17,6 @@ class MemoryWorkspace(Workspace):
             resolved_hash_cache={},
             result_hash_cache={},
             result_cache={},
-            log_store={},
         )
 
     def to_params(self) -> WorkspaceParameters:

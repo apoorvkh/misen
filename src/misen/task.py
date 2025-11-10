@@ -228,14 +228,6 @@ class Task(Generic[R]):
 
         return result
 
-    def logs(self, workspace: Workspace | None = None) -> str:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
-        return workspace.logs[self]
-
     def work_dir(self, workspace: Workspace | None = None) -> Path:
         if workspace is None:
             from .workspace import Workspace

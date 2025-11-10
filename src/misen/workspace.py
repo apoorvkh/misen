@@ -53,6 +53,9 @@ class WorkspaceMeta(ABCMeta):
 WorkspaceType: TypeAlias = str | Literal["auto", "memory", "disk"]
 
 
+# TODO: figure out better way to avoid serializing workspaces?
+
+
 class WorkspaceParameters:
     def __init__(self, type: type[Workspace], *args, **kwargs):
         self.type = type
@@ -64,6 +67,7 @@ class WorkspaceParameters:
 
 
 # TODO: support polling task status from Workspace
+# TODO: add task lock to Workspace
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
@@ -72,7 +76,6 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
         result_cache: MutableMapping[ResultHash, bytes],
-        log_store: MutableMapping[ResolvedTaskHash, str],
     ):
         # session-only (non-persistent) caches
         self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
@@ -82,11 +85,9 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         self._resolved_hash_cache = resolved_hash_cache
         self._result_hash_cache = result_hash_cache
         self._result_cache = result_cache
-        self._log_store = log_store
 
         # public accessors to workspace data
         self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
-        self.logs: MutableMapping[Task, str] = LogMap(workspace=self)
 
     @staticmethod
     def auto(settings: Settings | None = None) -> "Workspace":
@@ -166,32 +167,3 @@ class ResultMap(MutableMapping[Task, SerializedResult]):
 
 
 # TODO: decide how to store logs
-
-
-class LogMap(MutableMapping[Task, str]):
-    def __init__(self, workspace: Workspace):
-        self.workspace = workspace
-
-    def __getitem__(self, key: Task, /) -> str:
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        return self.workspace._log_store[resolved_hash]
-
-    def __setitem__(self, key: Task, value: str, /) -> None:
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        self.workspace._log_store[resolved_hash] = value
-
-    def __delitem__(self, key: Task, /) -> None:
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        del self.workspace._log_store[resolved_hash]
-
-    def __iter__(self) -> Iterator[Task]:
-        raise NotImplementedError
-
-    def __len__(self) -> int:
-        return len(self.workspace._log_store)
-
-    def __contains__(self, key: object, /) -> bool:
-        if not isinstance(key, Task):
-            return False
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        return resolved_hash in self.workspace._log_store
