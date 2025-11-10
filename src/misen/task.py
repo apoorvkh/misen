@@ -29,7 +29,7 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-# TODO: consider process_bound
+# TODO: consider serializable
 
 
 class TaskProperties(Struct, frozen=True):
@@ -38,12 +38,13 @@ class TaskProperties(Struct, frozen=True):
     version: int = 0
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
+    serializable: bool = True
     to_bytes: Callable[[Any], bytes] = dill.dumps
     from_bytes: Callable[[bytes], Any] = dill.loads
-    process_bound: bool = False
 
     def __post_init__(self):
-        assert not (self.cache and self.process_bound)
+        if self.cache:
+            assert self.serializable
 
 
 # TODO: maybe to/from bytes should default to canonical serialization?
@@ -55,9 +56,9 @@ def task(
     version: int = 0,
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
+    serializable: bool = True,
     to_bytes: Callable[[R], bytes] = dill.dumps,  # TODO: typing
     from_bytes: Callable[[bytes], R] = dill.loads,
-    process_bound: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
@@ -71,9 +72,9 @@ def task(
                 version=version,
                 exclude=exclude,
                 defaults=defaults,
+                serializable=serializable,
                 to_bytes=to_bytes,
                 from_bytes=from_bytes,
-                process_bound=process_bound,
             ),
         )
         return func
@@ -273,9 +274,13 @@ class Task(Generic[R]):
             )
         return self._hash
 
+    def _task_hash(self) -> TaskHash:
+        """A hash that represents the Task object using its constituent task graph."""
+        return TaskHash(self.__hash__())
+
     def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""
-        task_hash: TaskHash = TaskHash(self.__hash__())
+        task_hash = self._task_hash()
 
         # fast session-only cache
         if (resolved_hash := workspace._resolved_hashes.get(task_hash)) is not None:
@@ -303,7 +308,7 @@ class Task(Generic[R]):
         """Hash of the task's result object (getter from workspace cache)."""
         """Raises RuntimeError if the task has not been computed."""
         # fast session-only cache
-        task_hash: TaskHash = TaskHash(self.__hash__())
+        task_hash = self._task_hash()
         if (result_hash := workspace._result_hashes.get(task_hash)) is not None:
             return result_hash
 
