@@ -76,6 +76,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
         result_cache: MutableMapping[ResultHash, bytes],
+        log_store: MutableMapping[ResolvedTaskHash, TaskLogs],
     ):
         # session-only (non-persistent) caches
         self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
@@ -88,6 +89,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
 
         # public accessors to workspace data
         self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
+        self.logs: MutableMapping[Task, TaskLogs] = LogMap(workspace=self)
 
     @staticmethod
     def auto(settings: Settings | None = None) -> "Workspace":
@@ -166,4 +168,35 @@ class ResultMap(MutableMapping[Task, SerializedResult]):
         return result_hash in self.workspace._result_cache
 
 
-# TODO: decide how to store logs
+class LogMap(MutableMapping[Task, "TaskLogs"]):
+    def __init__(self, workspace: Workspace):
+        self.workspace = workspace
+
+    def __getitem__(self, key: Task, /) -> TaskLogs:
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        return self.workspace._log_store[resolved_hash]
+
+    def __setitem__(self, key: Task, value: TaskLogs, /) -> None:
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        self.workspace._log_store[resolved_hash] = value
+
+    def __delitem__(self, key: Task, /) -> None:
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        del self.workspace._log_store[resolved_hash]
+
+    def __iter__(self) -> Iterator[Task]:
+        raise NotImplementedError
+
+    def __len__(self) -> int:
+        return len(self.workspace._log_store)
+
+    def __contains__(self, key: object, /) -> bool:
+        if not isinstance(key, Task):
+            return False
+        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
+        return resolved_hash in self.workspace._log_store
+
+
+# TODO: append, read, support multiple runs
+class TaskLogs(ABC):
+    pass
