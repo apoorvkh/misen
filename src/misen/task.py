@@ -131,7 +131,11 @@ class Task(Generic[R]):
             "__task_properties__",
             TaskProperties(f"{func.__module__}.{func.__qualname__}"),
         )
-        self.resources = getattr(func, "__task_resources__", TaskResources())
+        self.resources = getattr(
+            func,
+            "__task_resources__",
+            TaskResources(),
+        )
 
         self.func = func
         self.args = args
@@ -235,7 +239,7 @@ class Task(Generic[R]):
         ):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
-        result = self.func(
+        result = cast("Callable[..., R]", self.func)(
             *tuple(
                 v.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
                 if isinstance(v, Task)
@@ -250,7 +254,7 @@ class Task(Generic[R]):
                 else v
                 for k, v in self.kwargs.items()
             },
-        )  # type: ignore
+        )
 
         resolved_hash = self._resolved_hash(workspace=workspace)
         workspace._result_hash_cache[resolved_hash] = ResultHash(canonical_hash(result))

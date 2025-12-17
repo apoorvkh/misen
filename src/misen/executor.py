@@ -3,13 +3,15 @@ from __future__ import annotations
 import functools
 from abc import ABC, abstractmethod
 from importlib import import_module
-from typing import TYPE_CHECKING, Callable, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeAlias, TypeVar, cast
+
+import rustworkx as rx
 
 from .settings import Settings
-from .task import TaskResources
+from .task import Task, TaskResources
 
 if TYPE_CHECKING:
-    from .task import AdjacencyList, Task
+    from .task import AdjacencyList
     from .workspace import Workspace, WorkspaceParameters
 
 __all__ = ["Executor"]
@@ -51,7 +53,7 @@ class Executor(Generic[JobT], ABC):
         self, function: Callable, resources: TaskResources, dependencies: set[JobT]
     ) -> JobT: ...
 
-    def submit(self, task: Task, workspace: Workspace) -> AdjacencyList[JobT]:
+    def submit(self, task: Task, workspace: Workspace):  # -> AdjacencyList[JobT]:
         workspace_params = workspace.to_params()
 
         submission_graph, submissions = _build_submission_graph(root=task, workspace=workspace)
@@ -101,7 +103,26 @@ class WorkerSubgraph:
 
     def execute(self, workspace_params: WorkspaceParameters):
         workspace = workspace_params.construct()
-        # TODO
+
+        task_graph: rx.PyDiGraph = _adj_list_to_rustworkx(self.graph)
+        task_results: dict[Task, Any] = {}
+
+        dependency_order = rx.topological_sort(task_graph)
+        for task_index in dependency_order:
+            task: Task = task_graph[task_index]
+            task_results[task] = Task(
+                task.func,
+                *tuple(
+                    task_results[v] if isinstance(v, Task) and v in task_results else v
+                    for v in task.args
+                ),
+                **{
+                    k: task_results[v] if isinstance(v, Task) and v in task_results else v
+                    for k, v in task.kwargs.items()
+                },
+            ).result(workspace=workspace)
+
+        # TODO: prune results if no longer needed by future dependents
 
 
 class Job(ABC):
@@ -118,39 +139,41 @@ def _build_submission_graph(
     Implementation: build a DAG, then remove all (non-cacheable or non-root) nodes, while maintaining the dependency structure.
     Returns: DAG in adjacency list format. Keys depend on values.
     """
-    from rustworkx import PyDiGraph, topological_sort
-
-    graph: AdjacencyList[Task] = root._dependency_tree(exclude_cached=True, workspace=workspace)
-
     ### dependency graph: dependents point to dependencies
 
-    dag = PyDiGraph(check_cycle=True, multigraph=False)
+    graph: AdjacencyList[Task] = root._dependency_tree(exclude_cached=True, workspace=workspace)
+    graph: rx.PyDiGraph = _adj_list_to_rustworkx(graph)
+
+    ### Retain only root & cachable tasks (and the induced graph minor)
+
+    nodes_to_remove = graph.filter_nodes(lambda task: not (task.properties.cache or task == root))
+    for node in nodes_to_remove:
+        graph.remove_node_retain_edges(node)  # TODO: inefficient
+
+    ###
+
+    order = rx.topological_sort(graph)[::-1]  # dependencies first
+
+    # replace nodes with WorkerSubgraph instances
+    for node in order:
+        task: Task = graph[node]
+        dependencies: set[WorkerSubgraph] = {graph[d] for d in graph.successors(node)}
+        graph[node] = WorkerSubgraph(task=task, dependencies=dependencies)
+
+    dependency_graph: AdjacencyList[WorkerSubgraph] = {
+        graph[node]: set(graph.successors(node)) for node in graph.node_indices()
+    }
+
+    order = [graph[node] for node in order]
+
+    return dependency_graph, order
+
+
+def _adj_list_to_rustworkx(graph: AdjacencyList[Task]) -> rx.PyDiGraph:
+    dag = rx.PyDiGraph(check_cycle=True, multigraph=False)
     nodes: dict[Task, int] = {t: dag.add_node(t) for t in graph}
     for t in graph:
         n = nodes[t]
         for d in graph[t]:
             dag.add_edge(n, nodes[d], None)
-
-    ### Retain only root & cachable tasks (and the induced graph minor)
-
-    nodes_to_remove = dag.filter_nodes(lambda task: not (task.properties.cache or task == root))
-    for node in nodes_to_remove:
-        dag.remove_node_retain_edges(node)  # TODO: inefficient
-
-    ###
-
-    order = topological_sort(dag)[::-1]  # dependencies first
-
-    # replace nodes with WorkerSubgraph instances
-    for node in order:
-        task: Task = dag[node]
-        dependencies: set[WorkerSubgraph] = {dag[d] for d in dag.successors(node)}
-        dag[node] = WorkerSubgraph(task=task, dependencies=dependencies)
-
-    dependency_graph: AdjacencyList[WorkerSubgraph] = {
-        dag[node]: set(dag.successors(node)) for node in dag.node_indices()
-    }
-
-    order = [dag[node] for node in order]
-
-    return dependency_graph, order
+    return dag
