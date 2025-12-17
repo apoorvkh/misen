@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from functools import cache
 from inspect import signature
 from typing import (
     TYPE_CHECKING,
@@ -8,6 +9,7 @@ from typing import (
     Callable,
     Generic,
     ParamSpec,
+    TypeAlias,
     TypeVar,
     cast,
 )
@@ -28,6 +30,8 @@ __all__ = ["Task", "task", "resources"]
 P = ParamSpec("P")
 R = TypeVar("R")
 
+T = TypeVar("T")
+AdjacencyList: TypeAlias = dict[T, set[T]]
 
 # TODO: consider serializable
 
@@ -146,8 +150,40 @@ class Task(Generic[R]):
         return self.properties.cache and self in workspace.results
 
     @property
-    def _dependencies(self) -> list[Task]:
-        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
+    def _dependencies(self) -> set[Task]:
+        return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
+
+    def _dependency_tree(
+        self,
+        exclude_cacheable: bool = False,
+        exclude_cached: bool = False,
+        workspace: Workspace | None = None,
+    ) -> AdjacencyList[Task]:
+        def condition(task: Task) -> bool:
+            if exclude_cacheable:
+                return task.properties.cache is False
+            elif exclude_cached:
+                return not task.is_cached(workspace=workspace)
+            else:
+                return True
+
+        if exclude_cached:
+            condition: Callable[[Task], bool] = cache(condition)
+
+        graph: AdjacencyList[Task] = {}
+        stack: list[Task] = [self]
+        visited: set[Task] = set()
+
+        while stack:
+            task: Task = stack.pop()
+            if task in visited:
+                continue
+            visited.add(task)
+
+            graph[task] = set(filter(condition, task._dependencies))
+            stack.extend(graph[task] - visited)
+
+        return graph
 
     def run(
         self, workspace: Workspace | None = None, executor: Executor | None = None

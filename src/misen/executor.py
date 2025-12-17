@@ -2,28 +2,19 @@ from __future__ import annotations
 
 import functools
 from abc import ABC, abstractmethod
-from functools import cache
 from importlib import import_module
-from typing import TYPE_CHECKING, Callable, Generic, Literal, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Callable, Generic, Literal, TypeAlias, TypeVar, cast
 
 from .settings import Settings
+from .task import TaskResources
 
 if TYPE_CHECKING:
-    from .task import Task, TaskResources
-    from .workspace import Workspace
+    from .task import AdjacencyList, Task
+    from .workspace import Workspace, WorkspaceParameters
 
 __all__ = ["Executor"]
 
-ExecutorType: TypeAlias = str | Literal["auto", "local", "slurm"]
-
-T = TypeVar("T")
-AdjacencyList: TypeAlias = dict[T, set[T]]
-
-
-class Job(ABC):
-    pass
-
-
+ExecutorType: TypeAlias = str | Literal["auto", "slurm"]
 JobT = TypeVar("JobT", bound="Job")
 
 
@@ -38,10 +29,6 @@ class Executor(Generic[JobT], ABC):
         if executor_cls is not Executor:
             return executor_cls(**settings.toml_data.get("executor_kwargs", {}))
 
-        # default
-        # from misen.executors.local import LocalExecutor
-
-        # return LocalExecutor()
         from misen.executors.slurm import SlurmExecutor
 
         return SlurmExecutor()
@@ -51,8 +38,6 @@ class Executor(Generic[JobT], ABC):
         match t:
             case "auto":
                 return Executor
-            case "local":
-                raise NotImplementedError("LocalExecutor is not implemented yet")
             case "slurm":
                 from misen.executors.slurm import SlurmExecutor
 
@@ -69,96 +54,103 @@ class Executor(Generic[JobT], ABC):
     def submit(self, task: Task, workspace: Workspace) -> AdjacencyList[JobT]:
         workspace_params = workspace.to_params()
 
-        task_graph: AdjacencyList[Task] = distributable_tasks(task, workspace)
+        submission_graph, submissions = _build_submission_graph(root=task, workspace=workspace)
 
-        remaining_deps: AdjacencyList[Task] = {t: d.copy() for t, d in task_graph.items()}
-        jobs: dict[Task, JobT] = {}
+        jobs: dict[WorkerSubgraph, JobT] = {}
 
-        while len(remaining_deps) > 0:
-            task = next(k for k, v in remaining_deps.items() if len(v) == 0)
-            del remaining_deps[task]
-            for t in remaining_deps.keys():
-                remaining_deps[t].discard(task)
-
-            # TODO: new implementation for task.result with multiprocessing
-
-            execution_fn = functools.partial(
-                task.result,
-                workspace=workspace_params,
-                compute_if_uncached=True,
-                compute_uncached_deps=True,
+        for work in submissions:
+            jobs[work] = self._submit(
+                functools.partial(work.execute, workspace_params=workspace_params),
+                resources=work.resources,
+                dependencies={jobs[d] for d in work.dependencies},
             )
 
-            # TODO: use union of task resources
 
-            resources = task.resources
+class WorkerSubgraph:
+    graph: AdjacencyList[Task]
+    resources: TaskResources
+    dependencies: set[WorkerSubgraph]
+    _task_hash: int
 
-            dependencies = {jobs[d] for d in task_graph[task]}
+    def __init__(self, task: Task, dependencies: set[WorkerSubgraph]):
+        self.graph = task._dependency_tree(exclude_cacheable=True)
 
-            jobs[task] = self._submit(
-                execution_fn,
-                resources=resources,
-                dependencies=dependencies,
-            )
+        _resource_list: list[TaskResources] = [task.resources for task in self.graph]
+        self.resources = TaskResources(
+            time=(
+                None
+                if any(r.time is None for r in _resource_list)
+                else sum(cast("int", r.time) for r in _resource_list)
+            ),
+            nodes=max(r.nodes for r in _resource_list),
+            memory=max(r.memory for r in _resource_list),
+            cpus=max(r.cpus for r in _resource_list),
+            gpus=max(r.gpus for r in _resource_list),
+            gpu_memory=(
+                None
+                if all(r.gpu_memory is None for r in _resource_list)
+                else max(r.gpu_memory for r in _resource_list if r.gpu_memory is not None)
+            ),
+        )
 
-        job_graph: AdjacencyList[JobT] = {jobs[t]: {jobs[d] for d in task_graph[t]} for t in jobs}
+        self.dependencies = dependencies
+        self._task_hash = hash(task)
 
-        return job_graph
+    def __hash__(self):
+        return self._task_hash
+
+    def execute(self, workspace_params: WorkspaceParameters):
+        workspace = workspace_params.construct()
+        # TODO
 
 
-def distributable_tasks(root: Task, workspace: Workspace) -> AdjacencyList[Task]:
+class Job(ABC):
+    pass
+
+
+def _build_submission_graph(
+    root: Task, workspace: Workspace
+) -> tuple[AdjacencyList[WorkerSubgraph], list[WorkerSubgraph]]:
     """
-    Given a DAG (represented by the root Task), this function should identify tasks that can be executed by distributed workers.
-    Specifically, these are the cacheable tasks. This function should return a dependency graph of just those tasks and the root.
+    Given a DAG, this function should identify tasks that can be executed by distributed workers.
+    Specifically, these are the (1) root task and (2) cacheable tasks. Should return a dependency graph of just those tasks.
 
     Implementation: build a DAG, then remove all (non-cacheable or non-root) nodes, while maintaining the dependency structure.
     Returns: DAG in adjacency list format. Keys depend on values.
     """
-    from rustworkx import PyDiGraph
+    from rustworkx import PyDiGraph, topological_sort
 
-    dag = PyDiGraph()
+    graph: AdjacencyList[Task] = root._dependency_tree(exclude_cached=True, workspace=workspace)
 
-    ### Build DAG via DFS
+    ### dependency graph: dependents point to dependencies
 
-    @cache
-    def _is_cached(task: Task) -> bool:
-        return task.is_cached(workspace=workspace)
-
-    task_node: dict[Task, int] = {root: dag.add_node(root)}
-    stack: list[Task] = [root]
-    visited: set[Task] = set()
-
-    while stack:
-        task: Task = stack.pop()
-        if task in visited:
-            continue
-        visited.add(task)
-
-        # from prior iteration
-        node = task_node[task]
-
-        # traverse children
-        for dep in task._dependencies:
-            dep: Task
-            # skip cached tasks
-            if _is_cached(dep):
-                continue
-
-            # add dependent to graph if not already present
-            if dep not in task_node:
-                task_node[dep] = dag.add_node(dep)
-                stack.append(dep)
-            dep_node = task_node[dep]
-
-            # add edge from task to dep_task
-            dag.add_edge(node, dep_node, None)  # args: parent, child, edge_data
+    dag = PyDiGraph(check_cycle=True, multigraph=False)
+    nodes: dict[Task, int] = {t: dag.add_node(t) for t in graph}
+    for t in graph:
+        n = nodes[t]
+        for d in graph[t]:
+            dag.add_edge(n, nodes[d], None)
 
     ### Retain only root & cachable tasks (and the induced graph minor)
 
     nodes_to_remove = dag.filter_nodes(lambda task: not (task.properties.cache or task == root))
     for node in nodes_to_remove:
-        dag.remove_node_retain_edges(node)
+        dag.remove_node_retain_edges(node)  # TODO: inefficient
 
-    ### Return as adjacency list
+    ###
 
-    return {dag.get_node_data(node): set(dag.successors(node)) for node in dag.node_indices()}
+    order = topological_sort(dag)[::-1]  # dependencies first
+
+    # replace nodes with WorkerSubgraph instances
+    for node in order:
+        task: Task = dag[node]
+        dependencies: set[WorkerSubgraph] = {dag[d] for d in dag.successors(node)}
+        dag[node] = WorkerSubgraph(task=task, dependencies=dependencies)
+
+    dependency_graph: AdjacencyList[WorkerSubgraph] = {
+        dag[node]: set(dag.successors(node)) for node in dag.node_indices()
+    }
+
+    order = [dag[node] for node in order]
+
+    return dependency_graph, order

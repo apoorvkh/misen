@@ -86,6 +86,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         self._resolved_hash_cache = resolved_hash_cache
         self._result_hash_cache = result_hash_cache
         self._result_cache = result_cache
+        self._log_store = log_store
 
         # public accessors to workspace data
         self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
