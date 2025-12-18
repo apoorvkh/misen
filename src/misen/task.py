@@ -189,9 +189,7 @@ class Task(Generic[R]):
 
         return graph
 
-    def run(
-        self, workspace: Workspace | None = None, executor: Executor | None = None
-    ) -> AdjacencyList[Job]:
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> AdjacencyList[Job]:
         """
         Submit task to an executor and return a mapping from each distributable task to its
         dependency set and runtime job status handle.
@@ -234,9 +232,7 @@ class Task(Generic[R]):
             if not compute_if_uncached:
                 raise RuntimeError(f"{self} is not cached.")
 
-        if not compute_uncached_deps and any(
-            not t.is_cached(workspace=workspace) for t in self._dependencies
-        ):
+        if not compute_uncached_deps and any(not t.is_cached(workspace=workspace) for t in self._dependencies):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
         result = cast("Callable[..., R]", self.func)(
@@ -247,9 +243,7 @@ class Task(Generic[R]):
                 for v in self.args
             ),
             **{
-                k: v.result(
-                    workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True
-                )
+                k: v.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
                 if isinstance(v, Task)
                 else v
                 for k, v in self.kwargs.items()
@@ -329,11 +323,7 @@ class Task(Generic[R]):
         # slower workspace cache
         if (resolved_hash := workspace._resolved_hash_cache.get(task_hash)) is None:
             hashed_arguments = {
-                k: (
-                    v._result_hash(workspace=workspace)
-                    if isinstance(v, Task)
-                    else canonical_hash(v)
-                )
+                k: (v._result_hash(workspace=workspace) if isinstance(v, Task) else canonical_hash(v))
                 for k, v in self._arguments_for_hashing.items()
             }
             resolved_hash = ResolvedTaskHash(

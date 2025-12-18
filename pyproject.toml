@@ -45,7 +45,7 @@ misen-serialization = { workspace = true }
 members = ["packages/*"]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 include = ["pyproject.toml", "src/**/*.py", "tests/**/*.py"]
 src = ["src", "tests", "packages"]
 [tool.ruff.lint]

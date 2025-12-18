@@ -39,6 +39,9 @@ JobT = TypeVar("JobT", bound="Job")
 
 
 class Executor(Generic[JobT], ABC):
+    @abstractmethod
+    def _submit(self, function: Callable, resources: TaskResources, dependencies: set[JobT]) -> JobT: ...
+
     @staticmethod
     def auto(settings: Settings | None = None) -> Executor:
         if settings is None:
@@ -65,11 +68,6 @@ class Executor(Generic[JobT], ABC):
             case _:
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
-
-    @abstractmethod
-    def _submit(
-        self, function: Callable, resources: TaskResources, dependencies: set[JobT]
-    ) -> JobT: ...
 
     def submit(self, task: Task, workspace: Workspace):  # -> AdjacencyList[JobT]:
         workspace_params = workspace.to_params()
@@ -130,10 +128,7 @@ class WorkUnit:
             task: Task = task_graph[task_index]
             task_results[task] = Task(
                 task.func,
-                *tuple(
-                    task_results[v] if isinstance(v, Task) and v in task_results else v
-                    for v in task.args
-                ),
+                *tuple(task_results[v] if isinstance(v, Task) and v in task_results else v for v in task.args),
                 **{
                     k: task_results[v] if isinstance(v, Task) and v in task_results else v
                     for k, v in task.kwargs.items()
@@ -147,9 +142,7 @@ class Job(ABC):
     pass
 
 
-def _build_submission_graph(
-    root: Task, workspace: Workspace
-) -> tuple[AdjacencyList[WorkUnit], list[WorkUnit]]:
+def _build_submission_graph(root: Task, workspace: Workspace) -> tuple[AdjacencyList[WorkUnit], list[WorkUnit]]:
     # """
     # Given a DAG, this function should identify tasks that can be executed by distributed workers.
     # Specifically, these are the (1) root task and (2) cacheable tasks. Should return a dependency graph of just those tasks.
