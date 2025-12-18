@@ -1,3 +1,21 @@
+"""
+This module defines the Executor interface for submitting a Task's DAG to an execution backend
+(e.g. SLURM).
+
+1. The Task DAG is decomposed into WorkUnits rooted at "anchor" Tasks.
+2. Each WorkUnit is submitted to the backend. WorkUnits may be executed in parallel, subject to
+   dependency order between them.
+3. The Executor yields Jobs, which can be used to monitor the execution status of each submitted
+   WorkUnit.
+
+Cacheable Tasks that are already computed are pruned from the DAG (along with their descendants).
+Anchors are then chosen at cache boundaries: the root Task and every cacheable Task is an anchor.
+Each WorkUnit consists of an anchor and the reachable subgraph (of non-cacheable Tasks; truncated
+at downstream, cacheable anchors). WorkUnits form a cover of the DAG and may overlap, but are not
+necessarily disjoint. A WorkUnit may depend on other WorkUnits (and their anchors). Dependencies
+are executed first, and their anchor results can be retrieved via the Workspace cache.
+"""
+
 from __future__ import annotations
 
 import functools
@@ -58,7 +76,7 @@ class Executor(Generic[JobT], ABC):
 
         submission_graph, submissions = _build_submission_graph(root=task, workspace=workspace)
 
-        jobs: dict[WorkerSubgraph, JobT] = {}
+        jobs: dict[WorkUnit, JobT] = {}
 
         for work in submissions:
             jobs[work] = self._submit(
@@ -68,13 +86,13 @@ class Executor(Generic[JobT], ABC):
             )
 
 
-class WorkerSubgraph:
+class WorkUnit:
     graph: AdjacencyList[Task]
     resources: TaskResources
-    dependencies: set[WorkerSubgraph]
+    dependencies: set[WorkUnit]
     _task_hash: int
 
-    def __init__(self, task: Task, dependencies: set[WorkerSubgraph]):
+    def __init__(self, task: Task, dependencies: set[WorkUnit]):
         self.graph = task._dependency_tree(exclude_cacheable=True)
 
         _resource_list: list[TaskResources] = [task.resources for task in self.graph]
@@ -131,14 +149,14 @@ class Job(ABC):
 
 def _build_submission_graph(
     root: Task, workspace: Workspace
-) -> tuple[AdjacencyList[WorkerSubgraph], list[WorkerSubgraph]]:
-    """
-    Given a DAG, this function should identify tasks that can be executed by distributed workers.
-    Specifically, these are the (1) root task and (2) cacheable tasks. Should return a dependency graph of just those tasks.
+) -> tuple[AdjacencyList[WorkUnit], list[WorkUnit]]:
+    # """
+    # Given a DAG, this function should identify tasks that can be executed by distributed workers.
+    # Specifically, these are the (1) root task and (2) cacheable tasks. Should return a dependency graph of just those tasks.
 
-    Implementation: build a DAG, then remove all (non-cacheable or non-root) nodes, while maintaining the dependency structure.
-    Returns: DAG in adjacency list format. Keys depend on values.
-    """
+    # Implementation: build a DAG, then remove all (non-cacheable or non-root) nodes, while maintaining the dependency structure.
+    # Returns: DAG in adjacency list format. Keys depend on values.
+    # """
     ### dependency graph: dependents point to dependencies
 
     graph: AdjacencyList[Task] = root._dependency_tree(exclude_cached=True, workspace=workspace)
@@ -154,13 +172,13 @@ def _build_submission_graph(
 
     order = rx.topological_sort(graph)[::-1]  # dependencies first
 
-    # replace nodes with WorkerSubgraph instances
+    # replace nodes with WorkUnit instances
     for node in order:
         task: Task = graph[node]
-        dependencies: set[WorkerSubgraph] = {graph[d] for d in graph.successors(node)}
-        graph[node] = WorkerSubgraph(task=task, dependencies=dependencies)
+        dependencies: set[WorkUnit] = {graph[d] for d in graph.successors(node)}
+        graph[node] = WorkUnit(task=task, dependencies=dependencies)
 
-    dependency_graph: AdjacencyList[WorkerSubgraph] = {
+    dependency_graph: AdjacencyList[WorkUnit] = {
         graph[node]: set(graph.successors(node)) for node in graph.node_indices()
     }
 
