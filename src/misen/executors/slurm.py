@@ -16,7 +16,7 @@ class SlurmExecutor(Executor[SlurmJob]):
     def __init__(self, folder: Path = Path(".submitit")) -> None:
         self.slurm_executor = submitit.SlurmExecutor(folder=folder)
 
-    def _submit(
+    def _dispatch(
         self,
         function: Callable,
         resources: TaskResources,

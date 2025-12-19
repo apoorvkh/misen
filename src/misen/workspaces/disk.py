@@ -172,11 +172,13 @@ class DiskWorkspace(Workspace):
         self.directory = directory
 
         self.directory.mkdir(exist_ok=True)
+        (self.directory / "result_cache").mkdir(exist_ok=True)
 
         super().__init__(
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self.directory / "resolved_hash_cache.mdb"),
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self.directory / "result_hash_cache.mdb"),
             result_cache=DiskResultCacheMapping(self.directory / "result_cache"),
+            log_store={},
         )
 
     def to_params(self) -> WorkspaceParameters:
