@@ -60,13 +60,9 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         )
 
         if args.executor_type != "auto":
-            _fields_without_defaults.append(
-                ("executor", Executor._resolve_type(args.executor_type))
-            )
+            _fields_without_defaults.append(("executor", Executor._resolve_type(args.executor_type)))
         if args.workspace_type != "auto":
-            _fields_without_defaults.append(
-                ("workspace", Workspace._resolve_type(args.workspace_type))
-            )
+            _fields_without_defaults.append(("workspace", Workspace._resolve_type(args.workspace_type)))
         _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))
 
         args = tyro.cli(make_dataclass("", _fields_without_defaults + _fields_with_defaults))

@@ -53,6 +53,9 @@ class WorkspaceMeta(ABCMeta):
 WorkspaceType: TypeAlias = str | Literal["auto", "memory", "disk"]
 
 
+# TODO: figure out better way to avoid serializing workspaces?
+
+
 class WorkspaceParameters:
     def __init__(self, type: type[Workspace], *args, **kwargs):
         self.type = type
@@ -64,6 +67,7 @@ class WorkspaceParameters:
 
 
 # TODO: support polling task status from Workspace
+# TODO: add task lock to Workspace
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):

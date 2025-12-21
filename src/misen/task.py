@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from functools import cache
 from inspect import signature
 from typing import (
     TYPE_CHECKING,
@@ -8,6 +9,7 @@ from typing import (
     Callable,
     Generic,
     ParamSpec,
+    TypeAlias,
     TypeVar,
     cast,
 )
@@ -20,7 +22,7 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .executor import AdjacencyList, Executor, Job
+    from .executor import Executor, Job
     from .workspace import ResultHash, Workspace, WorkspaceParameters
 
 __all__ = ["Task", "task", "resources"]
@@ -28,8 +30,10 @@ __all__ = ["Task", "task", "resources"]
 P = ParamSpec("P")
 R = TypeVar("R")
 
+T = TypeVar("T")
+AdjacencyList: TypeAlias = dict[T, set[T]]
 
-# TODO: consider process_bound
+# TODO: consider serializable
 
 
 class TaskProperties(Struct, frozen=True):
@@ -38,12 +42,13 @@ class TaskProperties(Struct, frozen=True):
     version: int = 0
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
+    serializable: bool = True
     to_bytes: Callable[[Any], bytes] = dill.dumps
     from_bytes: Callable[[bytes], Any] = dill.loads
-    process_bound: bool = False
 
     def __post_init__(self):
-        assert not (self.cache and self.process_bound)
+        if self.cache:
+            assert self.serializable
 
 
 # TODO: maybe to/from bytes should default to canonical serialization?
@@ -55,9 +60,9 @@ def task(
     version: int = 0,
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
+    serializable: bool = True,
     to_bytes: Callable[[R], bytes] = dill.dumps,  # TODO: typing
     from_bytes: Callable[[bytes], R] = dill.loads,
-    process_bound: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
@@ -71,9 +76,9 @@ def task(
                 version=version,
                 exclude=exclude,
                 defaults=defaults,
+                serializable=serializable,
                 to_bytes=to_bytes,
                 from_bytes=from_bytes,
-                process_bound=process_bound,
             ),
         )
         return func
@@ -126,11 +131,18 @@ class Task(Generic[R]):
             "__task_properties__",
             TaskProperties(f"{func.__module__}.{func.__qualname__}"),
         )
-        self.resources = getattr(func, "__task_resources__", TaskResources())
+        self.resources = getattr(
+            func,
+            "__task_resources__",
+            TaskResources(),
+        )
 
         self.func = func
         self.args = args
         self.kwargs = kwargs
+
+    def __repr__(self):
+        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={self.__hash__() % 100}){' [C]' if self.properties.cache else ''}"
 
     @property
     def T(self) -> R:
@@ -145,12 +157,42 @@ class Task(Generic[R]):
         return self.properties.cache and self in workspace.results
 
     @property
-    def _dependencies(self) -> list[Task]:
-        return [t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)]
+    def _dependencies(self) -> set[Task]:
+        return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
-    def run(
-        self, workspace: Workspace | None = None, executor: Executor | None = None
-    ) -> AdjacencyList[Job]:
+    def _dependency_graph(
+        self,
+        exclude_cacheable: bool = False,
+        exclude_cached: bool = False,
+        workspace: Workspace | None = None,
+    ) -> AdjacencyList[Task]:
+        def condition(task: Task) -> bool:
+            if exclude_cacheable:
+                return task.properties.cache is False
+            elif exclude_cached:
+                return not task.is_cached(workspace=workspace)
+            else:
+                return True
+
+        if exclude_cached:
+            condition: Callable[[Task], bool] = cache(condition)
+
+        graph: AdjacencyList[Task] = {}
+        stack: list[Task] = [self]
+        visited: set[Task] = set()
+
+        while stack:
+            task: Task = stack.pop()
+            if task in visited:
+                continue
+            visited.add(task)
+
+            graph[task] = set(filter(condition, task._dependencies))
+            stack.extend(graph[task] - visited)
+
+        return graph
+
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> AdjacencyList[Job]:
         """
         Submit task to an executor and return a mapping from each distributable task to its
         dependency set and runtime job status handle.
@@ -193,12 +235,10 @@ class Task(Generic[R]):
             if not compute_if_uncached:
                 raise RuntimeError(f"{self} is not cached.")
 
-        if not compute_uncached_deps and any(
-            not t.is_cached(workspace=workspace) for t in self._dependencies
-        ):
+        if not compute_uncached_deps and any(not t.is_cached(workspace=workspace) for t in self._dependencies):
             raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
 
-        result = self.func(
+        result = cast("Callable[..., R]", self.func)(
             *tuple(
                 v.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
                 if isinstance(v, Task)
@@ -206,14 +246,12 @@ class Task(Generic[R]):
                 for v in self.args
             ),
             **{
-                k: v.result(
-                    workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True
-                )
+                k: v.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
                 if isinstance(v, Task)
                 else v
                 for k, v in self.kwargs.items()
             },
-        )  # type: ignore
+        )
 
         resolved_hash = self._resolved_hash(workspace=workspace)
         workspace._result_hash_cache[resolved_hash] = ResultHash(canonical_hash(result))
@@ -228,14 +266,6 @@ class Task(Generic[R]):
 
         return result
 
-    def logs(self, workspace: Workspace | None = None) -> str:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
-        return workspace.logs[self]
-
     def work_dir(self, workspace: Workspace | None = None) -> Path:
         if workspace is None:
             from .workspace import Workspace
@@ -243,17 +273,6 @@ class Task(Generic[R]):
             workspace = Workspace.auto()
 
         return workspace.get_work_dir(task=self)
-
-    def __repr__(self):
-        return "".join(
-            [
-                f"Task({self.func.__module__}.{self.func.__qualname__}",
-                *(f", {a.__repr__()}" for a in self.args),
-                *(f", {k}={v.__repr__()}" for k, v in self.kwargs.items()),
-                f", hash={self.__hash__()}",
-                ")",
-            ]
-        )
 
     @property
     def _arguments_for_hashing(self) -> dict[str, Any]:
@@ -267,23 +286,28 @@ class Task(Generic[R]):
         }
 
     def __hash__(self) -> int:
+        return hash(int(self._task_hash()))
+
+    def _task_hash(self) -> TaskHash:
         """A hash that represents the Task object using its constituent task graph."""
-        if not hasattr(self, "_hash"):
-            self._hash = canonical_hash(
-                (
-                    self.properties.id,
-                    self.properties.version,
-                    {
-                        k: (v.__hash__() if isinstance(v, Task) else canonical_hash(v))
-                        for k, v in self._arguments_for_hashing.items()
-                    },
+        if not hasattr(self, "__task_hash"):
+            self.__task_hash = TaskHash(
+                canonical_hash(
+                    (
+                        self.properties.id,
+                        self.properties.version,
+                        {
+                            k: (v.__hash__() if isinstance(v, Task) else canonical_hash(v))
+                            for k, v in self._arguments_for_hashing.items()
+                        },
+                    )
                 )
             )
-        return self._hash
+        return self.__task_hash
 
     def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""
-        task_hash: TaskHash = TaskHash(self.__hash__())
+        task_hash = self._task_hash()
 
         # fast session-only cache
         if (resolved_hash := workspace._resolved_hashes.get(task_hash)) is not None:
@@ -292,11 +316,7 @@ class Task(Generic[R]):
         # slower workspace cache
         if (resolved_hash := workspace._resolved_hash_cache.get(task_hash)) is None:
             hashed_arguments = {
-                k: (
-                    v._result_hash(workspace=workspace)
-                    if isinstance(v, Task)
-                    else canonical_hash(v)
-                )
+                k: (v._result_hash(workspace=workspace) if isinstance(v, Task) else canonical_hash(v))
                 for k, v in self._arguments_for_hashing.items()
             }
             resolved_hash = ResolvedTaskHash(
@@ -311,7 +331,7 @@ class Task(Generic[R]):
         """Hash of the task's result object (getter from workspace cache)."""
         """Raises RuntimeError if the task has not been computed."""
         # fast session-only cache
-        task_hash: TaskHash = TaskHash(self.__hash__())
+        task_hash = self._task_hash()
         if (result_hash := workspace._result_hashes.get(task_hash)) is not None:
             return result_hash
 

@@ -92,9 +92,9 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
         self.directory = directory
 
     def __aquire_lock(self, filename: Path) -> Lock:
-        item_lock_filename = filename.name + ".lock"
+        item_lock_filename = filename.with_suffix(".lock")
 
-        lock = Lock(item_lock_filename, lifetime=timedelta(hours=1))
+        lock = Lock(str(item_lock_filename), lifetime=timedelta(hours=1))
         lock.lock()
 
         return lock
@@ -105,6 +105,7 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
 
     def __setitem__(self, key: ResultHash, value: bytes):
         item_filename = self.__get_key_filename(key)
+        os.makedirs(item_filename.parent, exist_ok=True)
 
         lock = self.__aquire_lock(item_filename)
 
@@ -172,14 +173,11 @@ class DiskWorkspace(Workspace):
         self.directory = directory
 
         self.directory.mkdir(exist_ok=True)
+        (self.directory / "result_cache").mkdir(exist_ok=True)
 
         super().__init__(
-            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](
-                self.directory / "resolved_hash_cache.mdb"
-            ),
-            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](
-                self.directory / "result_hash_cache.mdb"
-            ),
+            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self.directory / "resolved_hash_cache.mdb"),
+            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self.directory / "result_hash_cache.mdb"),
             result_cache=DiskResultCacheMapping(self.directory / "result_cache"),
             log_store={},
         )
