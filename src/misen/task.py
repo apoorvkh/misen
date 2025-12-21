@@ -22,7 +22,7 @@ from typing_extensions import Self
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .executor import AdjacencyList, Executor, Job
+    from .executor import Executor, Job
     from .workspace import ResultHash, Workspace, WorkspaceParameters
 
 __all__ = ["Task", "task", "resources"]
@@ -141,6 +141,9 @@ class Task(Generic[R]):
         self.args = args
         self.kwargs = kwargs
 
+    def __repr__(self):
+        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={self.__hash__() % 100}){' [C]' if self.properties.cache else ''}"
+
     @property
     def T(self) -> R:
         return cast("R", self)
@@ -157,7 +160,7 @@ class Task(Generic[R]):
     def _dependencies(self) -> set[Task]:
         return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
-    def _dependency_tree(
+    def _dependency_graph(
         self,
         exclude_cacheable: bool = False,
         exclude_cached: bool = False,
@@ -271,17 +274,6 @@ class Task(Generic[R]):
 
         return workspace.get_work_dir(task=self)
 
-    def __repr__(self):
-        return "".join(
-            [
-                f"Task({self.func.__module__}.{self.func.__qualname__}",
-                *(f", {a.__repr__()}" for a in self.args),
-                *(f", {k}={v.__repr__()}" for k, v in self.kwargs.items()),
-                f", hash={self.__hash__()}",
-                ")",
-            ]
-        )
-
     @property
     def _arguments_for_hashing(self) -> dict[str, Any]:
         bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
@@ -294,23 +286,24 @@ class Task(Generic[R]):
         }
 
     def __hash__(self) -> int:
-        """A hash that represents the Task object using its constituent task graph."""
-        if not hasattr(self, "_hash"):
-            self._hash = canonical_hash(
-                (
-                    self.properties.id,
-                    self.properties.version,
-                    {
-                        k: (v.__hash__() if isinstance(v, Task) else canonical_hash(v))
-                        for k, v in self._arguments_for_hashing.items()
-                    },
-                )
-            )
-        return self._hash
+        return hash(int(self._task_hash()))
 
     def _task_hash(self) -> TaskHash:
         """A hash that represents the Task object using its constituent task graph."""
-        return TaskHash(self.__hash__())
+        if not hasattr(self, "__task_hash"):
+            self.__task_hash = TaskHash(
+                canonical_hash(
+                    (
+                        self.properties.id,
+                        self.properties.version,
+                        {
+                            k: (v.__hash__() if isinstance(v, Task) else canonical_hash(v))
+                            for k, v in self._arguments_for_hashing.items()
+                        },
+                    )
+                )
+            )
+        return self.__task_hash
 
     def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""

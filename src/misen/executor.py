@@ -49,10 +49,9 @@ class Executor(Generic[JobT], ABC):
         workspace_params = workspace.to_params()
 
         work_graph = WorkGraph(root=task, workspace=workspace)
-        ordered_work_units: list[WorkUnit] = work_graph.order
         jobs: dict[WorkUnit, JobT] = {}
 
-        for w in ordered_work_units:
+        for w in work_graph.order:
             jobs[w] = self._dispatch(
                 functools.partial(w.execute, workspace_params=workspace_params),
                 resources=w.resources,
@@ -101,7 +100,7 @@ class WorkUnit:
 
     def __init__(self, task: Task, dependencies: set[WorkUnit]):
         # DAG of non-cacheable Tasks (truncated at downstream, cacheable Tasks) reachable from `task`
-        self.graph = task._dependency_tree(exclude_cacheable=True)
+        self.graph = task._dependency_graph(exclude_cacheable=True)
 
         # Union of resources for all tasks in graph
         _resource_list: list[TaskResources] = [task.resources for task in self.graph]
@@ -132,6 +131,9 @@ class WorkUnit:
     def __hash__(self):
         return self._hash
 
+    def __repr__(self):
+        return f"WorkUnit(hash={self._hash % 100})"
+
     def execute(self, workspace_params: WorkspaceParameters):
         """Execute the Tasks in self.graph one-by-one (in dependency order)."""
         workspace = workspace_params.construct()
@@ -139,9 +141,9 @@ class WorkUnit:
         task_graph: rx.PyDiGraph = _adj_list_to_rustworkx(self.graph)
         task_results: dict[Task, Any] = {}
 
-        dependency_order = rx.topological_sort(task_graph)
-        for task_index in dependency_order:
-            task: Task = task_graph[task_index]
+        tasks_ordered: list[Task] = [task_graph[i] for i in rx.topological_sort(task_graph)[::-1]]  # dependency order
+
+        for i, task in enumerate(tasks_ordered):
             task_results[task] = Task(
                 task.func,
                 *tuple(task_results[v] if isinstance(v, Task) and v in task_results else v for v in task.args),
@@ -149,9 +151,16 @@ class WorkUnit:
                     k: task_results[v] if isinstance(v, Task) and v in task_results else v
                     for k, v in task.kwargs.items()
                 },
-            ).result(workspace=workspace)
+            ).result(workspace=workspace, compute_if_uncached=True)
 
-        # TODO: prune results if no longer needed by future dependents
+            # remove any results that are not needed by future dependents
+            cached_tasks = set(task_results.keys())
+            remaining_tasks = tasks_ordered[i + 1 :]
+            remaining_deps: set[Task] = set()
+            if len(remaining_tasks) > 0:
+                remaining_deps = set.union(*(t._dependencies for t in remaining_tasks))
+            for t in cached_tasks - remaining_deps:
+                del task_results[t]
 
 
 class WorkGraph:
@@ -163,7 +172,7 @@ class WorkGraph:
         Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
         """
         # dependency graph: dependents point to dependencies
-        graph: AdjacencyList[Task] = root._dependency_tree(exclude_cached=True, workspace=workspace)
+        graph: AdjacencyList[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace)
         graph: rx.PyDiGraph = _adj_list_to_rustworkx(graph)
 
         # Retain only root & cachable tasks (and the induced graph minor)

@@ -1,7 +1,5 @@
 # Project-specific temp directories
-.misen_workspace/
-log_folder/
-test_db/
+.misen/
 
 docs/source/README.md
 docs/source/contributing.md
