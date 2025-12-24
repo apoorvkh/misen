@@ -26,9 +26,9 @@ import rustworkx as rx
 
 from .settings import Settings
 from .task import Task, TaskResources
+from .utils.graph import Graph
 
 if TYPE_CHECKING:
-    from .task import AdjacencyList
     from .workspace import Workspace, WorkspaceParameters
 
 __all__ = ["Executor"]
@@ -44,7 +44,7 @@ class Executor(Generic[JobT], ABC):
     def _dispatch(self, function: Callable, resources: TaskResources, dependencies: set[JobT]) -> JobT:
         """For dispatching a function with the backend. Returns a Job."""
 
-    def submit(self, task: Task, workspace: Workspace):  # -> AdjacencyList[JobT]:
+    def submit(self, task: Task, workspace: Workspace):
         """Entrypoint for submitting a Task's DAG to the Executor."""
         workspace_params = workspace.to_params()
 
@@ -93,7 +93,7 @@ class WorkUnit:
     the resources required to execute any Task in the DAG.
     """
 
-    graph: AdjacencyList[Task]
+    graph: Graph[Task]
     resources: TaskResources
     dependencies: set[WorkUnit]
     _hash: int
@@ -138,7 +138,7 @@ class WorkUnit:
         """Execute the Tasks in self.graph one-by-one (in dependency order)."""
         workspace = workspace_params.construct()
 
-        task_graph: rx.PyDiGraph = _adj_list_to_rustworkx(self.graph)
+        task_graph: rx.PyDiGraph = self.graph.to_rustworkx()
         task_results: dict[Task, Any] = {}
 
         tasks_ordered: list[Task] = [task_graph[i] for i in rx.topological_sort(task_graph)[::-1]]  # dependency order
@@ -164,7 +164,7 @@ class WorkUnit:
 
 
 class WorkGraph:
-    dependency_graph: AdjacencyList[WorkUnit]
+    dependency_graph: Graph[WorkUnit]
     order: list[WorkUnit]
 
     def __init__(self, root: Task, workspace: Workspace):
@@ -172,8 +172,8 @@ class WorkGraph:
         Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
         """
         # dependency graph: dependents point to dependencies
-        graph: AdjacencyList[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace)
-        graph: rx.PyDiGraph = _adj_list_to_rustworkx(graph)
+        graph: Graph[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace)
+        graph: rx.PyDiGraph = graph.to_rustworkx()
 
         # Retain only root & cachable tasks (and the induced graph minor)
         nodes_to_remove = graph.filter_nodes(lambda task: not (task.properties.cache or task == root))
@@ -189,22 +189,12 @@ class WorkGraph:
             dependencies: set[WorkUnit] = set(graph.successors(node))
             graph[node] = WorkUnit(task=task, dependencies=dependencies)
 
-        self.dependency_graph: AdjacencyList[WorkUnit] = {
-            graph[node]: set(graph.successors(node)) for node in graph.node_indices()
-        }
+        self.dependency_graph: Graph[WorkUnit] = Graph(
+            {graph[node]: set(graph.successors(node)) for node in graph.node_indices()}
+        )
 
         self.order: list[WorkUnit] = [graph[node] for node in order]
 
 
 class Job(ABC):
     pass
-
-
-def _adj_list_to_rustworkx(graph: AdjacencyList[Task]) -> rx.PyDiGraph:
-    dag = rx.PyDiGraph(check_cycle=True, multigraph=False)
-    nodes: dict[Task, int] = {t: dag.add_node(t) for t in graph}
-    for t in graph:
-        n = nodes[t]
-        for d in graph[t]:
-            dag.add_edge(n, nodes[d], None)
-    return dag

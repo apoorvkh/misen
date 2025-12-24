@@ -1,4 +1,5 @@
 from misen import Task, task
+from misen.executor import WorkGraph
 from misen.executors.slurm import SlurmExecutor
 from misen.workspaces.disk import DiskWorkspace
 from misen.workspaces.memory import MemoryWorkspace
@@ -73,6 +74,27 @@ def graph() -> Task:
 
 
 if __name__ == "__main__":
+    t = graph()
+
+    # print_graph(g._dependency_graph())
+    #
+    gr = t._dependency_graph()
+
+    gr.pretty_print()
+
     workspace = DiskWorkspace()
-    executor = SlurmExecutor()
-    executor.submit(graph(), workspace=workspace)
+    WorkGraph(root=t, workspace=workspace).dependency_graph.pretty_print()
+
+    # WorkGraph(root=task, workspace=workspace)
+
+    # executor = SlurmExecutor()
+    # work_graph = executor.submit(graph(), workspace=workspace)
+
+    # _dependency_graph = work_graph.dependency_graph
+    # print_graph(_dependency_graph)
+    # print()
+
+    # for work in work_graph.order:
+    #     print()
+    #     print(work)
+    #     print_graph(work.graph)

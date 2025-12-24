@@ -9,7 +9,6 @@ from typing import (
     Callable,
     Generic,
     ParamSpec,
-    TypeAlias,
     TypeVar,
     cast,
 )
@@ -19,19 +18,18 @@ from misen_serialization import canonical_hash
 from msgspec import Struct
 from typing_extensions import Self
 
+from .utils.graph import Graph
+
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .executor import Executor, Job
+    from .executor import Executor
     from .workspace import ResultHash, Workspace, WorkspaceParameters
 
 __all__ = ["Task", "task", "resources"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-T = TypeVar("T")
-AdjacencyList: TypeAlias = dict[T, set[T]]
 
 # TODO: consider serializable
 
@@ -165,7 +163,7 @@ class Task(Generic[R]):
         exclude_cacheable: bool = False,
         exclude_cached: bool = False,
         workspace: Workspace | None = None,
-    ) -> AdjacencyList[Task]:
+    ) -> Graph[Task]:
         def condition(task: Task) -> bool:
             if exclude_cacheable:
                 return task.properties.cache is False
@@ -177,7 +175,7 @@ class Task(Generic[R]):
         if exclude_cached:
             condition: Callable[[Task], bool] = cache(condition)
 
-        graph: AdjacencyList[Task] = {}
+        graph: Graph[Task] = Graph({})
         stack: list[Task] = [self]
         visited: set[Task] = set()
 
@@ -192,7 +190,7 @@ class Task(Generic[R]):
 
         return graph
 
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> AdjacencyList[Job]:
+    def run(self, workspace: Workspace | None = None, executor: Executor | None = None):
         """
         Submit task to an executor and return a mapping from each distributable task to its
         dependency set and runtime job status handle.
