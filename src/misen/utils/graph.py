@@ -1,19 +1,31 @@
-from typing import TypeVar
+from __future__ import annotations
+
+from typing import Generic, TypeVar
 
 import rustworkx as rx
 
 T = TypeVar("T")
 
 
-class Graph(dict[T, set[T]]):
-    def to_rustworkx(self) -> rx.PyDiGraph:
-        dag = rx.PyDiGraph(check_cycle=True, multigraph=False)
-        nodes: dict[T, int] = {t: dag.add_node(t) for t in self}
-        for t in self:
-            n = nodes[t]
-            for d in self[t]:
-                dag.add_edge(n, nodes[d], None)
-        return dag
+class DependencyGraph(rx.PyDiGraph, Generic[T]):
+    def copy(self) -> DependencyGraph[T]:
+        new = type(self)()
+        old_indices = self.node_indices()
+        new_indices = new.add_nodes_from([self[i] for i in old_indices])
+        remap = dict(zip(old_indices, new_indices))
+        edge_list = [(remap[u], remap[v], w) for (u, v, w) in self.weighted_edge_list()]
+        new.extend_from_weighted_edge_list(edge_list)
+        return new
+
+    def evaluation_order(self) -> list[int]:
+        return list(rx.topological_sort(self))[::-1]
+
+    def coarsen_to_anchors(self, anchors: list[int]) -> DependencyGraph[T]:
+        graph = self.copy()
+        for node in reversed(graph.node_indices()):
+            if node not in anchors:
+                graph.remove_node_retain_edges(node)
+        return graph
 
     def pretty_print(
         self,
@@ -31,11 +43,15 @@ class Graph(dict[T, set[T]]):
             # Deterministic ordering even for unorderable node types
             return str(x)
 
-        # Collect all nodes (keys + deps)
-        all_nodes: set[T] = set(self.keys())
+        # Collect all nodes + dependencies
+        all_nodes: list[T] = []
         all_deps: set[T] = set()
-        for deps in self.values():
-            all_nodes.update(deps)
+        adjacency: dict[T, list[T]] = {}
+        for node_index in self.node_indices():
+            node = self[node_index]
+            deps = list(self.successors(node_index))
+            adjacency[node] = deps
+            all_nodes.append(node)
             all_deps.update(deps)
 
         if roots is None:
@@ -62,7 +78,7 @@ class Graph(dict[T, set[T]]):
             if max_depth is not None and depth >= max_depth:
                 return
 
-            children = list(self.get(node, ()))
+            children = list(adjacency.get(node, ()))
             children.sort(key=sort_key)
 
             new_prefix = prefix + ("    " if is_last else "│   ")
@@ -78,7 +94,7 @@ class Graph(dict[T, set[T]]):
                 print()  # blank line between root trees
             print(str(root))
 
-            children = list(self.get(root, ()))
+            children = list(adjacency.get(root, ()))
             children.sort(key=sort_key)
             for i, child in enumerate(children):
                 walk(child, "", i == len(children) - 1, 1, {root})

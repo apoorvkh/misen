@@ -18,7 +18,7 @@ from misen_serialization import canonical_hash
 from msgspec import Struct
 from typing_extensions import Self
 
-from .utils.graph import Graph
+from .utils.graph import DependencyGraph
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -163,30 +163,45 @@ class Task(Generic[R]):
         exclude_cacheable: bool = False,
         exclude_cached: bool = False,
         workspace: Workspace | None = None,
-    ) -> Graph[Task]:
-        def condition(task: Task) -> bool:
+    ) -> DependencyGraph[Task]:
+        if exclude_cached and workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        @cache
+        def _include(dependency: Task) -> bool:
             if exclude_cacheable:
-                return task.properties.cache is False
-            elif exclude_cached:
-                return not task.is_cached(workspace=workspace)
-            else:
-                return True
+                return dependency.properties.cache is False
+            if exclude_cached:
+                return not dependency.is_cached(workspace=workspace)
+            return True
 
-        if exclude_cached:
-            condition: Callable[[Task], bool] = cache(condition)
+        graph: DependencyGraph[Task] = DependencyGraph()
+        nodes: dict[Task, int] = {}
 
-        graph: Graph[Task] = Graph({})
+        def _get_node(t: Task) -> int:
+            i = nodes.get(t)
+            if i is None:
+                i = nodes[t] = graph.add_node(t)
+            return i
+
+        # DFS to traverse Task graph and build DAG
+
         stack: list[Task] = [self]
-        visited: set[Task] = set()
+        seen: set[Task] = {self}
 
         while stack:
             task: Task = stack.pop()
-            if task in visited:
-                continue
-            visited.add(task)
+            task_node = _get_node(task)
 
-            graph[task] = set(filter(condition, task._dependencies))
-            stack.extend(graph[task] - visited)
+            for dep in task._dependencies:
+                if not _include(dep):
+                    continue
+                graph.add_edge(task_node, _get_node(dep), None)
+                if dep not in seen:
+                    seen.add(dep)
+                    stack.append(dep)
 
         return graph
 
