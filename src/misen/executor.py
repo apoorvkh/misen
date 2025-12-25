@@ -46,7 +46,7 @@ class Executor(Generic[JobT], ABC):
         """Entrypoint for submitting a Task's DAG to the Executor."""
         workspace_params = workspace.to_params()
 
-        work_graph = build_work_graph(root=task, workspace=workspace)
+        work_graph: DependencyGraph[WorkUnit] = _build_work_graph(root=task, workspace=workspace)
         jobs: dict[WorkUnit, JobT] = {}
 
         for i in work_graph.evaluation_order():
@@ -160,7 +160,7 @@ class WorkUnit:
                 del task_results[t]
 
 
-def build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkUnit]:
+def _build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkUnit]:
     """
     Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
     """
