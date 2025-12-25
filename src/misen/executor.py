@@ -85,6 +85,10 @@ class Executor(Generic[JobT], ABC):
                 return getattr(import_module(module), class_name)
 
 
+class Job(ABC):
+    pass
+
+
 class WorkUnit:
     """
     A unit of work for processing, corresponding to a DAG of Tasks (`self.graph`). All Tasks are non-cacheable, with the
@@ -131,7 +135,7 @@ class WorkUnit:
         return self._hash
 
     def __repr__(self):
-        return f"WorkUnit(hash={self._hash % 100})"
+        return f"WorkUnit(hash={self._hash % 101})"
 
     def execute(self, workspace_params: WorkspaceParameters):
         """Execute the Tasks in self.graph one-by-one (in dependency order)."""
@@ -151,11 +155,13 @@ class WorkUnit:
             ).result(workspace=workspace, compute_if_uncached=True)
 
             # remove any results that are not needed by future dependents
-            cached_tasks = set(task_results.keys())
             remaining_tasks = evaluation_order[i + 1 :]
-            remaining_deps: set[Task] = set()
             if len(remaining_tasks) > 0:
                 remaining_deps = set.union(*(t._dependencies for t in remaining_tasks))
+            else:
+                remaining_deps = set()
+
+            cached_tasks = set(task_results.keys())
             for t in cached_tasks - remaining_deps:
                 del task_results[t]
 
@@ -165,12 +171,10 @@ def _build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkU
     Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
     """
     # dependency graph: dependents point to dependencies
-    graph: DependencyGraph[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace)
+    graph: DependencyGraph[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace).copy()
 
     # Retain only root & cachable tasks (and the induced graph minor)
-    graph = graph.coarsen_to_anchors(
-        anchors=list(graph.filter_nodes(lambda task: task.properties.cache or task == root))
-    )
+    graph.coarsen_to_anchors(anchors=list(graph.filter_nodes(lambda task: task.properties.cache or task == root)))
 
     # replace nodes with WorkUnit instances
     for i in graph.evaluation_order():
@@ -178,7 +182,3 @@ def _build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkU
     graph: DependencyGraph[WorkUnit] = cast("DependencyGraph[WorkUnit]", graph)
 
     return graph
-
-
-class Job(ABC):
-    pass

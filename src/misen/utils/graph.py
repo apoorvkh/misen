@@ -8,8 +8,11 @@ T = TypeVar("T")
 
 
 class DependencyGraph(rx.PyDiGraph, Generic[T]):
+    def __getitem__(self, key: int) -> T:
+        return super().__getitem__(key)
+
     def copy(self) -> DependencyGraph[T]:
-        new = type(self)()
+        new = DependencyGraph[T]()
         old_indices = self.node_indices()
         new_indices = new.add_nodes_from([self[i] for i in old_indices])
         remap = dict(zip(old_indices, new_indices))
@@ -20,12 +23,10 @@ class DependencyGraph(rx.PyDiGraph, Generic[T]):
     def evaluation_order(self) -> list[int]:
         return list(rx.topological_sort(self))[::-1]
 
-    def coarsen_to_anchors(self, anchors: list[int]) -> DependencyGraph[T]:
-        graph = self.copy()
-        for node in reversed(graph.node_indices()):
+    def coarsen_to_anchors(self, anchors: list[int]) -> None:
+        for node in reversed(self.node_indices()):
             if node not in anchors:
-                graph.remove_node_retain_edges(node)
-        return graph
+                self.remove_node_retain_edges(node)
 
     def pretty_print(
         self,

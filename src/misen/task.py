@@ -69,7 +69,7 @@ def task(
             func,
             "__task_properties__",
             TaskProperties(
-                id=(id or f"{func.__module__}.{func.__qualname__}"),
+                id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
                 cache=cache,
                 version=version,
                 exclude=exclude,
@@ -127,7 +127,7 @@ class Task(Generic[R]):
         self.properties = getattr(
             func,
             "__task_properties__",
-            TaskProperties(f"{func.__module__}.{func.__qualname__}"),
+            TaskProperties(f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
         )
         self.resources = getattr(
             func,
@@ -140,7 +140,7 @@ class Task(Generic[R]):
         self.kwargs = kwargs
 
     def __repr__(self):
-        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={self.__hash__() % 100}){' [C]' if self.properties.cache else ''}"
+        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={self.__hash__() % 101}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]
 
     @property
     def T(self) -> R:
