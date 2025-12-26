@@ -272,7 +272,7 @@ class Task(Generic[R]):
         )
 
         resolved_hash = self._resolved_hash(workspace=workspace)
-        workspace._result_hash_cache[resolved_hash] = ResultHash(canonical_hash(result))
+        workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(result)
 
         if self.properties.cache:
             from .workspace import SerializedResult
@@ -309,18 +309,11 @@ class Task(Generic[R]):
     def _task_hash(self) -> TaskHash:
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "__task_hash"):
-            self.__task_hash = TaskHash(
-                canonical_hash(
-                    (
-                        self.properties.id,
-                        self.properties.version,
-                        {
-                            k: (v.__hash__() if isinstance(v, Task) else canonical_hash(v))
-                            for k, v in self._arguments_for_hashing.items()
-                        },
-                    )
-                )
-            )
+            hashed_arguments = {
+                k: (v._task_hash() if isinstance(v, Task) else TaskHash.from_object(v))
+                for k, v in self._arguments_for_hashing.items()
+            }
+            self.__task_hash = TaskHash.from_object((self.properties.id, self.properties.version, hashed_arguments))
         return self.__task_hash
 
     def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
@@ -334,12 +327,13 @@ class Task(Generic[R]):
         # slower workspace cache
         if (resolved_hash := workspace._resolved_hash_cache.get(task_hash)) is None:
             hashed_arguments = {
-                k: (v._result_hash(workspace=workspace) if isinstance(v, Task) else canonical_hash(v))
+                k: (v._result_hash(workspace=workspace) if isinstance(v, Task) else ResultHash.from_object(v))
                 for k, v in self._arguments_for_hashing.items()
             }
-            resolved_hash = ResolvedTaskHash(
-                canonical_hash((self.properties.id, self.properties.version, hashed_arguments)),
+            resolved_hash = ResolvedTaskHash.from_object(
+                (self.properties.id, self.properties.version, hashed_arguments)
             )
+
             workspace._resolved_hash_cache[task_hash] = resolved_hash
 
         workspace._resolved_hashes[task_hash] = resolved_hash
@@ -363,6 +357,10 @@ class Task(Generic[R]):
 
 
 class Hash(int):
+    @classmethod
+    def from_object(cls, obj: object) -> Self:
+        return cls(canonical_hash(obj))
+
     def encode(self) -> bytes:
         return self.to_bytes(8, "big", signed=False)
 
