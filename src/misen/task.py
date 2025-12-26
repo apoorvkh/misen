@@ -249,8 +249,12 @@ class Task(Generic[R]):
             if not compute_if_uncached:
                 raise RuntimeError(f"{self} is not cached.")
 
-        if not compute_uncached_deps and any(not t.is_cached(workspace=workspace) for t in self._dependencies):
-            raise RuntimeError(f"{self} has dependencies which must be computed and cached first.")
+        if not compute_uncached_deps:
+            uncached_deps = [
+                t for t in self._dependencies if t.properties.cache and not t.is_cached(workspace=workspace)
+            ]
+            if len(uncached_deps) > 0:
+                raise RuntimeError(f"{self} has dependencies which must be computed and cached first: {uncached_deps}")
 
         result = cast("Callable[..., R]", self.func)(
             *tuple(
