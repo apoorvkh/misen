@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import timedelta
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Generator, Generic, MutableMapping, TypeVar
 
 import lmdb
-from flufl.lock._lockfile import Lock, NotLockedError
+from flufl.lock._lockfile import Lock
 
 from ..task import Hash, ResolvedTaskHash, ResultHash, Task, TaskHash
 from ..workspace import Workspace, WorkspaceParameters
@@ -15,36 +16,53 @@ KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
 
 
+# TODO: determine that systems have synchronized clocks
+# TODO: should locks be refreshing?
+
+
 class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
     _key_type: type[KT]
     _value_type: type[VT]
 
     def __class_getitem__(cls, item: tuple[type[KT], type[VT]]):
-        """Subclass dynamically bound to KT, VT."""
         key_t, val_t = item
         return type(
             f"{cls.__name__}[{key_t.__name__},{val_t.__name__}]",
             (cls,),
-            {
-                "_key_type": key_t,
-                "_value_type": val_t,
-                "__module__": cls.__module__,
-            },
+            {"_key_type": key_t, "_value_type": val_t, "__module__": cls.__module__},
         )
 
-    def __init__(self, database_path: Path):
+    def __init__(self, database_path: Path, lifetime_s: int = 30, timeout_s: int | None = None):
         if not hasattr(self, "_key_type") or not hasattr(self, "_value_type"):
             raise TypeError("Construct as LMDBMapping[KeyType, ValueType](...)")
 
-        # TODO: implement the lock (using flufl.lock)
+        self._lock = Lock(
+            lockfile=str(database_path.with_suffix(".lock")),
+            lifetime=lifetime_s,
+            default_timeout=timeout_s,
+        )
 
-        self.env = lmdb.Environment(
+        self.env = lmdb.Environment(  # ty:ignore[possibly-missing-attribute]
             str(database_path),
             subdir=False,
             lock=False,
             map_size=2**28,  # 256 MiB
             max_dbs=1,
         )
+
+    def __len__(self) -> int:
+        return self.env.stat()["entries"]
+
+    def __iter__(self) -> Generator[KT]:
+        with self.env.begin() as txn:
+            for k, _ in txn.cursor():
+                yield self._key_type.decode(k)
+
+    def __contains__(self, key: object) -> bool:
+        if not isinstance(key, self._key_type):
+            return False
+        with self.env.begin() as txn:
+            return txn.get(key.encode()) is not None
 
     def __getitem__(self, key: KT) -> VT:
         with self.env.begin() as txn:
@@ -55,117 +73,90 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
 
     def __setitem__(self, key: KT, value: VT) -> None:
         _key, _value = key.encode(), value.encode()
-        with self.env.begin(write=True) as txn:
-            txn.put(_key, _value)
+        with self._lock:
+            with self.env.begin(write=True) as txn:
+                txn.put(_key, _value)
 
     def __delitem__(self, key: KT) -> None:
         _key = key.encode()
-        with self.env.begin(write=True) as txn:
-            success = txn.delete(_key)
+        with self._lock:
+            with self.env.begin(write=True) as txn:
+                success = txn.delete(_key)
         if not success:
             raise KeyError(key)
 
-    def __iter__(self) -> Generator[KT]:
-        with self.env.begin() as txn:
-            for k, _ in txn.cursor():
-                yield self._key_type.decode(k)
-
-    def __len__(self) -> int:
-        return self.env.stat()["entries"]
-
-    def __contains__(self, key: object) -> bool:
-        if not isinstance(key, self._key_type):
-            return False
-        with self.env.begin() as txn:
-            return txn.get(key.encode()) is not None
+    def clear(self) -> None:
+        with self._lock:
+            with self.env.begin(write=True) as txn:
+                for _k, _ in txn.cursor():
+                    txn.delete(_k)
 
 
-# Notes about implementation
-
-# processes should use flufl.lock for writing. This lock (1) requires processes to have synchronized clocks,
-# which I think is fine, and (2) have a lifetime (e.g. lock is invalid after 90s). In the ResultCache case,
-# we may want to hold a lock for >90s. In that case, I think we can have another thread that renews the lock every 80s.
+def _atomic_write(filepath: Path, data: bytes) -> None:
+    tmp_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="wb", dir=filepath.parent, prefix=f"{filepath.name}.", suffix=".tmp", delete=False
+        ) as f:
+            tmp_path = Path(f.name)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
     def __init__(self, directory: Path):
         self.directory = directory
 
-    def __aquire_lock(self, filename: Path) -> Lock:
-        item_lock_filename = filename.with_suffix(".lock")
-
-        lock = Lock(str(item_lock_filename), lifetime=timedelta(hours=1))
-        lock.lock()
-
-        return lock
-
-    def __get_key_filename(self, key: ResultHash) -> Path:
-        key_hex = f"{key:016x}"  # zero-padded 16 hex chars
+    def _result_filepath(self, key: ResultHash) -> Path:
+        key_hex = f"{key:016x}"  # zero-padded 16 hex chars (supports uint64)
         return self.directory / key_hex[:2] / f"{key_hex}.dill"
 
-    def __setitem__(self, key: ResultHash, value: bytes):
-        item_filename = self.__get_key_filename(key)
-        os.makedirs(item_filename.parent, exist_ok=True)
+    @contextmanager
+    def _acquire_lock(self, key: ResultHash):
+        _result_filepath = self._result_filepath(key)
+        _result_filepath.parent.mkdir(parents=True, exist_ok=True)
+        with Lock(
+            lockfile=str(_result_filepath.with_suffix(".lock")),
+            lifetime=90,
+            default_timeout=None,
+        ):
+            yield
 
-        lock = self.__aquire_lock(item_filename)
-
-        assert lock.is_locked, "Lock somehow lost immediately"
-
-        with open(item_filename, "wb") as f:
-            f.write(value)
-
-        # necessary, or not?
-        try:
-            lock.unlock()
-        except NotLockedError:
-            raise Exception("Lock lost during writing")
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, ResultHash) and self._result_filepath(key).exists()
 
     def __getitem__(self, key: ResultHash) -> bytes:
-        item_filename = self.__get_key_filename(key)
-
-        lock = self.__aquire_lock(item_filename)
-
         try:
-            with open(item_filename, "rb") as f:
-                value = f.read()
+            with open(self._result_filepath(key), "rb") as f:
+                return f.read()
         except FileNotFoundError:
-            raise KeyError(f"No such key {key} in cache.")
+            raise KeyError(key)
 
-        # necessary, or not?
-        try:
-            lock.unlock()
-        except NotLockedError:
-            raise Exception("Lock lost during reading")
+    def __setitem__(self, key: ResultHash, value: bytes):
+        with self._acquire_lock(key):
+            _filepath = self._result_filepath(key)
+            if not _filepath.exists():
+                _atomic_write(_filepath, value)
 
-        return value
-
-    def __delitem__(self, key: ResultHash):
-        item_filename = self.__get_key_filename(key)
-
-        lock = self.__aquire_lock(item_filename)
-        try:
-            os.remove(item_filename)
-        except FileNotFoundError:
-            raise KeyError(f"No such key {key} in cache.")
-
-        # necessary, or not?
-        try:
-            lock.unlock()
-        except NotLockedError:
-            raise Exception("Lock lost during delete")
-
-        # do not remove the lock file for now, it has a race condition
+    def __delitem__(self, key: ResultHash) -> None:
+        with self._acquire_lock(key):
+            try:
+                self._result_filepath(key).unlink()
+            except FileNotFoundError:
+                raise KeyError(key)
 
     def __iter__(self):
-        for path in self.directory.iterdir():
-            if path.is_file() and path.name.startswith("result_"):
-                yield ResultHash(path.name[7:])
+        for p in self.directory.glob(("[0-9a-f]" * 2) + "/" + ("[0-9a-f]" * 16) + ".dill"):
+            if (stem := p.stem)[:2] == p.parent.name:
+                yield ResultHash(stem, base=16)
 
     def __len__(self) -> int:
-        return len(list(filter(lambda x: x.startswith("result_"), os.listdir(self.directory))))
-
-
-# TODO: since we use flufl.lock, we should have a check in DiskWorkspace.__init__ to ensure the system clock is NTP synchronized
+        return sum(1 for _ in self)
 
 
 class DiskWorkspace(Workspace):
