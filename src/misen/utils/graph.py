@@ -1,32 +1,53 @@
 from __future__ import annotations
 
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import rustworkx as rx
 
 T = TypeVar("T")
 
 
-class DependencyGraph(rx.PyDiGraph, Generic[T]):
-    def __getitem__(self, key: int) -> T:
-        return super().__getitem__(key)
+class DependencyGraph(Generic[T]):
+    def __init__(self):
+        self._g = rx.PyDiGraph(check_cycle=True, multigraph=False)
+
+    ## Wrapper functions
 
     def copy(self) -> DependencyGraph[T]:
-        new = DependencyGraph[T]()
-        old_indices = self.node_indices()
-        new_indices = new.add_nodes_from([self[i] for i in old_indices])
-        remap = dict(zip(old_indices, new_indices))
-        edge_list = [(remap[u], remap[v], w) for (u, v, w) in self.weighted_edge_list()]
-        new.extend_from_weighted_edge_list(edge_list)
+        new = DependencyGraph()
+        new._g = self._g.copy()
         return new
 
+    def nodes(self) -> list[T]:
+        return self._g.nodes()
+
+    def node_indices(self) -> list[int]:
+        return list(self._g.node_indices())
+
+    def add_node(self, node: T) -> int:
+        return self._g.add_node(node)
+
+    def __getitem__(self, key: int) -> T:
+        return self._g.__getitem__(key)
+
+    def __setitem__(self, key: int, value: T) -> None:
+        self._g.__setitem__(key, value)
+
+    def add_edge(self, parent: int, child: int, edge: Any = None) -> None:
+        self._g.add_edge(parent, child, edge)
+
+    def successors(self, node_index: int) -> list[T]:
+        return self._g.successors(node_index)
+
+    ## Custom functions
+
     def evaluation_order(self) -> list[int]:
-        return list(rx.topological_sort(self))[::-1]
+        return list(rx.topological_sort(self._g))[::-1]
 
     def coarsen_to_anchors(self, anchors: list[int]) -> None:
-        for node in reversed(self.node_indices()):
+        for node in reversed(self._g.node_indices()):
             if node not in anchors:
-                self.remove_node_retain_edges(node)
+                self._g.remove_node_retain_edges(node)
 
     def pretty_print(
         self,
@@ -48,9 +69,9 @@ class DependencyGraph(rx.PyDiGraph, Generic[T]):
         all_nodes: list[T] = []
         all_deps: set[T] = set()
         adjacency: dict[T, list[T]] = {}
-        for node_index in self.node_indices():
+        for node_index in self._g.node_indices():
             node = self[node_index]
-            deps = list(self.successors(node_index))
+            deps = list(self._g.successors(node_index))
             adjacency[node] = deps
             all_nodes.append(node)
             all_deps.update(deps)

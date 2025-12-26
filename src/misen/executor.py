@@ -171,14 +171,16 @@ def _build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkU
     Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
     """
     # dependency graph: dependents point to dependencies
-    graph: DependencyGraph[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace).copy()
-
+    task_graph: DependencyGraph[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace)
     # Retain only root & cachable tasks (and the induced graph minor)
-    graph.coarsen_to_anchors(anchors=list(graph.filter_nodes(lambda task: task.properties.cache or task == root)))
+    anchor_graph = task_graph.copy()
+    anchor_graph.coarsen_to_anchors(
+        anchors=[i for i in anchor_graph.node_indices() if anchor_graph[i] == root or anchor_graph[i].properties.cache]
+    )
 
     # replace nodes with WorkUnit instances
-    for i in graph.evaluation_order():
-        graph[i] = WorkUnit(task=graph[i], dependencies=set(graph.successors(i)))
-    graph: DependencyGraph[WorkUnit] = cast("DependencyGraph[WorkUnit]", graph)
+    work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
+    for i in work_graph.evaluation_order():
+        work_graph[i] = WorkUnit(task=anchor_graph[i], dependencies=set(work_graph.successors(i)))
 
-    return graph
+    return work_graph

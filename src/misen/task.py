@@ -64,6 +64,7 @@ def task(
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
+    # TODO: handle func.__module__ == "__main__"
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         setattr(
             func,
