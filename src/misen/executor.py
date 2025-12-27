@@ -22,6 +22,8 @@ from abc import ABC, abstractmethod
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeAlias, TypeVar, cast
 
+from misen.utils.hashes import short_hash
+
 from .settings import Settings
 from .task import Task, TaskResources
 
@@ -51,6 +53,8 @@ class Executor(Generic[JobT], ABC):
 
         for i in work_graph.evaluation_order():
             w: WorkUnit = work_graph[i]
+            if w.root.is_cached(workspace=workspace):
+                continue
             jobs[w] = self._dispatch(
                 functools.partial(w.execute, workspace_params=workspace_params),
                 resources=w.resources,
@@ -96,14 +100,18 @@ class WorkUnit:
     the resources required to execute any Task in the DAG.
     """
 
+    root: Task
     graph: DependencyGraph[Task]
     resources: TaskResources
     dependencies: set[WorkUnit]
-    _hash: int
 
-    def __init__(self, task: Task, dependencies: set[WorkUnit]):
+    def __init__(self, root: Task, dependencies: set[WorkUnit]):
+        self.root = root
+        # WorkUnits which must be computed before this one
+        self.dependencies = dependencies
+
         # DAG of non-cacheable Tasks (truncated at downstream, cacheable Tasks) reachable from `task`
-        self.graph = task._dependency_graph(exclude_cacheable=True)
+        self.graph = root._dependency_graph(exclude_cacheable=True)
 
         # Union of resources for all tasks in graph
         _resource_list: list[TaskResources] = [task.resources for task in self.graph.nodes()]
@@ -124,18 +132,16 @@ class WorkUnit:
             ),
         )
 
-        # WorkUnits which must be computed before this one
-        self.dependencies = dependencies
-
+    def __hash__(self):
         # Tasks and WorkUnits have a 1:1 correspondence, so we can defer to Task.__hash__
         # Two Tasks may have equivalent `self.graph`s at runtime (determined after self.dependencies are resolved)
-        self._hash = hash(task)
+        return hash(self.root)
 
-    def __hash__(self):
-        return self._hash
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, WorkUnit) and self.root == other.root
 
     def __repr__(self):
-        return f"WorkUnit(hash={self._hash % 101})"
+        return f"WorkUnit(hash={short_hash(self)})"
 
     def execute(self, workspace_params: WorkspaceParameters):
         """Execute the Tasks in self.graph one-by-one (in dependency order)."""
@@ -171,7 +177,7 @@ def _build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkU
     Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
     """
     # dependency graph: dependents point to dependencies
-    task_graph: DependencyGraph[Task] = root._dependency_graph(exclude_cached=True, workspace=workspace)
+    task_graph: DependencyGraph[Task] = root._dependency_graph(workspace=workspace)
     # Retain only root & cachable tasks (and the induced graph minor)
     anchor_graph = task_graph.copy()
     anchor_graph.coarsen_to_anchors(
@@ -181,6 +187,6 @@ def _build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkU
     # replace nodes with WorkUnit instances
     work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
     for i in work_graph.evaluation_order():
-        work_graph[i] = WorkUnit(task=anchor_graph[i], dependencies=set(work_graph.successors(i)))
+        work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
 
     return work_graph

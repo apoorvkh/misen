@@ -46,15 +46,7 @@ def _get_serializer(obj: Any) -> Callable[[Any], bytes]:
     elif is_torch_object(obj):
         return torch_serializer
     elif hasattr(obj, "__getstate__"):
-        return lambda o: serialize(o.__getstate__())  # noqa: E731
-    elif hasattr(obj, "__dict__"):
-        return lambda o: serialize(o.__dict__)  # noqa: E731
-    elif hasattr(obj, "__slots__"):
-        return lambda o: serialize(  # noqa: E731
-            {slot: getattr(o, slot) for slot in o.__slots__}
-        )
-    elif hasattr(obj, "__iter__"):
-        return lambda o: serialize(list(o))  # noqa: E731
+        return lambda o: serialize(o.__getstate__())
 
     # TODO: add logger.warning to flag fallback
     return dill.dumps

@@ -17,7 +17,7 @@ import dill
 from msgspec import Struct
 
 from .utils.graph import DependencyGraph
-from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
+from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -144,7 +144,7 @@ class Task(Generic[R]):
         self.kwargs = kwargs
 
     def __repr__(self):
-        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={self.__hash__() % 101}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]
+        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]
 
     @property
     def T(self) -> R:
@@ -316,7 +316,7 @@ class Task(Generic[R]):
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "_cached_task_hash"):
             hashed_arguments = {
-                k: (v._task_hash() if isinstance(v, Task) else TaskHash.from_object(v))
+                k: (v._task_hash() if isinstance(v, Task) else ResultHash.from_object(v))
                 for k, v in self._arguments_for_hashing.items()
             }
             self._cached_task_hash = TaskHash.from_object(

@@ -1,7 +1,7 @@
 from misen_serialization import canonical_hash
 from typing_extensions import Self
 
-__all__ = ["Hash", "TaskHash", "ResolvedTaskHash", "ResultHash"]
+__all__ = ["Hash", "TaskHash", "ResolvedTaskHash", "ResultHash", "short_hash"]
 
 
 class Hash(int):
@@ -24,3 +24,7 @@ class ResolvedTaskHash(Hash): ...
 
 
 class ResultHash(Hash): ...
+
+
+def short_hash(obj: object) -> str:
+    return f"{hash(obj) & 0xFFFF:04x}"
