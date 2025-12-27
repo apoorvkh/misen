@@ -17,10 +17,12 @@ import dill
 from misen_serialization import canonical_hash
 
 from .settings import Settings
-from .task import ResolvedTaskHash, ResultHash, SerializedResult, Task, TaskHash
+from .task import SerializedResult, Task
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 
 __all__ = ["Workspace"]
 
@@ -50,10 +52,24 @@ class WorkspaceMeta(ABCMeta):
         return WorkspaceMeta._instances[key]
 
 
-WorkspaceType: TypeAlias = str | Literal["auto", "memory"]
+WorkspaceType: TypeAlias = str | Literal["auto", "memory", "disk"]
+
+
+# TODO: figure out better way to avoid serializing workspaces?
+
+
+class WorkspaceParameters:
+    def __init__(self, type: type[Workspace], *args, **kwargs):
+        self.type = type
+        self.args = args
+        self.kwargs = kwargs
+
+    def construct(self) -> Workspace:
+        return self.type(*self.args, **self.kwargs)
 
 
 # TODO: support polling task status from Workspace
+# TODO: add task lock to Workspace
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
@@ -62,7 +78,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
         result_cache: MutableMapping[ResultHash, bytes],
-        log_store: MutableMapping[ResolvedTaskHash, str],
+        log_store: MutableMapping[ResolvedTaskHash, TaskLogs],
     ):
         # session-only (non-persistent) caches
         self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
@@ -76,7 +92,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
 
         # public accessors to workspace data
         self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
-        self.logs: MutableMapping[Task, str] = LogMap(workspace=self)
+        self.logs: MutableMapping[Task, TaskLogs] = LogMap(workspace=self)
 
     @staticmethod
     def auto(settings: Settings | None = None) -> "Workspace":
@@ -91,7 +107,10 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         # default
         from misen.workspaces.memory import MemoryWorkspace
 
-        return MemoryWorkspace(i=20)
+        return MemoryWorkspace()
+
+    @abstractmethod
+    def to_params(self) -> WorkspaceParameters: ...
 
     @staticmethod
     def _resolve_type(t: WorkspaceType) -> type["Workspace"]:
@@ -102,6 +121,10 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
                 from misen.workspaces.memory import MemoryWorkspace
 
                 return MemoryWorkspace
+            case "disk":
+                from misen.workspaces.disk import DiskWorkspace
+
+                return DiskWorkspace
             case _:
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
@@ -148,18 +171,15 @@ class ResultMap(MutableMapping[Task, SerializedResult]):
         return result_hash in self.workspace._result_cache
 
 
-# TODO: decide how to store logs
-
-
-class LogMap(MutableMapping[Task, str]):
+class LogMap(MutableMapping[Task, "TaskLogs"]):
     def __init__(self, workspace: Workspace):
         self.workspace = workspace
 
-    def __getitem__(self, key: Task, /) -> str:
+    def __getitem__(self, key: Task, /) -> TaskLogs:
         resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
         return self.workspace._log_store[resolved_hash]
 
-    def __setitem__(self, key: Task, value: str, /) -> None:
+    def __setitem__(self, key: Task, value: TaskLogs, /) -> None:
         resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
         self.workspace._log_store[resolved_hash] = value
 
@@ -178,3 +198,8 @@ class LogMap(MutableMapping[Task, str]):
             return False
         resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
         return resolved_hash in self.workspace._log_store
+
+
+# TODO: append, read, support multiple runs
+class TaskLogs(ABC):
+    pass

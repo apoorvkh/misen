@@ -1,49 +1,48 @@
-from misen import Task, Workspace, task
-from misen.executor import distributable_tasks
+from misen import Task, task
 from misen.executors.slurm import SlurmExecutor
-from misen.workspaces.memory import MemoryWorkspace
+from misen.workspaces.disk import DiskWorkspace
 
 
-@task(cache=False)
+@task(id="add", cache=False)
 def add(a: float, b: float) -> float:
     print(f"Running add with {a}, {b}")
     return a + b
 
 
-@task(cache=True)
+@task(id="multiply", cache=True)
 def multiply(a: float, b: float) -> float:
-    print(f"Running multiply with {a}, {b}")
+    print(f"[CACHE] Running multiply with {a}, {b}")
     return a * b
 
 
-@task(cache=False)
+@task(id="square", cache=False)
 def square(x: float) -> float:
     print(f"Running square with {x}")
     return x * x
 
 
-@task(cache=True)
+@task(id="sum_list", cache=True)
 def sum_list(numbers: list[float]) -> float:
-    print(f"Running sum_list with {numbers}")
+    print(f"[CACHE] Running sum_list with {numbers}")
     return sum(numbers)
 
 
-@task(cache=False)
+@task(id="mean", cache=False)
 def mean(numbers: list[float]) -> float:
     print(f"Running mean with {numbers}")
     total = sum_list(numbers)
     return total / len(numbers)
 
 
-@task(cache=True)
+@task(id="variance", cache=True)
 def variance(numbers: list[float]) -> float:
-    print(f"Running variance with {numbers}")
+    print(f"[CACHE] Running variance with {numbers}")
     mean_val = mean(numbers)
     squared_diffs = [square(x - mean_val) for x in numbers]
     return sum_list(squared_diffs) / len(numbers)
 
 
-@task(cache=False)
+@task(id="generate_numbers", cache=False)
 def generate_numbers(n: int) -> list[float]:
     print(f"Running generate_numbers with {n}")
     return [float(i) for i in range(1, n + 1)]
@@ -73,9 +72,7 @@ def graph() -> Task:
 
 
 if __name__ == "__main__":
-    workspace = MemoryWorkspace(i=0)
+    workspace = DiskWorkspace()
     executor = SlurmExecutor()
-    graph_task = graph()
-    print(graph_task)
-    print(distributable_tasks(graph_task, workspace))
-    executor.submit(graph_task, workspace=workspace)
+    t = graph()
+    executor.submit(t, workspace=workspace)

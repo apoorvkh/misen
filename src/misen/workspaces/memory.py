@@ -3,25 +3,23 @@ from functools import cache
 from pathlib import Path
 
 from ..task import Task
-from ..workspace import (
-    Workspace,
-)
+from ..workspace import Workspace, WorkspaceParameters
 
 __all__ = ["MemoryWorkspace"]
 
 
+# TODO: note incompatibility with distributed executors
+
+
 class MemoryWorkspace(Workspace):
-    def __init__(self, i: int):
-        self.i = i
-        super().__init__(
-            resolved_hash_cache={},
-            result_hash_cache={},
-            result_cache={},
-            log_store={},
-        )
+    def __init__(self):
+        super().__init__(resolved_hash_cache={}, result_hash_cache={}, result_cache={}, log_store={})
+
+    def to_params(self) -> WorkspaceParameters:
+        return WorkspaceParameters(MemoryWorkspace)
 
     @cache
-    def _temp_workspace_dir() -> Path:
+    def _temp_workspace_dir(self) -> Path:
         d = Path(tempfile.gettempdir())
         d.mkdir(exist_ok=True)
         return d
