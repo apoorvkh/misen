@@ -4,13 +4,16 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Generator, Generic, MutableMapping, TypeVar
+from typing import TYPE_CHECKING, Generator, Generic, MutableMapping, TypeVar
 
 import lmdb
 from flufl.lock._lockfile import Lock
 
-from ..task import Hash, ResolvedTaskHash, ResultHash, Task, TaskHash
+from ..utils.hashes import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from ..workspace import Workspace, WorkspaceParameters
+
+if TYPE_CHECKING:
+    from ..task import Task
 
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)

@@ -17,10 +17,12 @@ import dill
 from misen_serialization import canonical_hash
 
 from .settings import Settings
-from .task import ResolvedTaskHash, ResultHash, SerializedResult, Task, TaskHash
+from .task import SerializedResult, Task
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 
 __all__ = ["Workspace"]
 

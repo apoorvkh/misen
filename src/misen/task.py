@@ -14,17 +14,16 @@ from typing import (
 )
 
 import dill
-from misen_serialization import canonical_hash
 from msgspec import Struct
-from typing_extensions import Self
 
 from .utils.graph import DependencyGraph
+from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from .executor import Executor
-    from .workspace import ResultHash, Workspace, WorkspaceParameters
+    from .workspace import Workspace, WorkspaceParameters
 
 __all__ = ["Task", "task", "resources"]
 
@@ -275,8 +274,6 @@ class Task(Generic[R]):
         workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(result)
 
         if self.properties.cache:
-            from .workspace import SerializedResult
-
             workspace.results[self] = SerializedResult(
                 deserializer=self.properties.from_bytes,
                 data=self.properties.to_bytes(result),
@@ -354,28 +351,6 @@ class Task(Generic[R]):
 
         workspace._result_hashes[task_hash] = result_hash
         return result_hash
-
-
-class Hash(int):
-    @classmethod
-    def from_object(cls, obj: object) -> Self:
-        return cls(canonical_hash(obj))
-
-    def encode(self) -> bytes:
-        return self.to_bytes(8, "big", signed=False)
-
-    @classmethod
-    def decode(cls, b: bytes) -> Self:
-        return cls.from_bytes(b, "big", signed=False)
-
-
-class TaskHash(Hash): ...
-
-
-class ResolvedTaskHash(Hash): ...
-
-
-class ResultHash(Hash): ...
 
 
 class SerializedResult(Generic[R]):
