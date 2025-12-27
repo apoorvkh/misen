@@ -2,8 +2,8 @@ import pytest
 
 from misen.executor import Executor, Job, WorkUnit
 from misen.task import Task, resources, task
-from misen.workspaces.memory import MemoryWorkspace
 from misen.workspace import TaskLogs, Workspace, WorkspaceParameters
+from misen.workspaces.memory import MemoryWorkspace
 
 
 class FakeJob(Job):

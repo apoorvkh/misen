@@ -1,42 +1,40 @@
 from misen import Task, task
-from misen.executor import WorkGraph
 from misen.executors.slurm import SlurmExecutor
 from misen.workspaces.disk import DiskWorkspace
-from misen.workspaces.memory import MemoryWorkspace
 
 
-@task(cache=False)
+@task(id="add", cache=False)
 def add(a: float, b: float) -> float:
     print(f"Running add with {a}, {b}")
     return a + b
 
 
-@task(cache=True)
+@task(id="multiply", cache=True)
 def multiply(a: float, b: float) -> float:
     print(f"[CACHE] Running multiply with {a}, {b}")
     return a * b
 
 
-@task(cache=False)
+@task(id="square", cache=False)
 def square(x: float) -> float:
     print(f"Running square with {x}")
     return x * x
 
 
-@task(cache=True)
+@task(id="sum_list", cache=True)
 def sum_list(numbers: list[float]) -> float:
     print(f"[CACHE] Running sum_list with {numbers}")
     return sum(numbers)
 
 
-@task(cache=False)
+@task(id="mean", cache=False)
 def mean(numbers: list[float]) -> float:
     print(f"Running mean with {numbers}")
     total = sum_list(numbers)
     return total / len(numbers)
 
 
-@task(cache=True)
+@task(id="variance", cache=True)
 def variance(numbers: list[float]) -> float:
     print(f"[CACHE] Running variance with {numbers}")
     mean_val = mean(numbers)
@@ -44,7 +42,7 @@ def variance(numbers: list[float]) -> float:
     return sum_list(squared_diffs) / len(numbers)
 
 
-@task(cache=False)
+@task(id="generate_numbers", cache=False)
 def generate_numbers(n: int) -> list[float]:
     print(f"Running generate_numbers with {n}")
     return [float(i) for i in range(1, n + 1)]
@@ -74,27 +72,7 @@ def graph() -> Task:
 
 
 if __name__ == "__main__":
-    t = graph()
-
-    # print_graph(g._dependency_graph())
-    #
-    gr = t._dependency_graph()
-
-    gr.pretty_print()
-
     workspace = DiskWorkspace()
-    WorkGraph(root=t, workspace=workspace).dependency_graph.pretty_print()
-
-    # WorkGraph(root=task, workspace=workspace)
-
-    # executor = SlurmExecutor()
-    # work_graph = executor.submit(graph(), workspace=workspace)
-
-    # _dependency_graph = work_graph.dependency_graph
-    # print_graph(_dependency_graph)
-    # print()
-
-    # for work in work_graph.order:
-    #     print()
-    #     print(work)
-    #     print_graph(work.graph)
+    executor = SlurmExecutor()
+    t = graph()
+    executor.submit(t, workspace=workspace)

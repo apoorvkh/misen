@@ -196,7 +196,7 @@ def test_iter_then_mutate_does_not_crash(m):
     first = next(it)
     m[Hash(4)] = Hash(40)  # write during active read cursor
     del m[Hash(2)]
-    rest = list(it)  # should not raise
+    rest = list(it)  # should not raise  # noqa: F841
     assert first in [Hash(1), Hash(2), Hash(3)]
 
 

@@ -52,3 +52,6 @@ src = ["src", "tests", "packages"]
 extend-select = ["I", "TCH"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ty.src]
+include = ["src"]
