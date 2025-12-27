@@ -4,6 +4,8 @@ from typing import Any, Generic, TypeVar
 
 import rustworkx as rx
 
+__all__ = ["DependencyGraph"]
+
 T = TypeVar("T")
 
 

@@ -122,6 +122,10 @@ def resources(
     return decorator
 
 
+# TODO: walk dependency structures for Tasks
+# TODO: signature(self.func).bind(...) is slow?
+
+
 class Task(Generic[R]):
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
         self.properties = getattr(
@@ -303,15 +307,22 @@ class Task(Generic[R]):
     def __hash__(self) -> int:
         return hash(int(self._task_hash()))
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Task):
+            return NotImplemented
+        return self._task_hash() == other._task_hash()
+
     def _task_hash(self) -> TaskHash:
         """A hash that represents the Task object using its constituent task graph."""
-        if not hasattr(self, "__task_hash"):
+        if not hasattr(self, "_cached_task_hash"):
             hashed_arguments = {
                 k: (v._task_hash() if isinstance(v, Task) else TaskHash.from_object(v))
                 for k, v in self._arguments_for_hashing.items()
             }
-            self.__task_hash = TaskHash.from_object((self.properties.id, self.properties.version, hashed_arguments))
-        return self.__task_hash
+            self._cached_task_hash = TaskHash.from_object(
+                (self.properties.id, self.properties.version, hashed_arguments)
+            )
+        return self._cached_task_hash
 
     def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""
