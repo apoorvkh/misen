@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from abc import ABC, ABCMeta, abstractmethod
 from collections.abc import MutableMapping
+from contextlib import contextmanager
 from importlib import import_module
 from typing import (
     TYPE_CHECKING,
@@ -93,6 +94,13 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         # public accessors to workspace data
         self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
         self.logs: MutableMapping[Task, TaskLogs] = LogMap(workspace=self)
+
+    @contextmanager
+    @abstractmethod
+    def acquire_lock(self, task: Task): ...
+
+    @abstractmethod
+    def is_locked(self, task: Task) -> bool: ...
 
     @staticmethod
     def auto(settings: Settings | None = None) -> "Workspace":

@@ -7,9 +7,9 @@ from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Generator, Generic, MutableMapping, TypeVar
 
 import lmdb
-from flufl.lock._lockfile import Lock
 
 from ..utils.hashes import Hash, ResolvedTaskHash, ResultHash, TaskHash
+from ..utils.lock import NFSLock
 from ..workspace import Workspace, WorkspaceParameters
 
 if TYPE_CHECKING:
@@ -35,15 +35,11 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
             {"_key_type": key_t, "_value_type": val_t, "__module__": cls.__module__},
         )
 
-    def __init__(self, database_path: Path, lifetime_s: int = 30, timeout_s: int | None = None):
+    def __init__(self, database_path: Path):
         if not hasattr(self, "_key_type") or not hasattr(self, "_value_type"):
             raise TypeError("Construct as LMDBMapping[KeyType, ValueType](...)")
 
-        self._lock = Lock(
-            lockfile=str(database_path.with_suffix(".lock")),
-            lifetime=lifetime_s,
-            default_timeout=timeout_s,
-        )
+        self._lock = NFSLock(lockfile=database_path.with_suffix(".lock"), lifetime=10, block=True)
 
         self.env = lmdb.Environment(  # ty:ignore[possibly-missing-attribute]
             str(database_path),
@@ -123,11 +119,7 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
     def _acquire_lock(self, key: ResultHash):
         _result_filepath = self._result_filepath(key)
         _result_filepath.parent.mkdir(parents=True, exist_ok=True)
-        with Lock(
-            lockfile=str(_result_filepath.with_suffix(".lock")),
-            lifetime=90,
-            default_timeout=None,
-        ):
+        with NFSLock(lockfile=_result_filepath.with_suffix(".lock"), lifetime=90, block=True):
             yield
 
     def __contains__(self, key: object) -> bool:
@@ -168,6 +160,7 @@ class DiskWorkspace(Workspace):
 
         self.directory.mkdir(exist_ok=True)
         (self.directory / "result_cache").mkdir(exist_ok=True)
+        (self.directory / "task_locks").mkdir(exist_ok=True)
 
         super().__init__(
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self.directory / "resolved_hash_cache.mdb"),
@@ -175,6 +168,21 @@ class DiskWorkspace(Workspace):
             result_cache=DiskResultCacheMapping(self.directory / "result_cache"),
             log_store={},
         )
+
+    @contextmanager
+    def acquire_lock(self, task: Task):
+        # zero-padded 16 hex chars (supports uint64)
+        _resolved_hash = task._resolved_hash(workspace=self)
+        _lockfile = self.directory / "task_locks" / f"{_resolved_hash:016x}.lock"
+
+        with NFSLock(lockfile=_lockfile, lifetime=30, refresh_interval=20, block=False):
+            yield
+
+    def is_locked(self, task: Task) -> bool:
+        # zero-padded 16 hex chars (supports uint64)
+        _resolved_hash = task._resolved_hash(workspace=self)
+        _lockfile = self.directory / "task_locks" / f"{_resolved_hash:016x}.lock"
+        return NFSLock(lockfile=_lockfile, lifetime=30, refresh_interval=20, block=False).is_locked
 
     def to_params(self) -> WorkspaceParameters:
         return WorkspaceParameters(DiskWorkspace, directory=self.directory)

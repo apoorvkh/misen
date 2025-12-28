@@ -143,6 +143,30 @@ class Task(Generic[R]):
         self.args = args
         self.kwargs = kwargs
 
+    def status(self, workspace: Workspace | None = None, executor: Executor | None = None):
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        if workspace.is_locked(task=self):
+            return "running"
+
+        if self.properties.cache is False:
+            if self._resolved_hash(workspace=workspace) in workspace._result_hash_cache:
+                return "completed"
+        elif self.is_cached(workspace=workspace):
+            return "completed"
+
+        if executor is None:
+            from .executor import Executor
+
+            executor = Executor.auto()
+
+        # queued?
+
+        return None
+
     def __repr__(self):
         return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]
 
@@ -259,19 +283,21 @@ class Task(Generic[R]):
             if len(uncached_deps) > 0:
                 raise RuntimeError(f"{self} has dependencies which must be computed and cached first: {uncached_deps}")
 
-        result = cast("Callable[..., R]", self.func)(
-            *tuple(
-                v.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
-                if isinstance(v, Task)
-                else v
-                for v in self.args
-            ),
-            **{
-                k: v.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
-                if isinstance(v, Task)
-                else v
-                for k, v in self.kwargs.items()
-            },
+        dep_results: dict[Task, Any] = {
+            t: t.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
+            for t in self._dependencies
+        }
+
+        if self.properties.cache:
+            task_lock = workspace.acquire_lock(task=self)
+            task_lock.__enter__()
+
+        def get_value(dep: Task | Any) -> Any:
+            return dep_results[dep] if isinstance(dep, Task) else dep
+
+        result = self.func(
+            *(get_value(v) for v in self.args),
+            **{k: get_value(v) for k, v in self.kwargs.items()},
         )
 
         resolved_hash = self._resolved_hash(workspace=workspace)
@@ -282,6 +308,8 @@ class Task(Generic[R]):
                 deserializer=self.properties.from_bytes,
                 data=self.properties.to_bytes(result),
             )
+
+            task_lock.__exit__(None, None, None)
 
         return result
 

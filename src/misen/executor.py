@@ -58,7 +58,7 @@ class Executor(Generic[JobT], ABC):
             jobs[w] = self._dispatch(
                 functools.partial(w.execute, workspace_params=workspace_params),
                 resources=w.resources,
-                dependencies={jobs[d] for d in w.dependencies},
+                dependencies={jobs[d] for d in w.dependencies if d in jobs},
             )
 
     @staticmethod
