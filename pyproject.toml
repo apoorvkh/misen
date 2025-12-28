@@ -27,7 +27,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "ruff==0.14.9",
-    "ty==0.0.2",
+    "ty==0.0.7",
     "pytest==8.3.3",
 ]
 slurm = ["submitit>=1.5.0", "setuptools"]
