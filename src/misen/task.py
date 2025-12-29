@@ -13,11 +13,11 @@ from typing import (
     cast,
 )
 
-import dill
 from msgspec import Struct
 
 from .utils.graph import DependencyGraph
 from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
+from .utils.serialization import from_bytes, to_bytes
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,15 +40,12 @@ class TaskProperties(Struct, frozen=True):
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
     serializable: bool = True
-    to_bytes: Callable[[Any], bytes] = dill.dumps
-    from_bytes: Callable[[bytes], Any] = dill.loads
+    to_bytes: Callable[[Any], bytes] = to_bytes
+    from_bytes: Callable[[bytes], Any] = from_bytes
 
     def __post_init__(self):
         if self.cache:
             assert self.serializable
-
-
-# TODO: maybe to/from bytes should default to canonical serialization?
 
 
 def task(
@@ -58,8 +55,8 @@ def task(
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
     serializable: bool = True,
-    to_bytes: Callable[[R], bytes] = dill.dumps,  # TODO: typing
-    from_bytes: Callable[[bytes], R] = dill.loads,
+    to_bytes: Callable[[R], bytes] = to_bytes,  # TODO: typing
+    from_bytes: Callable[[bytes], R] = from_bytes,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
