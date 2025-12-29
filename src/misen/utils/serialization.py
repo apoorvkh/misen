@@ -14,7 +14,7 @@ def to_bytes(obj: Any) -> bytes:
 
 
 def from_bytes(data: bytes) -> Any:
-    match data[0]:
+    match data[:1]:
         case b"M":
             return msgspec.msgpack.decode(data[1:])
         case b"D":
