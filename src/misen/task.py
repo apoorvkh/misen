@@ -18,7 +18,7 @@ from msgspec import Struct
 
 from .utils.graph import DependencyGraph
 from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
-from .utils.serialization import from_files, to_files
+from .utils.object_io import DefaultSerializer, Serializer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,8 +41,7 @@ class TaskProperties(Struct, frozen=True):
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
     serializable: bool = True
-    to_files: Callable[[Any, Path], None] = to_files
-    from_files: Callable[[Path], Any] = from_files
+    serializer: type[Serializer] = DefaultSerializer
 
     def __post_init__(self):
         if self.cache:
@@ -56,8 +55,7 @@ def task(
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
     serializable: bool = True,
-    to_files: Callable[[R, Path], None] = to_files,  # TODO: typing
-    from_files: Callable[[Path], R] = from_files,
+    serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
@@ -73,8 +71,7 @@ def task(
                 exclude=exclude,
                 defaults=defaults,
                 serializable=serializable,
-                to_files=to_files,
-                from_files=from_files,
+                serializer=serializer,
             ),
         )
         return func

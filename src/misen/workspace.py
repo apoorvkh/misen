@@ -151,7 +151,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             dir = self.workspace._result_store[result_hash]
         except Exception as e:
             raise KeyError(f"Result for task {key} not found in cache.") from e
-        return key.properties.from_files(dir)
+        return key.properties.serializer.load(dir)
 
     def __setitem__(self, key: Task[R], value: R, /) -> None:
         result_hash = key._result_hash(workspace=self.workspace)
@@ -159,7 +159,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             if result_hash not in self.workspace._result_store:
                 tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.hex()
                 tmp_dir.mkdir(parents=True, exist_ok=True)
-                key.properties.to_files(value, tmp_dir)
+                key.properties.serializer.save(value, tmp_dir)
                 self.workspace._result_store[result_hash] = tmp_dir
                 try:
                     shutil.rmtree(tmp_dir)
