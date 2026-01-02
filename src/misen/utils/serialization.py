@@ -1,22 +1,20 @@
+from pathlib import Path
 from typing import Any
 
 import dill
 import msgspec.msgpack
 
-__all__ = ["to_bytes", "from_bytes"]
+__all__ = ["to_files", "from_files"]
 
 
-def to_bytes(obj: Any) -> bytes:
+def to_files(obj: Any, dir: Path) -> None:
     try:
-        return b"M" + msgspec.msgpack.encode(obj)
+        (dir / "data.msgpack").write_bytes(msgspec.msgpack.encode(obj))
     except NotImplementedError:
-        return b"D" + dill.dumps(obj)
+        (dir / "data.dill").write_bytes(dill.dumps(obj))
 
 
-def from_bytes(data: bytes) -> Any:
-    match data[:1]:
-        case b"M":
-            return msgspec.msgpack.decode(data[1:])
-        case b"D":
-            return dill.loads(data[1:])
-    raise ValueError("Invalid data")
+def from_files(dir: Path) -> Any:
+    if (dir / "data.msgpack").exists():
+        return msgspec.msgpack.decode((dir / "data.msgpack").read_bytes())
+    return dill.loads((dir / "data.dill").read_bytes())

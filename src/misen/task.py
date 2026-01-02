@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+from contextlib import nullcontext
 from functools import cache
 from inspect import signature
 from typing import (
@@ -17,7 +18,7 @@ from msgspec import Struct
 
 from .utils.graph import DependencyGraph
 from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
-from .utils.serialization import from_bytes, to_bytes
+from .utils.serialization import from_files, to_files
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,8 +41,8 @@ class TaskProperties(Struct, frozen=True):
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
     serializable: bool = True
-    to_bytes: Callable[[Any], bytes] = to_bytes
-    from_bytes: Callable[[bytes], Any] = from_bytes
+    to_files: Callable[[Any, Path], None] = to_files
+    from_files: Callable[[Path], Any] = from_files
 
     def __post_init__(self):
         if self.cache:
@@ -55,8 +56,8 @@ def task(
     exclude: set[str] = set(),
     defaults: dict[str, Any] = {},
     serializable: bool = True,
-    to_bytes: Callable[[R], bytes] = to_bytes,  # TODO: typing
-    from_bytes: Callable[[bytes], R] = from_bytes,
+    to_files: Callable[[R, Path], None] = to_files,  # TODO: typing
+    from_files: Callable[[Path], R] = from_files,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
     # TODO: Callable has no __qualname__
@@ -72,8 +73,8 @@ def task(
                 exclude=exclude,
                 defaults=defaults,
                 serializable=serializable,
-                to_bytes=to_bytes,
-                from_bytes=from_bytes,
+                to_files=to_files,
+                from_files=from_files,
             ),
         )
         return func
@@ -105,14 +106,7 @@ def resources(
         setattr(
             func,
             "__task_resources__",
-            TaskResources(
-                time=time,
-                nodes=nodes,
-                memory=memory,
-                cpus=cpus,
-                gpus=gpus,
-                gpu_memory=gpu_memory,
-            ),
+            TaskResources(time=time, nodes=nodes, memory=memory, cpus=cpus, gpus=gpus, gpu_memory=gpu_memory),
         )
         return func
 
@@ -146,7 +140,7 @@ class Task(Generic[R]):
 
             workspace = Workspace.auto()
 
-        if workspace.is_locked(task=self):
+        if workspace.lock(namespace="task", key=self._resolved_hash(workspace=workspace).hex()).is_locked():
             return "running"
 
         if self.properties.cache is False:
@@ -267,8 +261,8 @@ class Task(Generic[R]):
                 workspace = workspace.construct()
 
         if self.properties.cache:
-            if (serialized_result := workspace.results.get(self)) is not None:
-                return serialized_result.value()
+            if (result := workspace.results.get(self)) is not None:
+                return result
 
             if not compute_if_uncached:
                 raise RuntimeError(f"{self} is not cached.")
@@ -285,28 +279,25 @@ class Task(Generic[R]):
             for t in self._dependencies
         }
 
-        if self.properties.cache:
-            task_lock = workspace.acquire_lock(task=self)
-            task_lock.__enter__()
-
         def get_value(dep: Task | Any) -> Any:
             return dep_results[dep] if isinstance(dep, Task) else dep
 
-        result = self.func(
-            *(get_value(v) for v in self.args),
-            **{k: get_value(v) for k, v in self.kwargs.items()},
-        )
-
         resolved_hash = self._resolved_hash(workspace=workspace)
-        workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(result)
 
-        if self.properties.cache:
-            workspace.results[self] = SerializedResult(
-                deserializer=self.properties.from_bytes,
-                data=self.properties.to_bytes(result),
+        with (
+            workspace.lock(namespace="task", key=resolved_hash.hex()).context(blocking=False)
+            if self.properties.cache
+            else nullcontext()
+        ):
+            result = self.func(
+                *(get_value(v) for v in self.args),
+                **{k: get_value(v) for k, v in self.kwargs.items()},
             )
 
-            task_lock.__exit__(None, None, None)
+            workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(result)
+
+            if self.properties.cache:
+                workspace.results[self] = result
 
         return result
 
@@ -387,12 +378,3 @@ class Task(Generic[R]):
 
         workspace._result_hashes[task_hash] = result_hash
         return result_hash
-
-
-class SerializedResult(Generic[R]):
-    def __init__(self, deserializer: Callable[[bytes], R], data: bytes):
-        self.deserializer = deserializer
-        self.data = data
-
-    def value(self) -> R:
-        return self.deserializer(self.data)

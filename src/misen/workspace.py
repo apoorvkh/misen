@@ -1,29 +1,29 @@
 from __future__ import annotations
 
 import inspect
+import shutil
 from abc import ABC, ABCMeta, abstractmethod
 from collections.abc import MutableMapping
-from contextlib import contextmanager
 from importlib import import_module
 from typing import (
     TYPE_CHECKING,
+    Any,
     Iterator,
     Literal,
     TypeAlias,
     TypeVar,
-    cast,
 )
 
-import dill
 from misen_serialization import canonical_hash
 
 from .settings import Settings
-from .task import SerializedResult, Task
+from .task import Task
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
+    from .utils.locks import LockLike
 
 __all__ = ["Workspace"]
 
@@ -70,7 +70,6 @@ class WorkspaceParameters:
 
 
 # TODO: support polling task status from Workspace
-# TODO: add task lock to Workspace
 
 
 class Workspace(ABC, metaclass=WorkspaceMeta):
@@ -78,7 +77,7 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         self,
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
-        result_cache: MutableMapping[ResultHash, bytes],
+        result_store: MutableMapping[ResultHash, Path],
         log_store: MutableMapping[ResolvedTaskHash, TaskLogs],
     ):
         # session-only (non-persistent) caches
@@ -88,19 +87,15 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
         # workspace caches
         self._resolved_hash_cache = resolved_hash_cache
         self._result_hash_cache = result_hash_cache
-        self._result_cache = result_cache
+        self._result_store = result_store
         self._log_store = log_store
 
         # public accessors to workspace data
-        self.results: MutableMapping[Task, SerializedResult] = ResultMap(workspace=self)
-        self.logs: MutableMapping[Task, TaskLogs] = LogMap(workspace=self)
-
-    @contextmanager
-    @abstractmethod
-    def acquire_lock(self, task: Task): ...
+        self.results = ResultMap(workspace=self)
+        self.logs = LogMap(workspace=self)
 
     @abstractmethod
-    def is_locked(self, task: Task) -> bool: ...
+    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike: ...
 
     @staticmethod
     def auto(settings: Settings | None = None) -> "Workspace":
@@ -138,36 +133,51 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
                 return getattr(import_module(module), class_name)
 
     @abstractmethod
+    def get_temp_dir(self) -> Path: ...
+
+    @abstractmethod
     def get_work_dir(self, task: Task) -> Path:
         """Return a directory where the task can store working files. E.g. to cache intermediate results."""
         ...
 
 
-class ResultMap(MutableMapping[Task, SerializedResult]):
+class ResultMap(MutableMapping[Task[Any], Any]):
     def __init__(self, workspace: Workspace):
         self.workspace = workspace
 
-    def __getitem__(self, key: Task[R], /) -> SerializedResult[R]:
+    def __getitem__(self, key: Task[R], /) -> R:
         try:
             result_hash = key._result_hash(workspace=self.workspace)
-            result = self.workspace._result_cache[result_hash]
+            dir = self.workspace._result_store[result_hash]
         except Exception as e:
             raise KeyError(f"Result for task {key} not found in cache.") from e
-        return cast("SerializedResult", dill.loads(result))
+        return key.properties.from_files(dir)
 
-    def __setitem__(self, key: Task[R], value: SerializedResult[R], /) -> None:
+    def __setitem__(self, key: Task[R], value: R, /) -> None:
         result_hash = key._result_hash(workspace=self.workspace)
-        self.workspace._result_cache[result_hash] = dill.dumps(value)
+        with self.workspace.lock(namespace="result", key=result_hash.hex()).context(blocking=True, timeout=None):
+            if result_hash not in self.workspace._result_store:
+                tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.hex()
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                key.properties.to_files(value, tmp_dir)
+                self.workspace._result_store[result_hash] = tmp_dir
+                try:
+                    shutil.rmtree(tmp_dir)
+                except FileNotFoundError:
+                    pass
 
-    def __delitem__(self, key: Task, /) -> None:
-        result_hash = key._result_hash(workspace=self.workspace)
-        del self.workspace._result_cache[result_hash]
+    def __delitem__(self, key: Task[R], /) -> None:
+        try:
+            result_hash = key._result_hash(workspace=self.workspace)
+            del self.workspace._result_store[result_hash]
+        except Exception as e:
+            raise KeyError(f"Result for task {key} not found in cache.") from e
 
     def __iter__(self) -> Iterator[Task]:
         raise NotImplementedError
 
     def __len__(self) -> int:
-        return len(self.workspace._result_cache)
+        return len(self.workspace._result_store)
 
     def __contains__(self, key: object, /) -> bool:
         if not isinstance(key, Task):
@@ -176,7 +186,7 @@ class ResultMap(MutableMapping[Task, SerializedResult]):
             result_hash = key._result_hash(workspace=self.workspace)
         except RuntimeError:
             return False
-        return result_hash in self.workspace._result_cache
+        return result_hash in self.workspace._result_store
 
 
 class LogMap(MutableMapping[Task, "TaskLogs"]):

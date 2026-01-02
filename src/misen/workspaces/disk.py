@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
+import shutil
+import tempfile
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import TYPE_CHECKING, Generator, Generic, MutableMapping, TypeVar
+from typing import TYPE_CHECKING, Generator, Generic, Literal, MutableMapping, TypeVar
 
 import lmdb
 
 from ..utils.hashes import Hash, ResolvedTaskHash, ResultHash, TaskHash
-from ..utils.lock import NFSLock
+from ..utils.locks import LockLike, NFSLock
 from ..workspace import Workspace, WorkspaceParameters
 
 if TYPE_CHECKING:
@@ -17,10 +17,6 @@ if TYPE_CHECKING:
 
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
-
-
-# TODO: determine that systems have synchronized clocks
-# TODO: should locks be refreshing?
 
 
 class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
@@ -39,7 +35,7 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
         if not hasattr(self, "_key_type") or not hasattr(self, "_value_type"):
             raise TypeError("Construct as LMDBMapping[KeyType, ValueType](...)")
 
-        self._lock = NFSLock(lockfile=database_path.with_suffix(".lock"), lifetime=10, block=True)
+        self.lock = NFSLock(database_path.with_suffix(".lock"), lifetime=10)
 
         self.env = lmdb.Environment(  # ty:ignore[possibly-missing-attribute]
             str(database_path),
@@ -72,81 +68,59 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
 
     def __setitem__(self, key: KT, value: VT) -> None:
         _key, _value = key.encode(), value.encode()
-        with self._lock:
+        with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
                 txn.put(_key, _value)
 
     def __delitem__(self, key: KT) -> None:
         _key = key.encode()
-        with self._lock:
+        with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
                 success = txn.delete(_key)
         if not success:
             raise KeyError(key)
 
     def clear(self) -> None:
-        with self._lock:
+        with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
                 for _k, _ in txn.cursor():
                     txn.delete(_k)
 
 
-def _atomic_write(filepath: Path, data: bytes) -> None:
-    tmp_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            mode="wb", dir=filepath.parent, prefix=f"{filepath.name}.", suffix=".tmp", delete=False
-        ) as f:
-            tmp_path = Path(f.name)
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, filepath)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
-
-
-class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
+class DiskResultStore(MutableMapping[ResultHash, Path]):
     def __init__(self, directory: Path):
         self.directory = directory
 
-    def _result_filepath(self, key: ResultHash) -> Path:
-        key_hex = f"{key:016x}"  # zero-padded 16 hex chars (supports uint64)
-        return self.directory / key_hex[:2] / f"{key_hex}.dill"
-
-    @contextmanager
-    def _acquire_lock(self, key: ResultHash):
-        _result_filepath = self._result_filepath(key)
-        _result_filepath.parent.mkdir(parents=True, exist_ok=True)
-        with NFSLock(lockfile=_result_filepath.with_suffix(".lock"), lifetime=90, block=True):
-            yield
+    def _result_dir_path(self, key: ResultHash) -> Path:
+        return self.directory / key.hex()[:2] / key.hex()
 
     def __contains__(self, key: object) -> bool:
-        return isinstance(key, ResultHash) and self._result_filepath(key).exists()
+        return isinstance(key, ResultHash) and self._result_dir_path(key).exists()
 
-    def __getitem__(self, key: ResultHash) -> bytes:
-        try:
-            with open(self._result_filepath(key), "rb") as f:
-                return f.read()
-        except FileNotFoundError:
+    def __getitem__(self, key: ResultHash) -> Path:
+        result_dir_path = self._result_dir_path(key)
+        if not result_dir_path.exists():
             raise KeyError(key)
+        return result_dir_path
 
-    def __setitem__(self, key: ResultHash, value: bytes):
-        with self._acquire_lock(key):
-            _filepath = self._result_filepath(key)
-            if not _filepath.exists():
-                _atomic_write(_filepath, value)
+    def __setitem__(self, key: ResultHash, value: Path):
+        result_dir_path = self._result_dir_path(key)
+        if not result_dir_path.exists():
+            shutil.move(value, result_dir_path)
 
     def __delitem__(self, key: ResultHash) -> None:
-        with self._acquire_lock(key):
-            try:
-                self._result_filepath(key).unlink()
-            except FileNotFoundError:
-                raise KeyError(key)
+        result_dir_path = self._result_dir_path(key)
+        if not result_dir_path.exists():
+            raise KeyError(key)
+        # atomic deletion
+        trash_dir = tempfile.mkdtemp(
+            dir=os.path.dirname(result_dir_path), prefix=f"{os.path.basename(result_dir_path)}.", suffix=".trash"
+        )
+        shutil.move(result_dir_path, trash_dir)
+        shutil.rmtree(trash_dir)
 
     def __iter__(self):
-        for p in self.directory.glob(("[0-9a-f]" * 2) + "/" + ("[0-9a-f]" * 16) + ".dill"):
+        for p in self.directory.glob(("[0-9a-f]" * 2) + "/" + ("[0-9a-f]" * 16)):
             if (stem := p.stem)[:2] == p.parent.name:
                 yield ResultHash(stem, base=16)
 
@@ -154,41 +128,39 @@ class DiskResultCacheMapping(MutableMapping[ResultHash, bytes]):
         return sum(1 for _ in self)
 
 
+# TODO: determine that systems have synchronized clocks
+
+
 class DiskWorkspace(Workspace):
     def __init__(self, directory: Path = Path(".misen")):
         self.directory = directory
 
         self.directory.mkdir(exist_ok=True)
-        (self.directory / "result_cache").mkdir(exist_ok=True)
-        (self.directory / "task_locks").mkdir(exist_ok=True)
+        self.get_temp_dir().mkdir(parents=True, exist_ok=True)
+        (self.directory / "work").mkdir(parents=True, exist_ok=True)
+        (self.get_temp_dir() / "locks" / "task").mkdir(parents=True, exist_ok=True)
+        (self.get_temp_dir() / "locks" / "result").mkdir(parents=True, exist_ok=True)
 
         super().__init__(
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self.directory / "resolved_hash_cache.mdb"),
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self.directory / "result_hash_cache.mdb"),
-            result_cache=DiskResultCacheMapping(self.directory / "result_cache"),
+            result_store=DiskResultStore(self.directory / "result_store"),
             log_store={},
         )
 
-    @contextmanager
-    def acquire_lock(self, task: Task):
-        # zero-padded 16 hex chars (supports uint64)
-        _resolved_hash = task._resolved_hash(workspace=self)
-        _lockfile = self.directory / "task_locks" / f"{_resolved_hash:016x}.lock"
-
-        with NFSLock(lockfile=_lockfile, lifetime=30, refresh_interval=20, block=False):
-            yield
-
-    def is_locked(self, task: Task) -> bool:
-        # zero-padded 16 hex chars (supports uint64)
-        _resolved_hash = task._resolved_hash(workspace=self)
-        _lockfile = self.directory / "task_locks" / f"{_resolved_hash:016x}.lock"
-        return NFSLock(lockfile=_lockfile, lifetime=30, refresh_interval=20, block=False).is_locked
+    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
+        return NFSLock(
+            lockfile=(self.get_temp_dir() / "locks" / namespace / f"{key}.lock"), lifetime=30, refresh_interval=20
+        )
 
     def to_params(self) -> WorkspaceParameters:
         return WorkspaceParameters(DiskWorkspace, directory=self.directory)
 
+    def get_temp_dir(self) -> Path:
+        return self.directory / "tmp"
+
     def get_work_dir(self, task: Task) -> Path:
-        key_hex = f"{task._resolved_hash(workspace=self):016x}"  # zero-padded 16 hex chars
+        key_hex = task._resolved_hash(workspace=self).hex()
         d = self.directory / "work" / key_hex[:2] / f"{key_hex}"
         d.mkdir(exist_ok=True)
         return d

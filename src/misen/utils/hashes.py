@@ -16,6 +16,9 @@ class Hash(int):
     def decode(cls, b: bytes) -> Self:
         return cls.from_bytes(b, "big", signed=False)
 
+    def hex(self) -> str:
+        return f"{self:016x}"
+
 
 class TaskHash(Hash): ...
 

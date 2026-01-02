@@ -89,7 +89,7 @@ def test_iter_yields_only_valid_sharded_paths(cache: DiskResultCacheMapping, tmp
 
     # Create a bogus file in the right shape but wrong shard prefix (should be ignored)
     # e.g. key starts with "aa" but put it under "bb/"
-    bad_key_hex = f"{int(k1):016x}"
+    bad_key_hex = k1.hex()
     wrong_dir = cache.directory / "bb"
     wrong_dir.mkdir(parents=True, exist_ok=True)
     (wrong_dir / f"{bad_key_hex}.dill").write_bytes(b"bogus")
