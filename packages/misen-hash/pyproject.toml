@@ -3,7 +3,7 @@ requires = ["uv_build"]
 build-backend = "uv_build"
 
 [project]
-name = "misen-serialization"
+name = "misen-hash"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [

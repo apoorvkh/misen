@@ -1,4 +1,4 @@
-from misen_serialization import canonical_hash
+from misen_hash import canonical_hash
 from typing_extensions import Self
 
 __all__ = ["Hash", "TaskHash", "ResolvedTaskHash", "ResultHash", "short_hash"]
@@ -17,7 +17,7 @@ class Hash(int):
         return cls.from_bytes(b, "big", signed=False)
 
     def hex(self) -> str:
-        return f"{self:016x}"
+        return format(self, "016x")
 
 
 class TaskHash(Hash): ...

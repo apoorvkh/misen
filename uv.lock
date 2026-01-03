@@ -10,7 +10,7 @@ resolution-markers = [
 [manifest]
 members = [
     "misen",
-    "misen-serialization",
+    "misen-hash",
 ]
 
 [[package]]
@@ -561,7 +561,7 @@ dependencies = [
     { name = "dill" },
     { name = "flufl-lock" },
     { name = "lmdb" },
-    { name = "misen-serialization" },
+    { name = "misen-hash" },
     { name = "msgspec" },
     { name = "rustworkx" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
@@ -590,7 +590,7 @@ requires-dist = [
     { name = "dill", specifier = ">=0.3.6" },
     { name = "flufl-lock", specifier = ">=8.2.0" },
     { name = "lmdb", specifier = ">=1.7.5" },
-    { name = "misen-serialization", editable = "packages/misen-serialization" },
+    { name = "misen-hash", editable = "packages/misen-hash" },
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "rustworkx", specifier = ">=0.15.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1.0" },
@@ -615,9 +615,9 @@ slurm = [
 ]
 
 [[package]]
-name = "misen-serialization"
+name = "misen-hash"
 version = "0.1.0"
-source = { editable = "packages/misen-serialization" }
+source = { editable = "packages/misen-hash" }
 dependencies = [
     { name = "dill" },
     { name = "msgspec" },

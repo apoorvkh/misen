@@ -14,7 +14,7 @@ from typing import (
     TypeVar,
 )
 
-from misen_serialization import canonical_hash
+from misen_hash import canonical_hash
 
 from .settings import Settings
 from .task import Task
