@@ -64,6 +64,8 @@ class Executor(Generic[JobT], ABC):
                 dependencies={jobs[d] for d in w.dependencies if d in jobs},
             )
 
+        return jobs
+
     @staticmethod
     def auto(settings: Settings | None = None) -> Executor:
         if settings is None:
@@ -93,7 +95,8 @@ class Executor(Generic[JobT], ABC):
 
 
 class Job(ABC):
-    pass
+    @abstractmethod
+    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
 
 
 class WorkUnit:
