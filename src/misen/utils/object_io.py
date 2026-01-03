@@ -1,11 +1,7 @@
-import importlib.metadata
-import importlib.util
-import mmap
-import pickletools
 from abc import ABC, abstractmethod
 from pathlib import Path
 from pickle import UnpicklingError
-from typing import Any, BinaryIO, Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import dill
 import msgspec.msgpack
@@ -13,6 +9,8 @@ import msgspec.msgpack
 __all__ = ["Serializer", "DefaultSerializer"]
 
 T = TypeVar("T")
+
+# TODO: record object dependencies ; if error, check mismatch
 
 
 class Serializer(ABC, Generic[T]):
@@ -25,6 +23,9 @@ class Serializer(ABC, Generic[T]):
     @staticmethod
     @abstractmethod
     def load(dir: Path) -> T: ...
+
+
+# TODO: add cases for other formats
 
 
 class DefaultSerializer(Serializer[Any]):
@@ -45,6 +46,11 @@ class DefaultSerializer(Serializer[Any]):
             raise ValueError(f"Failed to load object from {dir}")
             # TODO: compare environment against _dill_required_libs
 
+
+# import importlib.util
+# import mmap
+# import pickletools
+# from typing import BinaryIO
 
 # def dill_dump_with_required_modules(obj: Any, file: BinaryIO, *, protocol: int | None = None) -> set[str]:
 #     """

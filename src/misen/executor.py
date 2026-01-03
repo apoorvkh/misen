@@ -37,6 +37,9 @@ ExecutorType: TypeAlias = str | Literal["auto", "slurm"]
 JobT = TypeVar("JobT", bound="Job")
 
 
+# TODO: submit array?
+
+
 class Executor(Generic[JobT], ABC):
     """Abstract interface for implementing an Executor for a specific backend."""
 

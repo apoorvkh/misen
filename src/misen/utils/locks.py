@@ -10,7 +10,7 @@ from typing_extensions import Self
 __all__ = ["LockUnavailableError", "LockLike", "NFSLock"]
 
 
-class LockUnavailableError(TimeoutError): ...
+class LockUnavailableError(TimeoutError): ...  # TODO: raise this in NFSLock?
 
 
 class LockLike(Protocol):
