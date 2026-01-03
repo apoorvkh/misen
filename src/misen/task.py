@@ -9,6 +9,7 @@ from typing import (
     Any,
     Callable,
     Generic,
+    Literal,
     ParamSpec,
     TypeVar,
     cast,
@@ -131,7 +132,9 @@ class Task(Generic[R]):
         self.args = args
         self.kwargs = kwargs
 
-    def status(self, workspace: Workspace | None = None, executor: Executor | None = None):
+    def status(
+        self, workspace: Workspace | None = None, executor: Executor | None = None
+    ) -> Literal["pending", "running", "done", "failed", "unknown"]:
         if workspace is None:
             from .workspace import Workspace
 
@@ -140,20 +143,20 @@ class Task(Generic[R]):
         if workspace.lock(namespace="task", key=self._resolved_hash(workspace=workspace).hex()).is_locked():
             return "running"
 
-        if self.properties.cache is False:
-            if self._resolved_hash(workspace=workspace) in workspace._result_hash_cache:
-                return "completed"
-        elif self.is_cached(workspace=workspace):
-            return "completed"
+        if (
+            self.properties.cache is False and self._resolved_hash(workspace=workspace) in workspace._result_hash_cache
+        ) or (self.properties.cache and self.is_cached(workspace=workspace)):
+            return "done"
 
-        if executor is None:
-            from .executor import Executor
+        # TODO: implement task-job lookup
+        # if executor is None:
+        #     from .executor import Executor
 
-            executor = Executor.auto()
+        #     executor = Executor.auto()
 
-        # queued?
+        # queued or failed?
 
-        return None
+        return "unknown"
 
     def __repr__(self):
         return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]

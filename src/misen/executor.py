@@ -37,6 +37,11 @@ ExecutorType: TypeAlias = str | Literal["auto", "slurm"]
 JobT = TypeVar("JobT", bound="Job")
 
 
+class Job(ABC):
+    @abstractmethod
+    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
+
+
 # TODO: submit array?
 
 
@@ -92,11 +97,6 @@ class Executor(Generic[JobT], ABC):
             case _:
                 module, class_name = t.split(":", maxsplit=1)
                 return getattr(import_module(module), class_name)
-
-
-class Job(ABC):
-    @abstractmethod
-    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
 
 
 class WorkUnit:
