@@ -20,10 +20,6 @@ __all__ = ["Experiment"]
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
 
-ExecutorT = TypeVar("ExecutorT", bound=Executor)
-WorkspaceT = TypeVar("WorkspaceT", bound=Workspace)
-ExperimentT = TypeVar("ExperimentT", bound="Experiment")
-
 
 class Experiment(Generic[TasksT], Struct, frozen=True):
     @abstractmethod
@@ -49,8 +45,8 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         _fields_with_defaults = [
             ("command", Literal["run", "count"], "run"),
             ("settings_file", Path, DEFAULT_SETTINGS_FILE),
-            ("executor_type", ExecutorType, "auto"),
-            ("workspace_type", WorkspaceType, "auto"),
+            ("executor_type", ExecutorType | Literal["auto"], "auto"),
+            ("workspace_type", WorkspaceType | Literal["auto"], "auto"),
         ]
 
         args, _ = tyro.cli(
