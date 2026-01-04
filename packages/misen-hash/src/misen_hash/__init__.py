@@ -1,77 +1,69 @@
-import io
-from pickle import UnpicklingError
-from typing import Any
+from abc import ABC, abstractmethod
+from typing import Any, Callable, cast
 
-import dill
-import msgspec.msgpack
-from xxhash import xxh3_64, xxh3_64_intdigest
+from .utils import hash_msgpack
 
-from ._attrs import attrs_dictview, is_attrs_class
-from ._builtins import (
-    builtin_primitive_value,
-    dataclass_dictview,
-    hash_collection_items,
-    is_builtin_collection,
-    is_builtin_primitive,
-    is_dataclass,
-)
-from ._msgspec import is_msgspec_struct, msgspec_struct_dictview
-from ._torch import is_torch_object, normalize_torch_object
-
-# TODO: numpy, pandas, polars, arrow, PyTorch datasets, HF datasets
+__all__ = ["canonical_hash", "PrimitiveHandler", "CollectionHandler"]
 
 
-def msgpack_hash(obj: Any) -> int:
-    return xxh3_64_intdigest(msgspec.msgpack.encode(obj, order="sorted"), seed=0)
+def canonical_hash(obj: Any) -> int:
+    obj_type = type(obj).__qualname__
+    obj_hash = _lookup_handler(obj).digest(obj, element_hash=canonical_hash)
+    return hash_msgpack((obj_type, obj_hash))
 
 
-class _HashWriter(io.RawIOBase):
-    """File-like sink that updates an xxhash object with whatever is written."""
-
-    def __init__(self) -> None:
-        self._h = xxh3_64(seed=0)
-
-    def writable(self) -> bool:
-        return True
-
-    def write(self, b: bytes | bytearray | memoryview) -> int:
-        mv = memoryview(b)
-        self._h.update(mv)
-        return mv.nbytes
-
-    def intdigest(self) -> int:
-        return self._h.intdigest()
+## Handler ABCs
 
 
-def hash1(obj: Any) -> int:
-    if is_builtin_primitive(obj):
-        return msgpack_hash(builtin_primitive_value(obj))
-    if is_builtin_collection(obj):
-        return msgpack_hash(hash_collection_items(obj, hash_fn=hash2))
-    elif is_dataclass(obj):
-        return hash1(dataclass_dictview(obj))
-    elif is_msgspec_struct(obj):
-        return hash1(msgspec_struct_dictview(obj))
-    elif is_attrs_class(obj):
-        return hash1(attrs_dictview(obj))
-    elif is_torch_object(obj):
-        return hash1(normalize_torch_object(obj))
-    elif hasattr(obj, "__getstate__"):
-        return hash1(obj.__getstate__())
+class Handler(ABC):
+    @staticmethod
+    @abstractmethod
+    def match(obj: Any) -> bool: ...
 
-    try:
-        hash_sink = _HashWriter()
-        dill.dump(obj, hash_sink, protocol=5)
-        return hash_sink.intdigest()
-        # print logger warning to flag dill
-    except UnpicklingError as e:
-        raise ValueError("Unsupported type for hashing") from e
+    @staticmethod
+    @abstractmethod
+    def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int: ...
 
 
-def hash2(obj: Any) -> int:
-    return msgpack_hash((type(obj).__qualname__, hash1(obj)))
+class PrimitiveHandler(Handler):
+    @staticmethod
+    @abstractmethod
+    def digest(obj: Any, element_hash: None = None) -> int: ...
 
 
-canonical_hash = hash2
+class CollectionHandler(Handler):
+    @staticmethod
+    @abstractmethod
+    def elements(obj: Any) -> list[Any] | set[Any]: ...
 
-__all__ = ["hash2", "canonical_hash"]
+    @classmethod
+    def digest(cls, obj: Any, element_hash: Callable[[Any], int]) -> int:
+        elements = cls.elements(obj)
+        if isinstance(elements, list):
+            return hash_msgpack([element_hash(i) for i in elements])
+        elif isinstance(elements, set):
+            return hash_msgpack({element_hash(i) for i in elements})
+        raise ValueError(f"Unsupported collection type: {type(elements)}")
+
+
+## Handlers by object type
+
+from ._builtins import builtin_handlers, builtin_handlers_by_type  # noqa: E402
+from ._dill import DillHandler  # noqa: E402
+from ._torch import TorchModuleHandler, TorchTensorHandler  # noqa: E402
+
+_handlers_type_cache: dict[type[Any], Handler] = {**builtin_handlers_by_type}
+
+
+def _lookup_handler(obj: Any) -> Handler:
+    obj_type = type(obj)
+
+    if obj_type not in _handlers_type_cache:
+        for hash_cls in cast("list[Handler]", builtin_handlers + [TorchTensorHandler, TorchModuleHandler]):
+            if hash_cls.match(obj):
+                _handlers_type_cache[obj_type] = hash_cls
+                break
+        else:
+            _handlers_type_cache[obj_type] = DillHandler
+
+    return _handlers_type_cache[obj_type]

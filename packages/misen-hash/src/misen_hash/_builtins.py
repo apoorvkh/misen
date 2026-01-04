@@ -4,113 +4,259 @@ import decimal
 import enum
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
 from typing import Any
 
-__all__ = [
-    "dataclass_dictview",
-    "hash_collection_items",
-    "is_builtin_collection",
-    "is_builtin_primitive",
-    "builtin_primitive_value",
-    "is_dataclass",
-]
+from . import CollectionHandler, Handler, PrimitiveHandler
+from .utils import hash_msgpack
+
+__all__ = ["builtin_handlers", "builtin_handlers_by_type"]
 
 
-def is_builtin_primitive(obj: Any) -> bool:
-    return isinstance(
-        obj,
-        (
-            type(None),
-            bool,
-            int,
-            float,
-            str,
-            bytes,
-            bytearray,
-            datetime.datetime,
-            datetime.date,
-            datetime.time,
-            datetime.timedelta,
-            uuid.UUID,
-            decimal.Decimal,
-            enum.Enum,
-        ),
-    )
+class NoneHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, type(None))
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(obj)
 
 
-def builtin_primitive_value(obj: Any) -> Any:
-    if isinstance(obj, type(None)):
+class EnumHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, enum.Enum)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(obj.value)
+
+
+class BoolHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, bool)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(bool(obj))
+
+
+class IntHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, int) and not isinstance(obj, (bool, enum.Enum))
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(int(obj))
+
+
+class FloatHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, float)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(float(obj))
+
+
+class StrHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, str)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(str(obj))
+
+
+class BytearrayHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, bytearray)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(bytearray(obj))
+
+
+class BytesHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, bytes)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(bytes(obj))
+
+
+class DatetimeHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, datetime.datetime)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(
+            datetime.datetime(
+                obj.year,
+                obj.month,
+                obj.day,
+                obj.hour,
+                obj.minute,
+                obj.second,
+                obj.microsecond,
+                tzinfo=obj.tzinfo,
+                fold=getattr(obj, "fold", 0),
+            )
+        )
+
+
+class DateHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, datetime.date) and not isinstance(obj, datetime.datetime)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(datetime.date(obj.year, obj.month, obj.day))
+
+
+class TimeHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, datetime.time)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(
+            datetime.time(
+                obj.hour,
+                obj.minute,
+                obj.second,
+                obj.microsecond,
+                tzinfo=obj.tzinfo,
+                fold=getattr(obj, "fold", 0),
+            )
+        )
+
+
+class TimedeltaHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, datetime.timedelta)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(datetime.timedelta(days=obj.days, seconds=obj.seconds, microseconds=obj.microseconds))
+
+
+class UUIDHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, uuid.UUID)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(uuid.UUID(bytes=obj.bytes))
+
+
+class DecimalHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, decimal.Decimal)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: None = None) -> int:
+        return hash_msgpack(decimal.Decimal(str(obj)))
+
+
+class ListHandler(CollectionHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, (list, tuple, set, frozenset))
+
+    @staticmethod
+    def elements(obj: Any) -> list[Any] | set[Any]:
+        if isinstance(obj, tuple):
+            return list(obj)
+        if isinstance(obj, frozenset):
+            return set(obj)
         return obj
 
-    if isinstance(obj, enum.Enum):
-        return obj.value
 
-    # ensure int check is after {enum.Enum, bool}
-    for _type in (bool, int, float, str, bytearray, bytes):
-        if isinstance(obj, _type):
-            return _type(obj)
+class OrderedDictHandler(CollectionHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, OrderedDict)
 
-    if isinstance(obj, datetime.datetime):
-        return datetime.datetime(
-            obj.year,
-            obj.month,
-            obj.day,
-            obj.hour,
-            obj.minute,
-            obj.second,
-            obj.microsecond,
-            tzinfo=obj.tzinfo,
-            fold=getattr(obj, "fold", 0),
-        )
-
-    if isinstance(obj, datetime.date):
-        return datetime.date(obj.year, obj.month, obj.day)
-
-    if isinstance(obj, datetime.time):
-        return datetime.time(
-            obj.hour,
-            obj.minute,
-            obj.second,
-            obj.microsecond,
-            tzinfo=obj.tzinfo,
-            fold=getattr(obj, "fold", 0),
-        )
-
-    if isinstance(obj, datetime.timedelta):
-        return datetime.timedelta(days=obj.days, seconds=obj.seconds, microseconds=obj.microseconds)
-
-    if isinstance(obj, uuid.UUID):
-        return uuid.UUID(bytes=obj.bytes)
-
-    if isinstance(obj, decimal.Decimal):
-        return decimal.Decimal(str(obj))
-
-    raise TypeError(f"Unsupported type: {type(obj)!r}")
+    @staticmethod
+    def elements(obj: Any) -> list[Any]:
+        return list(obj.items())
 
 
-def is_builtin_collection(obj: Any) -> bool:
-    return isinstance(obj, (list, tuple, set, frozenset, dict))
+class DictHandler(CollectionHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, dict) and not isinstance(obj, OrderedDict)
+
+    @staticmethod
+    def elements(obj: Any) -> set[Any]:
+        return set(obj.items())
 
 
-def hash_collection_items(
-    obj: list | tuple | set | frozenset | dict, hash_fn: Callable[[Any], int]
-) -> list[int] | set[int] | dict[str, int]:
-    if isinstance(obj, (list, tuple)):
-        return [hash_fn(o) for o in obj]
-    if isinstance(obj, (set, frozenset)):
-        return {hash_fn(o) for o in obj}
-    if isinstance(obj, OrderedDict):
-        return [hash_fn(i) for k, v in obj.items() for i in (k, v)]
-    if isinstance(obj, dict):
-        return {str(hash_fn(k)): hash_fn(v) for k, v in obj.items()}
+class DataclassHandler(CollectionHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return dataclasses.is_dataclass(obj)
 
-    return obj
+    @staticmethod
+    def elements(obj: Any) -> set[Any]:
+        return {(f.name, getattr(obj, f.name)) for f in dataclasses.fields(obj)}
 
 
-def is_dataclass(obj_type: type[Any]) -> bool:
-    return dataclasses.is_dataclass(obj_type)
+builtin_handlers = [
+    NoneHandler,
+    EnumHandler,
+    BoolHandler,
+    IntHandler,
+    FloatHandler,
+    StrHandler,
+    BytearrayHandler,
+    BytesHandler,
+    DatetimeHandler,
+    DateHandler,
+    TimeHandler,
+    TimedeltaHandler,
+    UUIDHandler,
+    DecimalHandler,
+    ListHandler,
+    OrderedDictHandler,
+    DictHandler,
+    DataclassHandler,
+]
 
-
-def dataclass_dictview(dataclass_obj) -> dict[str, Any]:
-    return {f.name: getattr(dataclass_obj, f.name) for f in dataclasses.fields(dataclass_obj)}
+builtin_handlers_by_type: dict[type[Any], Handler] = {
+    None.__class__: NoneHandler,
+    enum.Enum: EnumHandler,
+    enum.IntEnum: EnumHandler,
+    enum.Flag: EnumHandler,
+    enum.IntFlag: EnumHandler,
+    bool: BoolHandler,
+    int: IntHandler,
+    float: FloatHandler,
+    str: StrHandler,
+    bytearray: BytearrayHandler,
+    bytes: BytesHandler,
+    datetime.datetime: DatetimeHandler,
+    datetime.date: DateHandler,
+    datetime.time: TimeHandler,
+    datetime.timedelta: TimedeltaHandler,
+    uuid.UUID: UUIDHandler,
+    decimal.Decimal: DecimalHandler,
+    list: ListHandler,
+    OrderedDict: OrderedDictHandler,
+    dict: DictHandler,
+}
