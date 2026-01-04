@@ -132,9 +132,7 @@ class Task(Generic[R]):
         self.args = args
         self.kwargs = kwargs
 
-    def status(
-        self, workspace: Workspace | None = None, executor: Executor | None = None
-    ) -> Literal["pending", "running", "done", "failed", "unknown"]:
+    def status(self, workspace: Workspace | None = None) -> Literal["running", "done", "unknown"]:
         if workspace is None:
             from .workspace import Workspace
 
@@ -147,14 +145,6 @@ class Task(Generic[R]):
             self.properties.cache is False and self._resolved_hash(workspace=workspace) in workspace._result_hash_cache
         ) or (self.properties.cache and self.is_cached(workspace=workspace)):
             return "done"
-
-        # TODO: implement task-job lookup
-        # if executor is None:
-        #     from .executor import Executor
-
-        #     executor = Executor.auto()
-
-        # queued or failed?
 
         return "unknown"
 

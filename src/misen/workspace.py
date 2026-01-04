@@ -69,9 +69,6 @@ class WorkspaceParameters:
         return self.type(*self.args, **self.kwargs)
 
 
-# TODO: support polling task status from Workspace
-
-
 class Workspace(ABC, metaclass=WorkspaceMeta):
     def __init__(
         self,
