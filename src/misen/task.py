@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .executor import Executor
-    from .workspace import Workspace, WorkspaceParameters
+    from .workspace import Workspace
 
 __all__ = ["Task", "task", "resources"]
 
@@ -233,10 +233,7 @@ class Task(Generic[R]):
         return executor.submit(task=self, workspace=workspace)
 
     def result(
-        self,
-        workspace: Workspace | WorkspaceParameters | None = None,
-        compute_if_uncached: bool = False,
-        compute_uncached_deps: bool = False,
+        self, workspace: Workspace | None = None, compute_if_uncached: bool = False, compute_uncached_deps: bool = False
     ) -> R:
         """Compute or retrieve the Task result and cache it."""
 
@@ -244,11 +241,6 @@ class Task(Generic[R]):
             from .workspace import Workspace
 
             workspace = Workspace.auto()
-        else:
-            from .workspace import WorkspaceParameters
-
-            if isinstance(workspace, WorkspaceParameters):
-                workspace = workspace.construct()
 
         if self.properties.cache:
             if (result := workspace.results.get(self)) is not None:

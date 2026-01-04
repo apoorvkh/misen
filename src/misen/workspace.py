@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import inspect
 import shutil
-from abc import ABC, ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 from collections.abc import MutableMapping
-from importlib import import_module
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -14,9 +12,8 @@ from typing import (
     TypeVar,
 )
 
-from misen_hash import canonical_hash
+from misen.utils.settings import FromSettingsABC
 
-from .settings import Settings
 from .task import Task
 
 if TYPE_CHECKING:
@@ -30,47 +27,11 @@ __all__ = ["Workspace"]
 R = TypeVar("R")
 
 
-class WorkspaceMeta(ABCMeta):
-    """
-    Metaclass that turns every subclass into a *parameterised singleton* and
-    makes `inspect.signature(SubClass)` show the parameters of `SubClass.__init__`.
-    """
-
-    _instances = {}
-
-    def __new__(mcls, name, bases, namespace, **kwds):
-        cls = super().__new__(mcls, name, bases, namespace, **kwds)
-        init_sig = inspect.signature(cls.__init__)
-        params = list(init_sig.parameters.values())[1:]
-        cls.__signature__ = init_sig.replace(parameters=params)  # type: ignore
-        return cls
-
-    def __call__(cls, **kwargs):
-        key = canonical_hash(kwargs)
-
-        if key not in WorkspaceMeta._instances:
-            WorkspaceMeta._instances[key] = super().__call__(**kwargs)
-        return WorkspaceMeta._instances[key]
+WorkspaceType: TypeAlias = Literal["disk"]
 
 
-WorkspaceType: TypeAlias = str | Literal["auto", "memory", "disk"]
-
-
-# TODO: figure out better way to avoid serializing workspaces?
-
-
-class WorkspaceParameters:
-    def __init__(self, type: type[Workspace], *args, **kwargs):
-        self.type = type
-        self.args = args
-        self.kwargs = kwargs
-
-    def construct(self) -> Workspace:
-        return self.type(*self.args, **self.kwargs)
-
-
-class Workspace(ABC, metaclass=WorkspaceMeta):
-    def __init__(
+class Workspace(FromSettingsABC):
+    def __post_init__(
         self,
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
@@ -94,41 +55,6 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
     @abstractmethod
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike: ...
 
-    @staticmethod
-    def auto(settings: Settings | None = None) -> "Workspace":
-        if settings is None:
-            settings = Settings()
-
-        workspace_type = settings.toml_data.get("workspace_type", "auto")
-        workspace_cls = Workspace._resolve_type(workspace_type)
-        if workspace_cls is not Workspace:
-            return workspace_cls(**settings.toml_data.get("workspace_kwargs", {}))
-
-        # default
-        from misen.workspaces.memory import MemoryWorkspace
-
-        return MemoryWorkspace()
-
-    @abstractmethod
-    def to_params(self) -> WorkspaceParameters: ...
-
-    @staticmethod
-    def _resolve_type(t: WorkspaceType) -> type["Workspace"]:
-        match t:
-            case "auto":
-                return Workspace
-            case "memory":
-                from misen.workspaces.memory import MemoryWorkspace
-
-                return MemoryWorkspace
-            case "disk":
-                from misen.workspaces.disk import DiskWorkspace
-
-                return DiskWorkspace
-            case _:
-                module, class_name = t.split(":", maxsplit=1)
-                return getattr(import_module(module), class_name)
-
     @abstractmethod
     def get_temp_dir(self) -> Path: ...
 
@@ -136,6 +62,27 @@ class Workspace(ABC, metaclass=WorkspaceMeta):
     def get_work_dir(self, task: Task) -> Path:
         """Return a directory where the task can store working files. E.g. to cache intermediate results."""
         ...
+
+    @classmethod
+    def _settings_key(cls) -> str:
+        return "workspace"
+
+    @classmethod
+    def _default_type_name(cls) -> str:
+        return "disk"
+
+    @classmethod
+    def _default_kwargs(cls) -> dict:
+        return {"directory": ".misen"}
+
+    @classmethod
+    def _resolve_type(cls, type_name: str | WorkspaceType) -> type["Workspace"]:
+        match type_name:
+            case "disk":
+                from misen.workspaces.disk import DiskWorkspace
+
+                return DiskWorkspace
+        return super()._resolve_type(type_name)
 
 
 class ResultMap(MutableMapping[Task[Any], Any]):

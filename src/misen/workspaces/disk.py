@@ -10,7 +10,7 @@ import lmdb
 
 from ..utils.hashes import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from ..utils.locks import LockLike, NFSLock
-from ..workspace import Workspace, WorkspaceParameters
+from ..workspace import Workspace
 
 if TYPE_CHECKING:
     from ..task import Task
@@ -128,23 +128,24 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         return sum(1 for _ in self)
 
 
-# TODO: determine that systems have synchronized clocks
+# TODO: get clock time from NFS server
 
 
 class DiskWorkspace(Workspace):
-    def __init__(self, directory: Path = Path(".misen")):
-        self.directory = directory
+    directory: str = ".misen"
 
-        self.directory.mkdir(exist_ok=True)
+    def __post_init__(self):
+        directory = Path(self.directory)
+        directory.mkdir(exist_ok=True)
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
-        (self.directory / "work").mkdir(parents=True, exist_ok=True)
+        (directory / "work").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "locks" / "task").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "locks" / "result").mkdir(parents=True, exist_ok=True)
 
-        super().__init__(
-            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self.directory / "resolved_hash_cache.mdb"),
-            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self.directory / "result_hash_cache.mdb"),
-            result_store=DiskResultStore(self.directory / "result_store"),
+        super().__post_init__(
+            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](directory / "resolved_hash_cache.mdb"),
+            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](directory / "result_hash_cache.mdb"),
+            result_store=DiskResultStore(directory / "result_store"),
             log_store={},
         )
 
@@ -153,14 +154,11 @@ class DiskWorkspace(Workspace):
             lockfile=(self.get_temp_dir() / "locks" / namespace / f"{key}.lock"), lifetime=30, refresh_interval=20
         )
 
-    def to_params(self) -> WorkspaceParameters:
-        return WorkspaceParameters(DiskWorkspace, directory=self.directory)
-
     def get_temp_dir(self) -> Path:
-        return self.directory / "tmp"
+        return Path(self.directory) / "tmp"
 
     def get_work_dir(self, task: Task) -> Path:
         key_hex = task._resolved_hash(workspace=self).hex()
-        d = self.directory / "work" / key_hex[:2] / f"{key_hex}"
+        d = Path(self.directory) / "work" / key_hex[:2] / f"{key_hex}"
         d.mkdir(exist_ok=True)
         return d

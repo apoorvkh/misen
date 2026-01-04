@@ -34,8 +34,10 @@ class SlurmJob(Job):
 
 
 class SlurmExecutor(Executor[SlurmJob]):
-    def __init__(self, folder: Path = Path(".submitit")) -> None:
-        self.slurm_executor = submitit.SlurmExecutor(folder=folder)
+    folder: str = ".submitit"
+
+    def __post_init__(self) -> None:
+        self.slurm_executor = submitit.SlurmExecutor(folder=Path(self.folder))
 
     def _dispatch(
         self,

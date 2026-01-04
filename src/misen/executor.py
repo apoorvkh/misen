@@ -19,22 +19,20 @@ from __future__ import annotations
 
 import functools
 from abc import ABC, abstractmethod
-from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeAlias, TypeVar, cast
 
 from misen.utils.hashes import short_hash
+from misen.utils.settings import FromSettingsABC
 
-from .settings import Settings
 from .task import Task, TaskResources
 
 if TYPE_CHECKING:
     from .utils.graph import DependencyGraph
-    from .workspace import Workspace, WorkspaceParameters
+    from .workspace import Workspace
 
 __all__ = ["Executor"]
 
-ExecutorType: TypeAlias = str | Literal["auto", "slurm"]
-JobT = TypeVar("JobT", bound="Job")
+ExecutorType: TypeAlias = Literal["slurm"]
 
 
 class Job(ABC):
@@ -42,10 +40,12 @@ class Job(ABC):
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
 
 
+JobT = TypeVar("JobT", bound=Job)
+
 # TODO: submit array?
 
 
-class Executor(Generic[JobT], ABC):
+class Executor(Generic[JobT], FromSettingsABC):
     """Abstract interface for implementing an Executor for a specific backend."""
 
     @abstractmethod
@@ -54,8 +54,6 @@ class Executor(Generic[JobT], ABC):
 
     def submit(self, task: Task, workspace: Workspace):
         """Entrypoint for submitting a Task's DAG to the Executor."""
-        workspace_params = workspace.to_params()
-
         work_graph: DependencyGraph[WorkUnit] = _build_work_graph(root=task, workspace=workspace)
         jobs: dict[WorkUnit, JobT] = {}
 
@@ -64,39 +62,33 @@ class Executor(Generic[JobT], ABC):
             if w.root.is_cached(workspace=workspace):
                 continue
             jobs[w] = self._dispatch(
-                functools.partial(w.execute, workspace_params=workspace_params),
+                functools.partial(w.execute, workspace=workspace),
                 resources=w.resources,
                 dependencies={jobs[d] for d in w.dependencies if d in jobs},
             )
 
         return jobs
 
-    @staticmethod
-    def auto(settings: Settings | None = None) -> Executor:
-        if settings is None:
-            settings = Settings()
+    @classmethod
+    def _settings_key(cls) -> str:
+        return "executor"
 
-        executor_type = settings.toml_data.get("executor_type", "auto")
-        executor_cls = Executor._resolve_type(executor_type)
-        if executor_cls is not Executor:
-            return executor_cls(**settings.toml_data.get("executor_kwargs", {}))
+    @classmethod
+    def _default_type_name(cls) -> str:
+        return "slurm"
 
-        from misen.executors.slurm import SlurmExecutor
+    @classmethod
+    def _default_kwargs(cls) -> dict:
+        return {"folder": ".submitit"}
 
-        return SlurmExecutor()
-
-    @staticmethod
-    def _resolve_type(t: ExecutorType) -> type[Executor]:
-        match t:
-            case "auto":
-                return Executor
+    @classmethod
+    def _resolve_type(cls, type_name: str | ExecutorType) -> type["Executor"]:
+        match type_name:
             case "slurm":
                 from misen.executors.slurm import SlurmExecutor
 
                 return SlurmExecutor
-            case _:
-                module, class_name = t.split(":", maxsplit=1)
-                return getattr(import_module(module), class_name)
+        return super()._resolve_type(type_name)
 
 
 class WorkUnit:
@@ -149,10 +141,8 @@ class WorkUnit:
     def __repr__(self):
         return f"WorkUnit(hash={short_hash(self)})"
 
-    def execute(self, workspace_params: WorkspaceParameters):
+    def execute(self, workspace: Workspace):
         """Execute the Tasks in self.graph one-by-one (in dependency order)."""
-        workspace = workspace_params.construct()
-
         task_results: dict[Task, Any] = {}
 
         evaluation_order = [self.graph[t] for t in self.graph.evaluation_order()]

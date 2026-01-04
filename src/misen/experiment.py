@@ -11,8 +11,8 @@ import tyro
 from msgspec import Struct
 
 from .executor import Executor, ExecutorType
-from .settings import DEFAULT_SETTINGS_FILE, Settings  # noqa: TC001
 from .task import Task
+from .utils.settings import DEFAULT_SETTINGS_FILE, Settings
 from .workspace import Workspace, WorkspaceType
 
 __all__ = ["Experiment"]
