@@ -2,12 +2,13 @@ import dataclasses
 import datetime
 import decimal
 import enum
+import math
 import uuid
 from collections import OrderedDict
 from typing import Any
 
 from . import CollectionHandler, Handler, PrimitiveHandler
-from .utils import hash_msgpack
+from .utils import hash_msgspec
 
 __all__ = ["builtin_handlers", "builtin_handlers_by_type"]
 
@@ -19,7 +20,7 @@ class NoneHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(obj)
+        return hash_msgspec(obj)
 
 
 class EnumHandler(PrimitiveHandler):
@@ -29,7 +30,7 @@ class EnumHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(obj.value)
+        return hash_msgspec(obj.value)
 
 
 class BoolHandler(PrimitiveHandler):
@@ -39,7 +40,7 @@ class BoolHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(bool(obj))
+        return hash_msgspec(bool(obj))
 
 
 class IntHandler(PrimitiveHandler):
@@ -49,7 +50,7 @@ class IntHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(int(obj))
+        return hash_msgspec(int(obj))
 
 
 class FloatHandler(PrimitiveHandler):
@@ -59,7 +60,10 @@ class FloatHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(float(obj))
+        obj = float(obj)
+        if math.isfinite(obj):
+            return hash_msgspec(obj)
+        return hash_msgspec(str(obj))
 
 
 class StrHandler(PrimitiveHandler):
@@ -69,7 +73,7 @@ class StrHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(str(obj))
+        return hash_msgspec(str(obj))
 
 
 class BytearrayHandler(PrimitiveHandler):
@@ -79,7 +83,7 @@ class BytearrayHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(bytearray(obj))
+        return hash_msgspec(bytearray(obj))
 
 
 class BytesHandler(PrimitiveHandler):
@@ -89,7 +93,7 @@ class BytesHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(bytes(obj))
+        return hash_msgspec(bytes(obj))
 
 
 class DatetimeHandler(PrimitiveHandler):
@@ -99,7 +103,7 @@ class DatetimeHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(
+        return hash_msgspec(
             datetime.datetime(
                 obj.year,
                 obj.month,
@@ -121,7 +125,7 @@ class DateHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(datetime.date(obj.year, obj.month, obj.day))
+        return hash_msgspec(datetime.date(obj.year, obj.month, obj.day))
 
 
 class TimeHandler(PrimitiveHandler):
@@ -131,7 +135,7 @@ class TimeHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(
+        return hash_msgspec(
             datetime.time(
                 obj.hour,
                 obj.minute,
@@ -150,7 +154,7 @@ class TimedeltaHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(datetime.timedelta(days=obj.days, seconds=obj.seconds, microseconds=obj.microseconds))
+        return hash_msgspec(datetime.timedelta(days=obj.days, seconds=obj.seconds, microseconds=obj.microseconds))
 
 
 class UUIDHandler(PrimitiveHandler):
@@ -160,7 +164,7 @@ class UUIDHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(uuid.UUID(bytes=obj.bytes))
+        return hash_msgspec(uuid.UUID(bytes=obj.bytes))
 
 
 class DecimalHandler(PrimitiveHandler):
@@ -170,7 +174,7 @@ class DecimalHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any, element_hash: None = None) -> int:
-        return hash_msgpack(decimal.Decimal(str(obj)))
+        return hash_msgspec(decimal.Decimal(str(obj)))
 
 
 class ListHandler(CollectionHandler):

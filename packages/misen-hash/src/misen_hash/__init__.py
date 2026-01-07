@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Callable, cast
 
-from .utils import hash_msgpack
+from .utils import hash_msgspec
 
 __all__ = ["canonical_hash", "PrimitiveHandler", "CollectionHandler"]
 
@@ -9,7 +9,7 @@ __all__ = ["canonical_hash", "PrimitiveHandler", "CollectionHandler"]
 def canonical_hash(obj: Any) -> int:
     obj_type = type(obj).__qualname__
     obj_hash = _lookup_handler(obj).digest(obj, element_hash=canonical_hash)
-    return hash_msgpack((obj_type, obj_hash))
+    return hash_msgspec((obj_type, obj_hash))
 
 
 ## Handler ABCs
@@ -40,9 +40,9 @@ class CollectionHandler(Handler):
     def digest(cls, obj: Any, element_hash: Callable[[Any], int]) -> int:
         elements = cls.elements(obj)
         if isinstance(elements, list):
-            return hash_msgpack([element_hash(i) for i in elements])
+            return hash_msgspec([element_hash(i) for i in elements])
         elif isinstance(elements, set):
-            return hash_msgpack({element_hash(i) for i in elements})
+            return hash_msgspec({element_hash(i) for i in elements})
         raise ValueError(f"Unsupported collection type: {type(elements)}")
 
 

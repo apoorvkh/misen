@@ -2,7 +2,7 @@ import importlib.util
 from typing import Any, cast
 
 from . import PrimitiveHandler
-from .utils import hash_msgpack
+from .utils import hash_msgspec
 
 _torch_available = importlib.util.find_spec("torch") is not None
 _numpy_available = importlib.util.find_spec("numpy") is not None
@@ -36,7 +36,7 @@ class TorchTensorHandler(PrimitiveHandler):
         # TODO: maybe just return this as bytes (without copy)? And have xxhash hash bytes directly instead of msgspec.encode bytes?
 
         # dtype, ndim, shape, raw tensor bytes (C-order, dtype-agnostic)
-        return hash_msgpack((str(t.dtype), t.ndim, (int(d) for d in t.shape), memoryview(t.view(torch.uint8).numpy())))
+        return hash_msgspec((str(t.dtype), t.ndim, (int(d) for d in t.shape), memoryview(t.view(torch.uint8).numpy())))
 
 
 class TorchModuleHandler(PrimitiveHandler):
