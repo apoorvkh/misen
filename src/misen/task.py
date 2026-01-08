@@ -4,6 +4,7 @@ import itertools
 from contextlib import nullcontext
 from functools import cache
 from inspect import signature
+from time import time_ns
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -16,6 +17,8 @@ from typing import (
 )
 
 from msgspec import Struct
+
+from misen.utils.log_capture import capture_all_output
 
 from .utils.graph import DependencyGraph
 from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
@@ -271,10 +274,11 @@ class Task(Generic[R]):
             if self.properties.cache
             else nullcontext()
         ):
-            result = self.func(
-                *(get_value(v) for v in self.args),
-                **{k: get_value(v) for k, v in self.kwargs.items()},
-            )
+            with capture_all_output(workspace.open_log(task=self, mode="a", timestamp=time_ns())):
+                result = self.func(
+                    *(get_value(v) for v in self.args),
+                    **{k: get_value(v) for k, v in self.kwargs.items()},
+                )
 
             workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(result)
 

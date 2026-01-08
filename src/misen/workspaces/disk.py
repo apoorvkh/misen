@@ -4,7 +4,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator, Generic, Literal, MutableMapping, TypeVar
+from typing import TYPE_CHECKING, Generator, Generic, Literal, MutableMapping, TextIO, TypeVar
 
 import lmdb
 
@@ -139,6 +139,7 @@ class DiskWorkspace(Workspace):
         directory.mkdir(exist_ok=True)
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
         (directory / "work").mkdir(parents=True, exist_ok=True)
+        (directory / "logs").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "locks" / "task").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "locks" / "result").mkdir(parents=True, exist_ok=True)
 
@@ -146,7 +147,6 @@ class DiskWorkspace(Workspace):
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](directory / "resolved_hash_cache.mdb"),
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](directory / "result_hash_cache.mdb"),
             result_store=DiskResultStore(directory / "result_store"),
-            log_store={},
         )
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
@@ -160,5 +160,14 @@ class DiskWorkspace(Workspace):
     def get_work_dir(self, task: Task) -> Path:
         key_hex = task._resolved_hash(workspace=self).hex()
         d = Path(self.directory) / "work" / key_hex[:2] / f"{key_hex}"
-        d.mkdir(exist_ok=True)
+        d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def get_log_dir(self, task: Task) -> Path:
+        key_hex = task._resolved_hash(workspace=self).hex()
+        d = Path(self.directory) / "logs" / key_hex[:2] / f"{key_hex}"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def open_log(self, task: Task, mode: Literal["a", "r"], timestamp: int | Literal["latest"] = "latest") -> TextIO:
+        return open(self.get_log_dir(task) / f"{timestamp}.log", mode, buffering=1)
