@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import shutil
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections.abc import MutableMapping
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Iterator,
-    Literal,
-    TypeAlias,
-    TypeVar,
-)
+from typing import TYPE_CHECKING, Any, Iterator, Literal, TextIO, TypeAlias, TypeVar, cast, get_args
+
+from typing_extensions import assert_never
 
 from misen.utils.settings import FromSettingsABC
 
@@ -31,12 +26,34 @@ WorkspaceType: TypeAlias = Literal["disk"]
 
 
 class Workspace(FromSettingsABC):
+    @staticmethod
+    def _settings_key() -> str:
+        return "workspace"
+
+    @staticmethod
+    def _default() -> Workspace:
+        from misen.workspaces.disk import DiskWorkspace
+
+        return DiskWorkspace()
+
+    @classmethod
+    def _resolve_type(cls, type_name: str | WorkspaceType) -> type["Workspace"]:
+        if type_name in get_args(WorkspaceType):
+            type_name = cast("WorkspaceType", type_name)
+            match type_name:
+                case "disk":
+                    from misen.workspaces.disk import DiskWorkspace
+
+                    return DiskWorkspace
+                case _:
+                    assert_never(type_name)
+        return super()._resolve_type(type_name)
+
     def __post_init__(
         self,
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
         result_store: MutableMapping[ResultHash, Path],
-        log_store: MutableMapping[ResolvedTaskHash, TaskLogs],
     ):
         # session-only (non-persistent) caches
         self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
@@ -46,11 +63,9 @@ class Workspace(FromSettingsABC):
         self._resolved_hash_cache = resolved_hash_cache
         self._result_hash_cache = result_hash_cache
         self._result_store = result_store
-        self._log_store = log_store
 
-        # public accessors to workspace data
+        # public accessor to workspace data
         self.results = ResultMap(workspace=self)
-        self.logs = LogMap(workspace=self)
 
     @abstractmethod
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike: ...
@@ -63,26 +78,11 @@ class Workspace(FromSettingsABC):
         """Return a directory where the task can store working files. E.g. to cache intermediate results."""
         ...
 
-    @classmethod
-    def _settings_key(cls) -> str:
-        return "workspace"
-
-    @classmethod
-    def _default_type_name(cls) -> str:
-        return "disk"
-
-    @classmethod
-    def _default_kwargs(cls) -> dict:
-        return {"directory": ".misen"}
-
-    @classmethod
-    def _resolve_type(cls, type_name: str | WorkspaceType) -> type["Workspace"]:
-        match type_name:
-            case "disk":
-                from misen.workspaces.disk import DiskWorkspace
-
-                return DiskWorkspace
-        return super()._resolve_type(type_name)
+    ## TODO: non-unique (maybe use hostname, pid, ?)
+    @abstractmethod
+    def open_log(
+        self, task: Task, mode: Literal["a", "r"], timestamp: int | Literal["latest"] = "latest"
+    ) -> TextIO: ...
 
 
 class ResultMap(MutableMapping[Task[Any], Any]):
@@ -131,37 +131,3 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         except RuntimeError:
             return False
         return result_hash in self.workspace._result_store
-
-
-class LogMap(MutableMapping[Task, "TaskLogs"]):
-    def __init__(self, workspace: Workspace):
-        self.workspace = workspace
-
-    def __getitem__(self, key: Task, /) -> TaskLogs:
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        return self.workspace._log_store[resolved_hash]
-
-    def __setitem__(self, key: Task, value: TaskLogs, /) -> None:
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        self.workspace._log_store[resolved_hash] = value
-
-    def __delitem__(self, key: Task, /) -> None:
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        del self.workspace._log_store[resolved_hash]
-
-    def __iter__(self) -> Iterator[Task]:
-        raise NotImplementedError
-
-    def __len__(self) -> int:
-        return len(self.workspace._log_store)
-
-    def __contains__(self, key: object, /) -> bool:
-        if not isinstance(key, Task):
-            return False
-        resolved_hash: ResolvedTaskHash = key._resolved_hash(workspace=self.workspace)
-        return resolved_hash in self.workspace._log_store
-
-
-# TODO: append, read, support multiple runs
-class TaskLogs(ABC):
-    pass

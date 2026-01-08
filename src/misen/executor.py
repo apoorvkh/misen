@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import functools
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeAlias, TypeVar, cast, get_args
+
+from typing_extensions import assert_never
 
 from misen.utils.hashes import short_hash
 from misen.utils.settings import FromSettingsABC
@@ -69,25 +71,27 @@ class Executor(Generic[JobT], FromSettingsABC):
 
         return jobs
 
-    @classmethod
-    def _settings_key(cls) -> str:
+    @staticmethod
+    def _settings_key() -> str:
         return "executor"
 
-    @classmethod
-    def _default_type_name(cls) -> str:
-        return "slurm"
+    @staticmethod
+    def _default() -> Executor:
+        from misen.executors.slurm import SlurmExecutor
 
-    @classmethod
-    def _default_kwargs(cls) -> dict:
-        return {"folder": ".submitit"}
+        return SlurmExecutor()
 
     @classmethod
     def _resolve_type(cls, type_name: str | ExecutorType) -> type["Executor"]:
-        match type_name:
-            case "slurm":
-                from misen.executors.slurm import SlurmExecutor
+        if type_name in get_args(ExecutorType):
+            type_name = cast("ExecutorType", type_name)
+            match type_name:
+                case "slurm":
+                    from misen.executors.slurm import SlurmExecutor
 
-                return SlurmExecutor
+                    return SlurmExecutor
+                case _:
+                    assert_never(type_name)
         return super()._resolve_type(type_name)
 
 

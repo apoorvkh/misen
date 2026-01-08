@@ -46,17 +46,13 @@ class FromSettingsMeta(msgspec.StructMeta, ABCMeta):
 
 
 class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
-    @classmethod
+    @staticmethod
     @abstractmethod
-    def _settings_key(cls) -> str: ...
+    def _default() -> Self: ...
 
-    @classmethod
+    @staticmethod
     @abstractmethod
-    def _default_type_name(cls) -> str: ...
-
-    @classmethod
-    @abstractmethod
-    def _default_kwargs(cls) -> dict: ...
+    def _settings_key() -> str: ...
 
     @classmethod
     @abstractmethod
@@ -70,10 +66,12 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
             settings = Settings()
 
         key = cls._settings_key()
-        class_type_name = settings.toml_data.get(f"{key}_type", cls._default_type_name())
-        class_kwargs = settings.toml_data.get(f"{key}_kwargs", cls._default_kwargs())
 
-        class_type = cls._resolve_type(class_type_name)
+        if f"{key}_type" not in settings.toml_data:
+            return cls._default()
+
+        class_type = cls._resolve_type(settings.toml_data.get[f"{key}_type"])
+        class_kwargs = settings.toml_data.get(f"{key}_kwargs", {})
         return class_type(**class_kwargs)
 
     def __reduce__(self) -> tuple[Callable[[type[msgspec.Struct], bytes], msgspec.Struct], tuple[type[Self], bytes]]:
