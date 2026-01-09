@@ -44,6 +44,12 @@ class Job(ABC):
 
 JobT = TypeVar("JobT", bound=Job)
 
+
+class CompletedJob(Job):
+    def state(self) -> Literal["done"]:
+        return "done"
+
+
 # TODO: submit array?
 
 
@@ -54,22 +60,25 @@ class Executor(Generic[JobT], FromSettingsABC):
     def _dispatch(self, function: Callable, resources: TaskResources, dependencies: set[JobT]) -> JobT:
         """For dispatching a function with the backend. Returns a Job."""
 
-    def submit(self, task: Task, workspace: Workspace):
+    def submit(
+        self, task: Task, workspace: Workspace
+    ) -> tuple[DependencyGraph[WorkUnit], dict[WorkUnit, CompletedJob | JobT]]:
         """Entrypoint for submitting a Task's DAG to the Executor."""
         work_graph: DependencyGraph[WorkUnit] = _build_work_graph(root=task, workspace=workspace)
-        jobs: dict[WorkUnit, JobT] = {}
+        jobs: dict[WorkUnit, CompletedJob | JobT] = {}
 
         for i in work_graph.evaluation_order():
             w: WorkUnit = work_graph[i]
-            if w.root.is_cached(workspace=workspace):
-                continue
-            jobs[w] = self._dispatch(
-                functools.partial(w.execute, workspace=workspace),
-                resources=w.resources,
-                dependencies={jobs[d] for d in w.dependencies if d in jobs},
-            )
+            if w.root.status(workspace=workspace) == "done":
+                jobs[w] = CompletedJob()
+            else:
+                jobs[w] = self._dispatch(
+                    functools.partial(w.execute, workspace=workspace),
+                    resources=w.resources,
+                    dependencies={jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)},
+                )
 
-        return jobs
+        return work_graph, jobs
 
     @staticmethod
     def _settings_key() -> str:
@@ -77,6 +86,9 @@ class Executor(Generic[JobT], FromSettingsABC):
 
     @staticmethod
     def _default() -> Executor:
+        # from .executors.local import LocalExecutor
+
+        # return LocalExecutor()
         from misen.executors.slurm import SlurmExecutor
 
         return SlurmExecutor()

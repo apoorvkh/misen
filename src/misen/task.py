@@ -10,10 +10,9 @@ from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, ParamSpec, Ty
 from msgspec import Struct
 from typing_extensions import assert_never
 
-from misen.utils.log_capture import capture_all_output
-
 from .utils.graph import DependencyGraph
 from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
+from .utils.log_capture import capture_all_output
 from .utils.object_io import DefaultSerializer, Serializer
 
 if TYPE_CHECKING:
@@ -26,8 +25,6 @@ __all__ = ["Task", "task", "resources"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-# TODO: consider serializable
 
 
 class TaskProperties(Struct, frozen=True):
@@ -128,6 +125,21 @@ class Task(Generic[R]):
         self.args: P.args = args
         self.kwargs: P.kwargs = kwargs
 
+    def __repr__(self):
+        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]
+
+    @property
+    def T(self) -> R:
+        return cast("R", self)
+
+    def is_cached(self, workspace: Workspace | None = None) -> bool:
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        return self.properties.cache and self in workspace.results
+
     def status(self, workspace: Workspace | None = None) -> Literal["running", "done", "unknown"]:
         if workspace is None:
             from .workspace import Workspace
@@ -143,21 +155,6 @@ class Task(Generic[R]):
             return "done"
 
         return "unknown"
-
-    def __repr__(self):
-        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]
-
-    @property
-    def T(self) -> R:
-        return cast("R", self)
-
-    def is_cached(self, workspace: Workspace | None = None) -> bool:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
-        return self.properties.cache and self in workspace.results
 
     @property
     def _dependencies(self) -> set[Task]:
