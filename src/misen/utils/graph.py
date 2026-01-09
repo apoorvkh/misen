@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar
+from operator import eq
+from typing import Any, Callable, Generic, TypeVar
 
 import rustworkx as rx
 
@@ -40,6 +41,16 @@ class DependencyGraph(Generic[T]):
 
     def successors(self, node_index: int) -> list[T]:
         return self._g.successors(node_index)
+
+    def is_root(self, node_index: int) -> bool:
+        return self._g.in_degree(node_index) == 0
+
+    def remove_node_by_value(self, value: Any, cmp: Callable[[Any, Any], bool] = eq, first: bool = False) -> None:
+        for node_index in self._g.node_indices():
+            if cmp(self._g[node_index], value):
+                self._g.remove_node(node_index)
+                if first:
+                    break
 
     ## Custom functions
 

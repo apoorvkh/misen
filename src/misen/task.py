@@ -223,7 +223,7 @@ class Task(Generic[R]):
 
             workspace = Workspace.auto()
 
-        return executor.submit(task=self, workspace=workspace)
+        return executor.submit(tasks={self}, workspace=workspace)
 
     def result(
         self, workspace: Workspace | None = None, compute_if_uncached: bool = False, compute_uncached_deps: bool = False

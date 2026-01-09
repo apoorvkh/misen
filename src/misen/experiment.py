@@ -36,8 +36,17 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         return self.tasks()[key].result(workspace=workspace)
 
     def run(self, workspace: Workspace | None = None, executor: Executor | None = None) -> None:
-        # TODO: note empty lambda task is submitted as well
-        Task((lambda **kwargs: None), **self.tasks()).run(workspace=workspace, executor=executor)
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        if executor is None:
+            from .executor import Executor
+
+            executor = Executor.auto()
+
+        executor.submit(tasks=set(self.tasks().values()), workspace=workspace)
 
     @classmethod
     def cli(cls):

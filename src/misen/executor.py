@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 from abc import ABC, abstractmethod
+from operator import is_
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeAlias, TypeVar, cast, get_args
 
 from typing_extensions import assert_never
@@ -61,15 +62,15 @@ class Executor(Generic[JobT], FromSettingsABC):
         """For dispatching a function with the backend. Returns a Job."""
 
     def submit(
-        self, task: Task, workspace: Workspace
+        self, tasks: set[Task], workspace: Workspace
     ) -> tuple[DependencyGraph[WorkUnit], dict[WorkUnit, CompletedJob | JobT]]:
         """Entrypoint for submitting a Task's DAG to the Executor."""
-        work_graph: DependencyGraph[WorkUnit] = _build_work_graph(root=task, workspace=workspace)
+        work_graph: DependencyGraph[WorkUnit] = _build_work_graph(tasks=tasks, workspace=workspace)
         jobs: dict[WorkUnit, CompletedJob | JobT] = {}
 
         for i in work_graph.evaluation_order():
             w: WorkUnit = work_graph[i]
-            if w.root.status(workspace=workspace) == "done":
+            if w.root.is_cached(workspace=workspace):  # if w.root.status(workspace=workspace) == "done":
                 jobs[w] = CompletedJob()
             else:
                 jobs[w] = self._dispatch(
@@ -174,7 +175,7 @@ class WorkUnit:
                     k: task_results[v] if isinstance(v, Task) and v in task_results else v
                     for k, v in task.kwargs.items()
                 },
-            ).result(workspace=workspace, compute_if_uncached=True)
+            ).result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=False)
 
             # remove any results that are not needed by future dependents
             remaining_tasks = evaluation_order[i + 1 :]
@@ -188,16 +189,19 @@ class WorkUnit:
                 del task_results[t]
 
 
-def _build_work_graph(root: Task, workspace: Workspace) -> DependencyGraph[WorkUnit]:
+def _build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
     """
     Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
     """
     # dependency graph: dependents point to dependencies
-    task_graph: DependencyGraph[Task] = root._dependency_graph(workspace=workspace)
-    # Retain only root & cachable tasks (and the induced graph minor)
+    union = Task((lambda *args: None), *tasks)
+    task_graph: DependencyGraph[Task] = union._dependency_graph(workspace=workspace)
+    task_graph.remove_node_by_value(union, cmp=is_, first=True)
+
+    # Retain only root and cachable tasks (and the induced graph minor)
     anchor_graph = task_graph.copy()
     anchor_graph.coarsen_to_anchors(
-        anchors=[i for i in anchor_graph.node_indices() if anchor_graph[i] == root or anchor_graph[i].properties.cache]
+        anchors=[i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache]
     )
 
     # replace nodes with WorkUnit instances
