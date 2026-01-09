@@ -140,18 +140,18 @@ class DiskWorkspace(Workspace):
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
         (directory / "work").mkdir(parents=True, exist_ok=True)
         (directory / "logs").mkdir(parents=True, exist_ok=True)
-        (self.get_temp_dir() / "locks" / "task").mkdir(parents=True, exist_ok=True)
-        (self.get_temp_dir() / "locks" / "result").mkdir(parents=True, exist_ok=True)
+        (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
+        (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
 
         super().__post_init__(
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](directory / "resolved_hash_cache.mdb"),
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](directory / "result_hash_cache.mdb"),
-            result_store=DiskResultStore(directory / "result_store"),
+            result_store=DiskResultStore(directory / "results"),
         )
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
         return NFSLock(
-            lockfile=(self.get_temp_dir() / "locks" / namespace / f"{key}.lock"), lifetime=30, refresh_interval=20
+            lockfile=(self.get_temp_dir() / f"{namespace}_locks" / f"{key}.lock"), lifetime=30, refresh_interval=20
         )
 
     def get_temp_dir(self) -> Path:

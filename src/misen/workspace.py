@@ -60,9 +60,9 @@ class Workspace(FromSettingsABC):
         self._result_hashes: dict[TaskHash, ResultHash] = {}
 
         # workspace caches
-        self._resolved_hash_cache = resolved_hash_cache
-        self._result_hash_cache = result_hash_cache
-        self._result_store = result_store
+        self._resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash] = resolved_hash_cache
+        self._result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash] = result_hash_cache
+        self._result_store: MutableMapping[ResultHash, Path] = result_store
 
         # public accessor to workspace data
         self.results = ResultMap(workspace=self)

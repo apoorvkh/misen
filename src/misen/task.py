@@ -8,6 +8,7 @@ from time import time_ns
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, ParamSpec, TypeVar, cast
 
 from msgspec import Struct
+from typing_extensions import assert_never
 
 from misen.utils.log_capture import capture_all_output
 
@@ -36,12 +37,8 @@ class TaskProperties(Struct, frozen=True):
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
     versions: dict[str, dict[Any, int]] = {}
-    serializable: bool = True
+    index_by: Literal["task", "result"] = "result"
     serializer: type[Serializer] = DefaultSerializer
-
-    def __post_init__(self):
-        if self.cache:
-            assert self.serializable
 
     def get_argument_version(self, key: str, value: Any) -> int:
         try:
@@ -57,7 +54,7 @@ def task(
     exclude: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
     versions: dict[str, dict[Any, int]] | None = None,
-    serializable: bool = True,
+    index_by: Literal["task", "result"] = "result",
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     # TODO: handle lambda
@@ -74,7 +71,7 @@ def task(
                 exclude=(exclude or set()),
                 defaults=(defaults or {}),
                 versions=(versions or {}),
-                serializable=serializable,
+                index_by=index_by,
                 serializer=serializer,
             ),
         )
@@ -120,20 +117,16 @@ def resources(
 
 class Task(Generic[R]):
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
-        self.properties = getattr(
+        self.properties: TaskProperties = getattr(
             func,
             "__task_properties__",
             TaskProperties(f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
         )
-        self.resources = getattr(
-            func,
-            "__task_resources__",
-            TaskResources(),
-        )
+        self.resources: TaskResources = getattr(func, "__task_resources__", TaskResources())
 
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
+        self.func: Callable[P, R] = func
+        self.args: P.args = args
+        self.kwargs: P.kwargs = kwargs
 
     def status(self, workspace: Workspace | None = None) -> Literal["running", "done", "unknown"]:
         if workspace is None:
@@ -280,7 +273,15 @@ class Task(Generic[R]):
                     **{k: get_value(v) for k, v in self.kwargs.items()},
                 )
 
-            workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(result)
+            match self.properties.index_by:
+                case "task":
+                    index = resolved_hash
+                case "result":
+                    index = result
+                case _:
+                    assert_never(self.properties.index_by)
+
+            workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(index)
 
             if self.properties.cache:
                 workspace.results[self] = result
