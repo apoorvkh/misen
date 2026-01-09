@@ -5,16 +5,7 @@ from contextlib import nullcontext
 from functools import cache
 from inspect import signature
 from time import time_ns
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Generic,
-    Literal,
-    ParamSpec,
-    TypeVar,
-    cast,
-)
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, ParamSpec, TypeVar, cast
 
 from msgspec import Struct
 
@@ -44,6 +35,7 @@ class TaskProperties(Struct, frozen=True):
     version: int = 0
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
+    versions: dict[str, dict[Any, int]] = {}
     serializable: bool = True
     serializer: type[Serializer] = DefaultSerializer
 
@@ -51,13 +43,20 @@ class TaskProperties(Struct, frozen=True):
         if self.cache:
             assert self.serializable
 
+    def get_argument_version(self, key: str, value: Any) -> int:
+        try:
+            return self.versions[key][value]
+        except (KeyError, TypeError):
+            return 0
+
 
 def task(
     id: str | None = None,  # TODO: command to fill these in when None
     cache: bool = False,
     version: int = 0,
-    exclude: set[str] = set(),
-    defaults: dict[str, Any] = {},
+    exclude: set[str] | None = None,
+    defaults: dict[str, Any] | None = None,
+    versions: dict[str, dict[Any, int]] | None = None,
     serializable: bool = True,
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
@@ -72,8 +71,9 @@ def task(
                 id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
                 cache=cache,
                 version=version,
-                exclude=exclude,
-                defaults=defaults,
+                exclude=(exclude or set()),
+                defaults=(defaults or {}),
+                versions=(versions or {}),
                 serializable=serializable,
                 serializer=serializer,
             ),
@@ -296,11 +296,11 @@ class Task(Generic[R]):
         return workspace.get_work_dir(task=self)
 
     @property
-    def _arguments_for_hashing(self) -> dict[str, Any]:
+    def _arguments_for_hashing(self) -> dict[str, Task | tuple[Any, int]]:
         bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
         bound_arguments.apply_defaults()
         return {
-            k: v
+            k: v if isinstance(v, Task) else (v, self.properties.get_argument_version(k, v))
             for k, v in bound_arguments.arguments.items()
             if k not in self.properties.exclude
             and (k not in self.properties.defaults or self.properties.defaults[k] != v)
@@ -317,12 +317,15 @@ class Task(Generic[R]):
     def _task_hash(self) -> TaskHash:
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "_cached_task_hash"):
-            hashed_arguments = {
-                k: (v._task_hash() if isinstance(v, Task) else ResultHash.from_object(v))
-                for k, v in self._arguments_for_hashing.items()
-            }
             self._cached_task_hash = TaskHash.from_object(
-                (self.properties.id, self.properties.version, hashed_arguments)
+                (
+                    self.properties.id,
+                    self.properties.version,
+                    {
+                        k: (v._task_hash() if isinstance(v, Task) else ResultHash.from_object(v))
+                        for k, v in self._arguments_for_hashing.items()
+                    },
+                )
             )
         return self._cached_task_hash
 
@@ -336,12 +339,15 @@ class Task(Generic[R]):
 
         # slower workspace cache
         if (resolved_hash := workspace._resolved_hash_cache.get(task_hash)) is None:
-            hashed_arguments = {
-                k: (v._result_hash(workspace=workspace) if isinstance(v, Task) else ResultHash.from_object(v))
-                for k, v in self._arguments_for_hashing.items()
-            }
             resolved_hash = ResolvedTaskHash.from_object(
-                (self.properties.id, self.properties.version, hashed_arguments)
+                (
+                    self.properties.id,
+                    self.properties.version,
+                    {
+                        k: (v._result_hash(workspace=workspace) if isinstance(v, Task) else ResultHash.from_object(v))
+                        for k, v in self._arguments_for_hashing.items()
+                    },
+                )
             )
 
             workspace._resolved_hash_cache[task_hash] = resolved_hash
