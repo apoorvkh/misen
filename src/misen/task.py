@@ -126,7 +126,7 @@ class Task(Generic[R]):
         self.kwargs: P.kwargs = kwargs
 
     def __repr__(self):
-        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"  # ty:ignore[possibly-missing-attribute]
+        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"
 
     @property
     def T(self) -> R:
@@ -278,7 +278,7 @@ class Task(Generic[R]):
                 case _:
                     assert_never(self.properties.index_by)
 
-            workspace._result_hash_cache[resolved_hash] = ResultHash.from_object(index)
+            workspace.set_result_hash(self, ResultHash.from_object(index))
 
             if self.properties.cache:
                 workspace.results[self] = result
@@ -329,14 +329,9 @@ class Task(Generic[R]):
 
     def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""
-        task_hash = self._task_hash()
+        resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
 
-        # fast session-only cache
-        if (resolved_hash := workspace._resolved_hashes.get(task_hash)) is not None:
-            return resolved_hash
-
-        # slower workspace cache
-        if (resolved_hash := workspace._resolved_hash_cache.get(task_hash)) is None:
+        if resolved_hash is None:
             resolved_hash = ResolvedTaskHash.from_object(
                 (
                     self.properties.id,
@@ -348,23 +343,11 @@ class Task(Generic[R]):
                 )
             )
 
-            workspace._resolved_hash_cache[task_hash] = resolved_hash
+            workspace.set_resolved_hash(self, resolved_hash)
 
-        workspace._resolved_hashes[task_hash] = resolved_hash
         return resolved_hash
 
     def _result_hash(self, workspace: Workspace) -> ResultHash:
         """Hash of the task's result object (getter from workspace cache)."""
         """Raises RuntimeError if the task has not been computed."""
-        # fast session-only cache
-        task_hash = self._task_hash()
-        if (result_hash := workspace._result_hashes.get(task_hash)) is not None:
-            return result_hash
-
-        # slower workspace cache
-        resolved_hash: ResolvedTaskHash = self._resolved_hash(workspace=workspace)
-        if (result_hash := workspace._result_hash_cache.get(resolved_hash)) is None:
-            raise RuntimeError(f"Task {self} must be computed first.")
-
-        workspace._result_hashes[task_hash] = result_hash
-        return result_hash
+        return workspace.get_result_hash(self)

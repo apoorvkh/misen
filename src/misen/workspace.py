@@ -67,6 +67,44 @@ class Workspace(FromSettingsABC):
         # public accessor to workspace data
         self.results = ResultMap(workspace=self)
 
+    def get_resolved_hash(self, task: Task) -> ResolvedTaskHash | None:
+        task_hash = task._task_hash()
+        # fast (session-only) cache
+        resolved_hash = self._resolved_hashes.get(task_hash)
+        if resolved_hash is not None:
+            return resolved_hash
+        # slower (persistent) cache
+        resolved_hash = self._resolved_hash_cache.get(task_hash)
+        # update fast cache if possible
+        if resolved_hash is not None:
+            self._resolved_hashes[task_hash] = resolved_hash
+        return resolved_hash
+
+    def set_resolved_hash(self, task: Task, resolved_hash: ResolvedTaskHash) -> None:
+        task_hash = task._task_hash()
+        self._resolved_hashes[task_hash] = resolved_hash
+        self._resolved_hash_cache[task_hash] = resolved_hash
+
+    def get_result_hash(self, task: Task) -> ResultHash:
+        # fast (session-only) cache
+        task_hash = task._task_hash()
+        result_hash = self._result_hashes.get(task_hash)
+        if result_hash is not None:
+            return result_hash
+        # slower (persistent) cache
+        resolved_hash = task._resolved_hash(workspace=self)
+        result_hash = self._result_hash_cache.get(resolved_hash)
+        if result_hash is None:
+            raise RuntimeError(f"Task {task} must be computed first.")
+        # update fast cache
+        self._result_hashes[task_hash] = result_hash
+        return result_hash
+
+    def set_result_hash(self, task: Task, result_hash: ResultHash) -> None:
+        self._result_hashes[task._task_hash()] = result_hash
+        resolved_hash = task._resolved_hash(workspace=self)
+        self._result_hash_cache[resolved_hash] = result_hash
+
     @abstractmethod
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike: ...
 
