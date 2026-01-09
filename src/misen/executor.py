@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Executor"]
 
-ExecutorType: TypeAlias = Literal["slurm"]
+ExecutorType: TypeAlias = Literal["local", "slurm"]
 
 
 class Job(ABC):
@@ -86,8 +86,12 @@ class Executor(Generic[JobT], FromSettingsABC):
         if type_name in get_args(ExecutorType):
             type_name = cast("ExecutorType", type_name)
             match type_name:
+                case "local":
+                    from .executors.local import LocalExecutor
+
+                    return LocalExecutor
                 case "slurm":
-                    from misen.executors.slurm import SlurmExecutor
+                    from .executors.slurm import SlurmExecutor
 
                     return SlurmExecutor
                 case _:
