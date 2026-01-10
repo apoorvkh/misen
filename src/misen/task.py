@@ -130,6 +130,10 @@ class Task(Generic[R]):
     def T(self) -> R:
         return cast("R", self)
 
+    @property
+    def _dependencies(self) -> set[Task]:
+        return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
+
     def is_cached(self, workspace: Workspace | None = None) -> bool:
         if workspace is None:
             from .workspace import Workspace
@@ -138,25 +142,37 @@ class Task(Generic[R]):
 
         return self.properties.cache and self in workspace.results
 
+    def are_deps_cached(self, workspace: Workspace | None = None) -> bool:
+        if workspace is None:
+            from .workspace import Workspace
+
+            workspace = Workspace.auto()
+
+        return all(t.is_cached(workspace=workspace) for t in self._dependencies if t.properties.cache)
+
+    def done(self, workspace: Workspace) -> bool:
+        try:
+            workspace.get_result_hash(task=self)
+            return True
+        except RuntimeError:
+            return False
+
+    def is_running(self, workspace: Workspace) -> bool:
+        if not self.are_deps_cached(workspace=workspace):
+            return False
+        return workspace.lock(namespace="task", key=self._resolved_hash(workspace=workspace).hex()).is_locked()
+
     def status(self, workspace: Workspace | None = None) -> Literal["running", "done", "unknown"]:
         if workspace is None:
             from .workspace import Workspace
 
             workspace = Workspace.auto()
 
-        if workspace.lock(namespace="task", key=self._resolved_hash(workspace=workspace).hex()).is_locked():
-            return "running"
-
-        if (
-            self.properties.cache is False and self._resolved_hash(workspace=workspace) in workspace._result_hash_cache
-        ) or (self.properties.cache and self.is_cached(workspace=workspace)):
+        if self.done(workspace=workspace):
             return "done"
-
+        if self.is_running(workspace=workspace):
+            return "running"
         return "unknown"
-
-    @property
-    def _dependencies(self) -> set[Task]:
-        return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
     def _dependency_graph(
         self,

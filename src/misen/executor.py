@@ -70,7 +70,7 @@ class Executor(Generic[JobT], FromSettingsABC):
 
         for i in work_graph.evaluation_order():
             w: WorkUnit = work_graph[i]
-            if w.root.is_cached(workspace=workspace):  # if w.root.status(workspace=workspace) == "done":
+            if w.root.done(workspace=workspace):
                 jobs[w] = CompletedJob()
             else:
                 jobs[w] = self._dispatch(
