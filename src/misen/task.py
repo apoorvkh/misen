@@ -14,6 +14,7 @@ from .utils.graph import DependencyGraph
 from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
 from .utils.log_capture import capture_all_output
 from .utils.object_io import DefaultSerializer, Serializer
+from .utils.sentinels import WORK_DIR
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -244,8 +245,12 @@ class Task(Generic[R]):
             for t in self._dependencies
         }
 
-        def get_value(dep: Task | Any) -> Any:
-            return dep_results[dep] if isinstance(dep, Task) else dep
+        def resolve_argument(dep: Task | Any) -> Any:
+            if isinstance(dep, Task):
+                return dep_results[dep]
+            if dep is WORK_DIR:
+                return workspace.get_work_dir(task=self)
+            return dep
 
         resolved_hash = self._resolved_hash(workspace=workspace)
 
@@ -255,10 +260,9 @@ class Task(Generic[R]):
             else nullcontext()
         ):
             with capture_all_output(workspace.open_log(task=self, mode="a", timestamp=time_ns())):
-                result = self.func(
-                    *(get_value(v) for v in self.args),
-                    **{k: get_value(v) for k, v in self.kwargs.items()},
-                )
+                args = (resolve_argument(v) for v in self.args)
+                kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
+                result = self.func(*args, **kwargs)
 
             match self.properties.index_by:
                 case "task":
