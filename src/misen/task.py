@@ -33,15 +33,9 @@ class TaskProperties(Struct, frozen=True):
     version: int = 0
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
-    versions: dict[str, dict[Any, int]] = {}
+    versions: dict[tuple[str, ResultHash], int] = {}
     index_by: Literal["task", "result"] = "result"
     serializer: type[Serializer] = DefaultSerializer
-
-    def get_argument_version(self, key: str, value: Any) -> int:
-        try:
-            return self.versions[key][value]
-        except (KeyError, TypeError):
-            return 0
 
 
 def task(
@@ -67,7 +61,11 @@ def task(
                 version=version,
                 exclude=(exclude or set()),
                 defaults=(defaults or {}),
-                versions=(versions or {}),
+                versions={
+                    (name, ResultHash.from_object(value)): vs
+                    for name, vv in (versions or {}).items()
+                    for value, vs in vv.items()
+                },
                 index_by=index_by,
                 serializer=serializer,
             ),
@@ -293,17 +291,6 @@ class Task(Generic[R]):
 
         return workspace.get_work_dir(task=self)
 
-    @property
-    def _arguments_for_hashing(self) -> dict[str, Task | tuple[Any, int]]:
-        bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
-        bound_arguments.apply_defaults()
-        return {
-            k: v if isinstance(v, Task) else (v, self.properties.get_argument_version(k, v))
-            for k, v in bound_arguments.arguments.items()
-            if k not in self.properties.exclude
-            and (k not in self.properties.defaults or self.properties.defaults[k] != v)
-        }
-
     def __hash__(self) -> int:
         return hash(int(self._task_hash()))
 
@@ -319,10 +306,7 @@ class Task(Generic[R]):
                 (
                     self.properties.id,
                     self.properties.version,
-                    {
-                        k: (v._task_hash() if isinstance(v, Task) else ResultHash.from_object(v))
-                        for k, v in self._arguments_for_hashing.items()
-                    },
+                    self._hashed_arguments(),
                 )
             )
         return self._cached_task_hash
@@ -336,10 +320,7 @@ class Task(Generic[R]):
                 (
                     self.properties.id,
                     self.properties.version,
-                    {
-                        k: (v._result_hash(workspace=workspace) if isinstance(v, Task) else ResultHash.from_object(v))
-                        for k, v in self._arguments_for_hashing.items()
-                    },
+                    self._hashed_arguments(hash_task_by_result=True, workspace=workspace),
                 )
             )
 
@@ -351,3 +332,25 @@ class Task(Generic[R]):
         """Hash of the task's result object (getter from workspace cache)."""
         """Raises RuntimeError if the task has not been computed."""
         return workspace.get_result_hash(self)
+
+    def _hashed_arguments(
+        self, hash_task_by_result: bool = False, workspace: Workspace | None = None
+    ) -> dict[str, TaskHash | tuple[ResultHash, int]]:
+        bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
+        bound_arguments.apply_defaults()
+
+        def resolve(key: str, value: Any) -> TaskHash | tuple[ResultHash, int]:
+            if isinstance(value, Task) and not hash_task_by_result:
+                return value._task_hash()
+            result_hash = (
+                value._result_hash(workspace=workspace) if isinstance(value, Task) else ResultHash.from_object(value)
+            )
+            version = self.properties.versions.get((key, result_hash), 0)
+            return result_hash, version
+
+        return {
+            k: resolve(k, v)
+            for k, v in bound_arguments.arguments.items()
+            if k not in self.properties.exclude
+            and (k not in self.properties.defaults or self.properties.defaults[k] != v)
+        }
