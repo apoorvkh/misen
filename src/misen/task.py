@@ -134,20 +134,12 @@ class Task(Generic[R]):
     def _dependencies(self) -> set[Task]:
         return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
-    def is_cached(self, workspace: Workspace | None = None) -> bool:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
+    def is_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
+        workspace = _resolve_workspace(workspace)
         return self.properties.cache and self in workspace.results
 
-    def are_deps_cached(self, workspace: Workspace | None = None) -> bool:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
+    def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
+        workspace = _resolve_workspace(workspace)
         return all(t.is_cached(workspace=workspace) for t in self._dependencies if t.properties.cache)
 
     def done(self, workspace: Workspace) -> bool:
@@ -162,11 +154,8 @@ class Task(Generic[R]):
             return False
         return workspace.lock(namespace="task", key=self._resolved_hash(workspace=workspace).hex()).is_locked()
 
-    def status(self, workspace: Workspace | None = None) -> Literal["running", "done", "unknown"]:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
+    def status(self, workspace: Workspace | Literal["auto"] = "auto") -> Literal["running", "done", "unknown"]:
+        workspace = _resolve_workspace(workspace)
 
         if self.done(workspace=workspace):
             return "done"
@@ -178,12 +167,10 @@ class Task(Generic[R]):
         self,
         exclude_cacheable: bool = False,
         exclude_cached: bool = False,
-        workspace: Workspace | None = None,
+        workspace: Workspace | Literal["auto"] = "auto",
     ) -> DependencyGraph[Task]:
-        if exclude_cached and workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
+        if exclude_cached:
+            workspace = _resolve_workspace(workspace)
 
         @cache
         def _include(dependency: Task) -> bool:
@@ -221,33 +208,23 @@ class Task(Generic[R]):
 
         return graph
 
-    def run(self, workspace: Workspace | None = None, executor: Executor | None = None):
+    def run(self, workspace: Workspace | Literal["auto"] = "auto", executor: Executor | Literal["auto"] = "auto"):
         """
         Submit task to an executor and return a mapping from each distributable task to its
         dependency set and runtime job status handle.
         """
-
-        if executor is None:
-            from .executor import Executor
-
-            executor = Executor.auto()
-
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
+        executor = _resolve_executor(executor)
+        workspace = _resolve_workspace(workspace)
         return executor.submit(tasks={self}, workspace=workspace)
 
     def result(
-        self, workspace: Workspace | None = None, compute_if_uncached: bool = False, compute_uncached_deps: bool = False
+        self,
+        workspace: Workspace | Literal["auto"] = "auto",
+        compute_if_uncached: bool = False,
+        compute_uncached_deps: bool = False,
     ) -> R:
         """Compute or retrieve the Task result and cache it."""
-
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
+        workspace = _resolve_workspace(workspace)
 
         if self.properties.cache:
             if (result := workspace.results.get(self)) is not None:
@@ -256,12 +233,11 @@ class Task(Generic[R]):
             if not compute_if_uncached:
                 raise RuntimeError(f"{self} is not cached.")
 
-        if not compute_uncached_deps:
+        if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
             uncached_deps = [
                 t for t in self._dependencies if t.properties.cache and not t.is_cached(workspace=workspace)
             ]
-            if len(uncached_deps) > 0:
-                raise RuntimeError(f"{self} has dependencies which must be computed and cached first: {uncached_deps}")
+            raise RuntimeError(f"{self} has dependencies which must be computed and cached first: {uncached_deps}")
 
         dep_results: dict[Task, Any] = {
             t: t.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
@@ -299,12 +275,8 @@ class Task(Generic[R]):
 
         return result
 
-    def work_dir(self, workspace: Workspace | None = None) -> Path:
-        if workspace is None:
-            from .workspace import Workspace
-
-            workspace = Workspace.auto()
-
+    def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
+        workspace = _resolve_workspace(workspace)
         return workspace.get_work_dir(task=self)
 
     def __hash__(self) -> int:
@@ -350,19 +322,19 @@ class Task(Generic[R]):
         return workspace.get_result_hash(self)
 
     def _hashed_arguments(
-        self, hash_task_by_result: bool = False, workspace: Workspace | None = None
-    ) -> dict[str, TaskHash | tuple[ResultHash, int]]:
+        self, hash_task_by_result: bool = False, workspace: Workspace | Literal["auto"] = "auto"
+    ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
         bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
         bound_arguments.apply_defaults()
 
-        def resolve(key: str, value: Any) -> TaskHash | tuple[ResultHash, int]:
-            if isinstance(value, Task) and not hash_task_by_result:
-                return value._task_hash()
-            result_hash = (
-                value._result_hash(workspace=workspace) if isinstance(value, Task) else ResultHash.from_object(value)
+        def resolve(key: str, value: Any) -> tuple[TaskHash | ResultHash, int]:
+            h = (
+                (value._result_hash(workspace=workspace) if hash_task_by_result else value._task_hash())
+                if isinstance(value, Task)
+                else ResultHash.from_object(value)
             )
-            version = self.properties.versions.get((key, result_hash), 0)
-            return result_hash, version
+            version = self.properties.versions.get((key, h), 0)
+            return h, version
 
         return {
             k: resolve(k, v)
@@ -370,3 +342,19 @@ class Task(Generic[R]):
             if k not in self.properties.exclude
             and (k not in self.properties.defaults or self.properties.defaults[k] != v)
         }
+
+
+def _resolve_workspace(workspace: Workspace | Literal["auto"] = "auto") -> Workspace:
+    if workspace == "auto":
+        from .workspace import Workspace
+
+        workspace = Workspace.auto()
+    return workspace
+
+
+def _resolve_executor(executor: Executor | Literal["auto"] = "auto") -> Executor:
+    if executor == "auto":
+        from .executor import Executor
+
+        executor = Executor.auto()
+    return executor
