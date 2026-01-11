@@ -8,7 +8,8 @@ from misen.workspace import Workspace
 
 
 class SlurmJob(Job):
-    def __init__(self, submitit_job: submitit.Job) -> None:
+    def __init__(self, work_unit: WorkUnit, submitit_job: submitit.Job) -> None:
+        super().__init__(work_unit=work_unit)
         self.submitit_job = submitit_job
 
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
@@ -58,4 +59,4 @@ class SlurmExecutor(Executor[SlurmJob]):
 
         job = self.slurm_executor.submit(work_unit.execute, workspace)
 
-        return SlurmJob(submitit_job=job)
+        return SlurmJob(work_unit=work_unit, submitit_job=job)

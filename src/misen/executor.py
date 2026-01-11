@@ -40,7 +40,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
         self,
         tasks: set[Task],
         workspace: Workspace,
-    ) -> tuple[DependencyGraph[WorkUnit], dict[WorkUnit, CompletedJob | JobT]]:
+    ) -> DependencyGraph[CompletedJob | JobT]:
         """
         Submit a set of tasks for execution. Tasks will be run by backend respecting dependency order.
 
@@ -49,22 +49,23 @@ class Executor(FromSettingsABC, Generic[JobT]):
             workspace: Workspace providing Task artifact caching and retrieval.
 
         Returns:
-            (work_graph, jobs)
-            - work_graph: A dependency graph of WorkUnits. Where WorkUnits point to WorkUnits they depend on.
-            - jobs: Mapping from each WorkUnit in `work_graph` to either CompletedJob() if already complete or a
-              backend-specific Job handle returned by `_dispatch`.
+            A dependency graph of backend-specific Job handles corresponding to WorkUnits.
         """
         work_graph: DependencyGraph[WorkUnit] = self._build_work_graph(tasks=tasks, workspace=workspace)
         jobs: dict[WorkUnit, CompletedJob | JobT] = {}
 
         for w in work_graph:  # iterator in dependency order
             if w.root.done(workspace=workspace):
-                jobs[w] = CompletedJob()
+                jobs[w] = CompletedJob(work_unit=w)
             else:
                 dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
                 jobs[w] = self._dispatch(work_unit=w, dependencies=dependencies, workspace=workspace)
 
-        return work_graph, jobs
+        job_graph = cast("DependencyGraph[CompletedJob | JobT]", work_graph.copy())
+        for i in job_graph.node_indices():
+            job_graph[i] = jobs[work_graph[i]]
+
+        return job_graph
 
     @abstractmethod
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace) -> JobT:
@@ -216,10 +217,16 @@ class WorkUnit:
 
 
 class Job(ABC):
+    def __init__(self, work_unit: WorkUnit) -> None:
+        self.work_unit = work_unit
+
     @abstractmethod
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
 
 
 class CompletedJob(Job):
+    def __init__(self, work_unit: WorkUnit) -> None:
+        super().__init__(work_unit=work_unit)
+
     def state(self) -> Literal["done"]:
         return "done"

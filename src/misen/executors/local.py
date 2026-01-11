@@ -56,7 +56,14 @@ def _run_pickled(payload: bytes) -> None:
 
 
 class LocalJob(Job):
-    def __init__(self, resources: TaskResources, dependencies: set["LocalJob"], payload: bytes):
+    def __init__(
+        self,
+        work_unit: WorkUnit,
+        resources: TaskResources,
+        dependencies: set[LocalJob],
+        payload: bytes,
+    ) -> None:
+        super().__init__(work_unit=work_unit)
         self.resources = resources
         self.dependencies = dependencies
         self.payload = payload
@@ -173,6 +180,6 @@ class LocalExecutor(Executor[LocalJob]):
             )
             raise ValueError(msg)
         payload = cloudpickle.dumps(functools.partial(work_unit.execute, workspace=workspace))
-        job = LocalJob(resources=resources, dependencies=dependencies, payload=payload)
+        job = LocalJob(work_unit=work_unit, resources=resources, dependencies=dependencies, payload=payload)
         self._scheduler.submit(job)
         return job

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from .executor import Executor
+    from .executor import Executor, Job
     from .workspace import Workspace
 
 __all__ = ["Task", "resources", "task"]
@@ -138,7 +138,12 @@ class Task(Generic[R]):
 
         return graph
 
-    def run(self, *, workspace: Workspace | Literal["auto"] = "auto", executor: Executor | Literal["auto"] = "auto"):
+    def run(
+        self,
+        *,
+        workspace: Workspace | Literal["auto"] = "auto",
+        executor: Executor | Literal["auto"] = "auto",
+    ) -> DependencyGraph[Job]:
         """
         Submit task to an executor and return a mapping from each distributable task to its
         dependency set and runtime job status handle.
