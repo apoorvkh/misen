@@ -6,11 +6,11 @@ from .utils.settings import Settings
 from .workspace import Workspace
 
 __all__ = [
+    "WORK_DIR",
     "Executor",
     "Experiment",
-    "Task",
-    "task",
-    "WORK_DIR",
     "Settings",
+    "Task",
     "Workspace",
+    "task",
 ]

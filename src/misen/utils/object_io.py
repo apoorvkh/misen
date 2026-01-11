@@ -5,7 +5,7 @@ from typing import Any, Generic, TypeVar
 
 import dill
 
-__all__ = ["Serializer", "DefaultSerializer"]
+__all__ = ["DefaultSerializer", "Serializer"]
 
 T = TypeVar("T")
 
@@ -17,11 +17,11 @@ class Serializer(ABC, Generic[T]):
 
     @staticmethod
     @abstractmethod
-    def save(obj: T, dir: Path) -> None: ...
+    def save(obj: T, directory: Path) -> None: ...
 
     @staticmethod
     @abstractmethod
-    def load(dir: Path) -> T: ...
+    def load(directory: Path) -> T: ...
 
 
 # TODO: add cases for other formats
@@ -29,15 +29,16 @@ class Serializer(ABC, Generic[T]):
 
 class DefaultSerializer(Serializer[Any]):
     @staticmethod
-    def save(obj: Any, dir: Path) -> None:
-        (dir / "data.dill").write_bytes(dill.dumps(obj))
+    def save(obj: Any, directory: Path) -> None:
+        (directory / "data.dill").write_bytes(dill.dumps(obj))
 
     @staticmethod
-    def load(dir: Path) -> Any:
+    def load(directory: Path) -> Any:
         try:
-            return dill.loads((dir / "data.dill").read_bytes())
+            return dill.loads((directory / "data.dill").read_bytes())
         except UnpicklingError:
-            raise ValueError(f"Failed to load object from {dir}")
+            msg = f"Failed to load object from {directory}"
+            raise ValueError(msg)
             # TODO: compare environment against _dill_required_libs
 
 

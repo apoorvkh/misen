@@ -45,10 +45,10 @@ members = ["packages/*"]
 
 [tool.ruff]
 line-length = 120
-include = ["pyproject.toml", "src/**/*.py", "tests/**/*.py"]
 src = ["src", "tests", "packages"]
 [tool.ruff.lint]
-extend-select = ["I", "TCH"]
+select = ["ALL"]
+ignore = ["D", "FIX", "TD", "PLC0415", "PLR0913", "C901", "ANN401", "SIM117"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 

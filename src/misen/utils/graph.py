@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from operator import eq
-from typing import Any, Callable, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import rustworkx as rx
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = ["DependencyGraph"]
 
@@ -11,7 +14,7 @@ T = TypeVar("T")
 
 
 class DependencyGraph(Generic[T]):
-    def __init__(self):
+    def __init__(self) -> None:
         self._g = rx.PyDiGraph(check_cycle=True, multigraph=False)
 
     ## Wrapper functions
@@ -64,6 +67,7 @@ class DependencyGraph(Generic[T]):
 
     def pretty_print(
         self,
+        *,
         roots: list[T] | None = None,
         max_depth: int | None = None,
         show_duplicates: bool = False,

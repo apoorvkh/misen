@@ -5,7 +5,7 @@ from collections.abc import Callable
 from functools import cached_property
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import msgspec
 from msgspec import Struct
@@ -17,7 +17,7 @@ else:
     import tomli as tomllib
 
 
-__all__ = ["Settings", "FromSettingsABC"]
+__all__ = ["FromSettingsABC", "Settings"]
 
 
 DEFAULT_SETTINGS_FILE = Path(os.environ.get("MISEN_SETTINGS_FILE") or (Path.cwd() / "misen.toml"))
@@ -35,7 +35,7 @@ class Settings(Struct, dict=True):
 
 
 class FromSettingsMeta(msgspec.StructMeta, ABCMeta):
-    _instances: dict[bytes, Any] = {}
+    _instances: ClassVar[dict[bytes, Any]] = {}
 
     def __call__(cls, **kwargs):
         """Parameterized singleton"""

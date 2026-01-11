@@ -1,25 +1,25 @@
 from __future__ import annotations
 
-import os
 import shutil
 import tempfile
+from collections.abc import Generator, Iterator, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator, Generic, Literal, MutableMapping, TextIO, TypeVar
+from typing import TYPE_CHECKING, Generic, Literal, TextIO, TypeVar
 
 import lmdb
 
-from ..utils.hashes import Hash, ResolvedTaskHash, ResultHash, TaskHash
-from ..utils.locks import LockLike, NFSLock
-from ..workspace import Workspace
+from misen.utils.hashes import Hash, ResolvedTaskHash, ResultHash, TaskHash
+from misen.utils.locks import LockLike, NFSLock
+from misen.workspace import Workspace
 
 if TYPE_CHECKING:
-    from ..task import Task
+    from misen.task import Task
 
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
 
 
-class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
+class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     _key_type: type[KT]
     _value_type: type[VT]
 
@@ -31,9 +31,10 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
             {"_key_type": key_t, "_value_type": val_t, "__module__": cls.__module__},
         )
 
-    def __init__(self, database_path: Path):
+    def __init__(self, database_path: Path) -> None:
         if not hasattr(self, "_key_type") or not hasattr(self, "_value_type"):
-            raise TypeError("Construct as LMDBMapping[KeyType, ValueType](...)")
+            msg = "Construct as LMDBMapping[KeyType, ValueType](...)"
+            raise TypeError(msg)
 
         self.lock = NFSLock(database_path.with_suffix(".lock"), lifetime=10)
 
@@ -61,7 +62,7 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
 
     def __getitem__(self, key: KT) -> VT:
         with self.env.begin() as txn:
-            v: bytes | None = txn.get(key.encode(), default=None)  # type: ignore
+            v: bytes | None = txn.get(key.encode(), default=None)
             if v is None:
                 raise KeyError(key)
             return self._value_type.decode(v)
@@ -88,7 +89,7 @@ class LMDBMapping(Generic[KT, VT], MutableMapping[KT, VT]):
 
 
 class DiskResultStore(MutableMapping[ResultHash, Path]):
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path) -> None:
         self.directory = directory
 
     def _result_dir_path(self, key: ResultHash) -> Path:
@@ -103,7 +104,7 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
             raise KeyError(key)
         return result_dir_path
 
-    def __setitem__(self, key: ResultHash, value: Path):
+    def __setitem__(self, key: ResultHash, value: Path) -> None:
         result_dir_path = self._result_dir_path(key)
         if not result_dir_path.exists():
             shutil.move(value, result_dir_path)
@@ -113,13 +114,11 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         if not result_dir_path.exists():
             raise KeyError(key)
         # atomic deletion
-        trash_dir = tempfile.mkdtemp(
-            dir=os.path.dirname(result_dir_path), prefix=f"{os.path.basename(result_dir_path)}.", suffix=".trash"
-        )
+        trash_dir = tempfile.mkdtemp(dir=result_dir_path.parent, prefix=f"{result_dir_path.name}.", suffix=".trash")
         shutil.move(result_dir_path, trash_dir)
         shutil.rmtree(trash_dir)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[ResultHash]:
         for p in self.directory.glob(("[0-9a-f]" * 2) + "/" + ("[0-9a-f]" * 16)):
             if (stem := p.stem)[:2] == p.parent.name:
                 yield ResultHash(stem, base=16)
@@ -134,7 +133,7 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
 class DiskWorkspace(Workspace):
     directory: str = ".misen"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         directory = Path(self.directory)
         directory.mkdir(exist_ok=True)
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
@@ -151,23 +150,26 @@ class DiskWorkspace(Workspace):
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
         return NFSLock(
-            lockfile=(self.get_temp_dir() / f"{namespace}_locks" / f"{key}.lock"), lifetime=30, refresh_interval=20
+            lockfile=(self.get_temp_dir() / f"{namespace}_locks" / f"{key}.lock"),
+            lifetime=30,
+            refresh_interval=20,
         )
 
     def get_temp_dir(self) -> Path:
         return Path(self.directory) / "tmp"
 
     def get_work_dir(self, task: Task) -> Path:
-        key_hex = task._resolved_hash(workspace=self).hex()
+        key_hex = task.resolved_hash(workspace=self).hex()
         d = Path(self.directory) / "work" / key_hex[:2] / f"{key_hex}"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def get_log_dir(self, task: Task) -> Path:
-        key_hex = task._resolved_hash(workspace=self).hex()
+        key_hex = task.resolved_hash(workspace=self).hex()
         d = Path(self.directory) / "logs" / key_hex[:2] / f"{key_hex}"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def open_log(self, task: Task, mode: Literal["a", "r"], timestamp: int | Literal["latest"] = "latest") -> TextIO:
-        return open(self.get_log_dir(task) / f"{timestamp}.log", mode, buffering=1)
+        path = self.get_log_dir(task) / f"{timestamp}.log"
+        return path.open(mode, buffering=1)

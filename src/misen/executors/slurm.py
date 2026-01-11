@@ -1,14 +1,15 @@
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 import submitit
 
-from ..executor import Executor, Job
-from ..task import TaskResources
+from misen.executor import Executor, Job
+from misen.task import TaskResources
 
 
 class SlurmJob(Job):
-    def __init__(self, submitit_job: submitit.Job):
+    def __init__(self, submitit_job: submitit.Job) -> None:
         self.submitit_job = submitit_job
 
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import sys
 from abc import abstractmethod
+from collections.abc import Mapping
 from dataclasses import make_dataclass
 from functools import cache
 from pathlib import Path
-from typing import Generic, Literal, Mapping, TypeVar
+from typing import Generic, Literal, TypeVar
 
 import tyro
 from msgspec import Struct
@@ -21,11 +22,11 @@ __all__ = ["Experiment"]
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
 
 
-class Experiment(Generic[TasksT], Struct, frozen=True):
+class Experiment(Struct, Generic[TasksT], frozen=True):
     @abstractmethod
     def tasks(self) -> TasksT: ...
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         setattr(cls, "tasks", cache(cls.tasks))
 
@@ -43,7 +44,7 @@ class Experiment(Generic[TasksT], Struct, frozen=True):
         executor.submit(tasks=set(self.tasks().values()), workspace=workspace)
 
     @classmethod
-    def cli(cls):
+    def cli(cls) -> None:
         _fields_without_defaults = []
         _fields_with_defaults = [
             ("command", Literal["run", "count"], "run"),

@@ -20,7 +20,7 @@ from __future__ import annotations
 import functools
 from abc import ABC, abstractmethod
 from operator import is_
-from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, TypeAlias, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast, get_args
 
 from typing_extensions import assert_never
 
@@ -30,6 +30,8 @@ from misen.utils.settings import FromSettingsABC
 from .task import Task, TaskResources
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .utils.graph import DependencyGraph
     from .workspace import Workspace
 
@@ -54,15 +56,44 @@ class CompletedJob(Job):
 # TODO: submit array?
 
 
-class Executor(Generic[JobT], FromSettingsABC):
+class Executor(FromSettingsABC, Generic[JobT]):
     """Abstract interface for implementing an Executor for a specific backend."""
+
+    @staticmethod
+    def _settings_key() -> str:
+        return "executor"
+
+    @staticmethod
+    def _default() -> Executor:
+        from .executors.local import LocalExecutor
+
+        return LocalExecutor()
+
+    @classmethod
+    def _resolve_type(cls, type_name: str | ExecutorType) -> type[Executor]:
+        if type_name in get_args(ExecutorType):
+            type_name = cast("ExecutorType", type_name)
+            match type_name:
+                case "local":
+                    from .executors.local import LocalExecutor
+
+                    return LocalExecutor
+                case "slurm":
+                    from .executors.slurm import SlurmExecutor
+
+                    return SlurmExecutor
+                case _:
+                    assert_never(type_name)
+        return super()._resolve_type(type_name)
 
     @abstractmethod
     def _dispatch(self, function: Callable, resources: TaskResources, dependencies: set[JobT]) -> JobT:
         """For dispatching a function with the backend. Returns a Job."""
 
     def submit(
-        self, tasks: set[Task], workspace: Workspace
+        self,
+        tasks: set[Task],
+        workspace: Workspace,
     ) -> tuple[DependencyGraph[WorkUnit], dict[WorkUnit, CompletedJob | JobT]]:
         """Entrypoint for submitting a Task's DAG to the Executor."""
         work_graph: DependencyGraph[WorkUnit] = _build_work_graph(tasks=tasks, workspace=workspace)
@@ -81,36 +112,6 @@ class Executor(Generic[JobT], FromSettingsABC):
 
         return work_graph, jobs
 
-    @staticmethod
-    def _settings_key() -> str:
-        return "executor"
-
-    @staticmethod
-    def _default() -> Executor:
-        # from .executors.local import LocalExecutor
-
-        # return LocalExecutor()
-        from misen.executors.slurm import SlurmExecutor
-
-        return SlurmExecutor()
-
-    @classmethod
-    def _resolve_type(cls, type_name: str | ExecutorType) -> type["Executor"]:
-        if type_name in get_args(ExecutorType):
-            type_name = cast("ExecutorType", type_name)
-            match type_name:
-                case "local":
-                    from .executors.local import LocalExecutor
-
-                    return LocalExecutor
-                case "slurm":
-                    from .executors.slurm import SlurmExecutor
-
-                    return SlurmExecutor
-                case _:
-                    assert_never(type_name)
-        return super()._resolve_type(type_name)
-
 
 class WorkUnit:
     """
@@ -124,13 +125,13 @@ class WorkUnit:
     resources: TaskResources
     dependencies: set[WorkUnit]
 
-    def __init__(self, root: Task, dependencies: set[WorkUnit]):
+    def __init__(self, root: Task, dependencies: set[WorkUnit]) -> None:
         self.root = root
         # WorkUnits which must be computed before this one
         self.dependencies = dependencies
 
         # DAG of non-cacheable Tasks (truncated at downstream, cacheable Tasks) reachable from `task`
-        self.graph = root._dependency_graph(exclude_cacheable=True)
+        self.graph = root.dependency_graph(exclude_cacheable=True)
 
         # Union of resources for all tasks in graph
         _resource_list: list[TaskResources] = [task.resources for task in self.graph.nodes()]
@@ -151,7 +152,7 @@ class WorkUnit:
             ),
         )
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         # Tasks and WorkUnits have a 1:1 correspondence, so we can defer to Task.__hash__
         # Two Tasks may have equivalent `self.graph`s at runtime (determined after self.dependencies are resolved)
         return hash(self.root)
@@ -159,10 +160,10 @@ class WorkUnit:
     def __eq__(self, other: object) -> bool:
         return isinstance(other, WorkUnit) and self.root == other.root
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"WorkUnit(hash={short_hash(self)})"
 
-    def execute(self, workspace: Workspace):
+    def execute(self, workspace: Workspace) -> None:
         """Execute the Tasks in self.graph one-by-one (in dependency order)."""
         task_results: dict[Task, Any] = {}
 
@@ -180,7 +181,7 @@ class WorkUnit:
             # remove any results that are not needed by future dependents
             remaining_tasks = evaluation_order[i + 1 :]
             if len(remaining_tasks) > 0:
-                remaining_deps = set.union(*(t._dependencies for t in remaining_tasks))
+                remaining_deps = set.union(*(t.dependencies for t in remaining_tasks))
             else:
                 remaining_deps = set()
 
@@ -194,14 +195,14 @@ def _build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph
     Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
     """
     # dependency graph: dependents point to dependencies
-    union = Task((lambda *args: None), *tasks)
-    task_graph: DependencyGraph[Task] = union._dependency_graph(workspace=workspace)
+    union = Task((lambda *_: None), *tasks)
+    task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
     task_graph.remove_node_by_value(union, cmp=is_, first=True)
 
     # Retain only root and cachable tasks (and the induced graph minor)
     anchor_graph = task_graph.copy()
     anchor_graph.coarsen_to_anchors(
-        anchors=[i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache]
+        anchors=[i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache],
     )
 
     # replace nodes with WorkUnit instances

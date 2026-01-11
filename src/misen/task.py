@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from functools import cache
 from inspect import signature
 from time import time_ns
-from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
 from msgspec import Struct
 from typing_extensions import assert_never
@@ -17,12 +17,13 @@ from .utils.object_io import DefaultSerializer, Serializer
 from .utils.sentinels import WORK_DIR
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from .executor import Executor
     from .workspace import Workspace
 
-__all__ = ["Task", "task", "resources"]
+__all__ = ["Task", "resources", "task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -40,7 +41,8 @@ class TaskProperties(Struct, frozen=True):
 
 
 def task(
-    id: str | None = None,  # TODO: command to fill these in when None
+    *,
+    id: str | None,  # TODO: command to fill these in when None
     cache: bool = False,
     version: int = 0,
     exclude: set[str] | None = None,
@@ -53,23 +55,19 @@ def task(
     # TODO: Callable has no __qualname__
     # TODO: handle func.__module__ == "__main__"
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        setattr(
-            func,
-            "__task_properties__",
-            TaskProperties(
-                id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
-                cache=cache,
-                version=version,
-                exclude=(exclude or set()),
-                defaults=(defaults or {}),
-                versions={
-                    (name, ResultHash.from_object(value)): vs
-                    for name, vv in (versions or {}).items()
-                    for value, vs in vv.items()
-                },
-                index_by=index_by,
-                serializer=serializer,
-            ),
+        func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
+            id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
+            cache=cache,
+            version=version,
+            exclude=(exclude or set()),
+            defaults=(defaults or {}),
+            versions={
+                (name, ResultHash.from_object(value)): vs
+                for name, vv in (versions or {}).items()
+                for value, vs in vv.items()
+            },
+            index_by=index_by,
+            serializer=serializer,
         )
         return func
 
@@ -89,6 +87,7 @@ class TaskResources(Struct):
 
 
 def resources(
+    *,
     time: int | None = None,  # walltime (minutes)
     nodes: int = 1,  # number of nodes
     memory: int = 8,  # memory in GB
@@ -97,10 +96,13 @@ def resources(
     gpu_memory: int | None = None,  # memory (GB) per GPU
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        setattr(
-            func,
-            "__task_resources__",
-            TaskResources(time=time, nodes=nodes, memory=memory, cpus=cpus, gpus=gpus, gpu_memory=gpu_memory),
+        func.__task_resources__ = TaskResources(  # ty:ignore[unresolved-attribute]
+            time=time,
+            nodes=nodes,
+            memory=memory,
+            cpus=cpus,
+            gpus=gpus,
+            gpu_memory=gpu_memory,
         )
         return func
 
@@ -112,7 +114,7 @@ def resources(
 
 
 class Task(Generic[R]):
-    def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs):
+    def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> None:
         self.properties: TaskProperties = getattr(
             func,
             "__task_properties__",
@@ -124,15 +126,18 @@ class Task(Generic[R]):
         self.args: P.args = args
         self.kwargs: P.kwargs = kwargs
 
-    def __repr__(self):
-        return f"Task({self.func.__module__}.{self.func.__qualname__}, hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"
+    def __repr__(self) -> str:
+        return (
+            f"Task({self.func.__module__}.{self.func.__qualname__}, "
+            f"hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"
+        )
 
     @property
-    def T(self) -> R:
+    def T(self) -> R:  # noqa: N802
         return cast("R", self)
 
     @property
-    def _dependencies(self) -> set[Task]:
+    def dependencies(self) -> set[Task]:
         return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
     def is_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
@@ -141,19 +146,19 @@ class Task(Generic[R]):
 
     def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
         workspace = _resolve_workspace(workspace)
-        return all(t.is_cached(workspace=workspace) for t in self._dependencies if t.properties.cache)
+        return all(t.is_cached(workspace=workspace) for t in self.dependencies if t.properties.cache)
 
     def done(self, workspace: Workspace) -> bool:
         try:
             workspace.get_result_hash(task=self)
-            return True
         except RuntimeError:
             return False
+        return True
 
     def is_running(self, workspace: Workspace) -> bool:
         if not self.are_deps_cached(workspace=workspace):
             return False
-        return workspace.lock(namespace="task", key=self._resolved_hash(workspace=workspace).hex()).is_locked()
+        return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).hex()).is_locked()
 
     def status(self, workspace: Workspace | Literal["auto"] = "auto") -> Literal["running", "done", "unknown"]:
         workspace = _resolve_workspace(workspace)
@@ -164,8 +169,9 @@ class Task(Generic[R]):
             return "running"
         return "unknown"
 
-    def _dependency_graph(
+    def dependency_graph(
         self,
+        *,
         exclude_cacheable: bool = False,
         exclude_cached: bool = False,
         workspace: Workspace | Literal["auto"] = "auto",
@@ -199,7 +205,7 @@ class Task(Generic[R]):
             task: Task = stack.pop()
             task_node = _get_node(task)
 
-            for dep in task._dependencies:
+            for dep in task.dependencies:
                 if not _include(dep):
                     continue
                 graph.add_edge(task_node, _get_node(dep), None)
@@ -209,7 +215,7 @@ class Task(Generic[R]):
 
         return graph
 
-    def run(self, workspace: Workspace | Literal["auto"] = "auto", executor: Executor | Literal["auto"] = "auto"):
+    def run(self, *, workspace: Workspace | Literal["auto"] = "auto", executor: Executor | Literal["auto"] = "auto"):
         """
         Submit task to an executor and return a mapping from each distributable task to its
         dependency set and runtime job status handle.
@@ -220,6 +226,7 @@ class Task(Generic[R]):
 
     def result(
         self,
+        *,
         workspace: Workspace | Literal["auto"] = "auto",
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
@@ -232,17 +239,19 @@ class Task(Generic[R]):
                 return result
 
             if not compute_if_uncached:
-                raise RuntimeError(f"{self} is not cached.")
+                msg = f"{self} is not cached."
+                raise RuntimeError(msg)
 
         if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
             uncached_deps = [
-                t for t in self._dependencies if t.properties.cache and not t.is_cached(workspace=workspace)
+                t for t in self.dependencies if t.properties.cache and not t.is_cached(workspace=workspace)
             ]
-            raise RuntimeError(f"{self} has dependencies which must be computed and cached first: {uncached_deps}")
+            msg = f"{self} has dependencies which must be computed and cached first: {uncached_deps}"
+            raise RuntimeError(msg)
 
         dep_results: dict[Task, Any] = {
             t: t.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
-            for t in self._dependencies
+            for t in self.dependencies
         }
 
         def resolve_argument(dep: Task | Any) -> Any:
@@ -252,7 +261,7 @@ class Task(Generic[R]):
                 return workspace.get_work_dir(task=self)
             return dep
 
-        resolved_hash = self._resolved_hash(workspace=workspace)
+        resolved_hash = self.resolved_hash(workspace=workspace)
 
         with (
             workspace.lock(namespace="task", key=resolved_hash.hex()).context(blocking=False)
@@ -284,14 +293,14 @@ class Task(Generic[R]):
         return workspace.get_work_dir(task=self)
 
     def __hash__(self) -> int:
-        return hash(int(self._task_hash()))
+        return hash(int(self.task_hash()))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Task):
             return NotImplemented
-        return self._task_hash() == other._task_hash()
+        return self.task_hash() == other.task_hash()
 
-    def _task_hash(self) -> TaskHash:
+    def task_hash(self) -> TaskHash:
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "_cached_task_hash"):
             self._cached_task_hash = TaskHash.from_object(
@@ -299,11 +308,11 @@ class Task(Generic[R]):
                     self.properties.id,
                     self.properties.version,
                     self._hashed_arguments(),
-                )
+                ),
             )
         return self._cached_task_hash
 
-    def _resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
+    def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """A hash that represents the Task object using its resolved arguments."""
         resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
 
@@ -313,27 +322,30 @@ class Task(Generic[R]):
                     self.properties.id,
                     self.properties.version,
                     self._hashed_arguments(hash_task_by_result=True, workspace=workspace),
-                )
+                ),
             )
 
             workspace.set_resolved_hash(self, resolved_hash)
 
         return resolved_hash
 
-    def _result_hash(self, workspace: Workspace) -> ResultHash:
+    def result_hash(self, workspace: Workspace) -> ResultHash:
         """Hash of the task's result object (getter from workspace cache)."""
         """Raises RuntimeError if the task has not been computed."""
         return workspace.get_result_hash(self)
 
     def _hashed_arguments(
-        self, hash_task_by_result: bool = False, workspace: Workspace | Literal["auto"] = "auto"
+        self,
+        *,
+        hash_task_by_result: bool = False,
+        workspace: Workspace | Literal["auto"] = "auto",
     ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
         bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
         bound_arguments.apply_defaults()
 
         def resolve(key: str, value: Any) -> tuple[TaskHash | ResultHash, int]:
             h = (
-                (value._result_hash(workspace=workspace) if hash_task_by_result else value._task_hash())
+                (value.result_hash(workspace=workspace) if hash_task_by_result else value.task_hash())
                 if isinstance(value, Task)
                 else ResultHash.from_object(value)
             )

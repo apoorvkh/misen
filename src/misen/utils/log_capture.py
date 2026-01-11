@@ -8,13 +8,16 @@ import os
 import sys
 import threading
 import time
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
-def _try(fn, *args, **kwargs):
+def _try(fn: Callable, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -30,7 +33,7 @@ def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
         _try(target.flush)
 
 
-def _make_decoder(enc: str):
+def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
     return codecs.getincrementaldecoder(enc)(errors="replace")
 
 
@@ -69,7 +72,8 @@ def capture_all_output(target: TextIO, timeout: float = 10.0):
     # --- guard against recursion / feedback loops ---
     # Case 1: explicitly passing current stdout/stderr objects
     if target is old_stdout or target is old_stderr:
-        raise ValueError("capture_all_output: `target` must not be sys.stdout/sys.stderr (would recurse)")
+        msg = "capture_all_output: `target` must not be sys.stdout/sys.stderr (would recurse)"
+        raise ValueError(msg)
 
     # Case 2: target ultimately writes to fd 1 or 2 (e.g. TextIOWrapper over stdout)
     # Best-effort: if it quacks like a file descriptor and is 1/2, refuse.
@@ -77,7 +81,8 @@ def capture_all_output(target: TextIO, timeout: float = 10.0):
     if callable(fileno):
         fd = _try(fileno)
         if fd in (1, 2):
-            raise ValueError("capture_all_output: `target` must not write to fd 1/2 (would recurse)")
+            msg = "capture_all_output: `target` must not write to fd 1/2 (would recurse)"
+            raise ValueError(msg)
     # --- end guard ---
 
     # Flush before redirecting

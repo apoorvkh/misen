@@ -1,7 +1,7 @@
 from misen_hash import canonical_hash
 from typing_extensions import Self
 
-__all__ = ["Hash", "TaskHash", "ResolvedTaskHash", "ResultHash", "short_hash"]
+__all__ = ["Hash", "ResolvedTaskHash", "ResultHash", "TaskHash", "short_hash"]
 
 
 class Hash(int):

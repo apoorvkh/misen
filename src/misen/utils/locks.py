@@ -1,22 +1,22 @@
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import ContextManager, Protocol
+from typing import Protocol
 
 import flufl.lock._lockfile as flufl
 from typing_extensions import Self
 
-__all__ = ["LockUnavailableError", "LockLike", "NFSLock"]
+__all__ = ["LockLike", "LockUnavailableError", "NFSLock"]
 
 
 class LockUnavailableError(TimeoutError): ...  # TODO: raise this in NFSLock?
 
 
 class LockLike(Protocol):
-    def acquire(self, blocking: bool = True, timeout: int | None = None) -> None: ...
+    def acquire(self, *, blocking: bool = True, timeout: int | None = None) -> None: ...
     def release(self) -> None: ...
-    def context(self, blocking: bool = True, timeout: int | None = None) -> ContextManager[Self]: ...
+    def context(self, *, blocking: bool = True, timeout: int | None = None) -> AbstractContextManager[Self]: ...
     def is_locked(self) -> bool: ...
 
 
@@ -26,7 +26,7 @@ class NFSLock:
         lockfile: Path,
         lifetime: int = 15,
         refresh_interval: int | None = None,
-    ):
+    ) -> None:
         self._lock = flufl.Lock(lockfile=str(lockfile), lifetime=lifetime)
 
         self._refresh_interval = refresh_interval
@@ -35,13 +35,13 @@ class NFSLock:
             self._thread: threading.Thread | None = None
 
     def _refresh_loop(self) -> None:
-        while not self._stop.wait(self._refresh_interval):
-            try:
+        try:
+            while not self._stop.wait(self._refresh_interval):
                 self._lock.refresh()
-            except flufl.NotLockedError:
-                break
+        except flufl.NotLockedError:
+            pass
 
-    def acquire(self, blocking: bool = True, timeout: int | None = None) -> None:
+    def acquire(self, *, blocking: bool = True, timeout: int | None = None) -> None:
         timeout = timeout if blocking else 0
         self._lock.lock(timeout=timeout)
 
@@ -63,7 +63,7 @@ class NFSLock:
         self._lock.unlock()
 
     @contextmanager
-    def context(self, blocking: bool = True, timeout: int | None = None) -> Iterator[Self]:
+    def context(self, *, blocking: bool = True, timeout: int | None = None) -> Iterator[Self]:
         self.acquire(blocking=blocking, timeout=timeout)
         try:
             yield self
