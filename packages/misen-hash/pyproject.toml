@@ -7,7 +7,7 @@ name = "misen-hash"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "xxhash>=3.0.0",
+    "xxhash>=3.0.0",  # xxh3 stable as of 2.0.0
     "dill>=0.4.0",
     "msgspec>=0.20.0",
 ]
