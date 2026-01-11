@@ -1,63 +1,111 @@
 """
-Executor interface for submitting a Task's DAG to an execution backend (e.g. SLURM).
+Executor interface for submitting a Task's DAG to an execution backend (e.g. a local background process or SLURM).
 
-1. The Task DAG is decomposed into WorkUnits: connected subgraphs whose vertices cover the DAG.
-2. WorkUnits are submitted for execution; parallel processing is subject to dependency order.
-3. The yielded Jobs can be used to monitor the execution status of each submitted WorkUnit.
+Convention: Dependency graph edges A -> B indicate that A depends on B.
 
-Pre-computed, cacheable Tasks (and descendants) are pruned ahead-of-time from the DAG.
-
-The root and every cacheable Task in the original DAG are selected as roots for WorkUnits.
-Each WorkUnit consists of the subgraph of non-cacheable Tasks (truncated at downstream,
-cacheable Tasks) reachable from its root. WorkUnits are not necessarily disjoint.
-
-WorkUnits may depend on other each other. Dependencies are executed first and their results can be
-retrieved via the Workspace cache (since their roots are cacheable).
+Overview:
+  1. The Task DAG is decomposed into WorkUnits (connected subgraphs), anchored at DAG roots and cacheable Tasks.
+     Each WorkUnit contains the reachable subgraph of non-cacheable Tasks (truncated at downstream cacheable Tasks).
+  2. WorkUnits are submitted to the backend for execution in dependency order.
+     WorkUnits should assume their dependencies' roots are already cached (and can simply be retrieved) at runtime.
+  3. Jobs are yielded and can be used to monitor the execution status of each WorkUnit.
 """
 
 from __future__ import annotations
 
-import functools
 from abc import ABC, abstractmethod
 from operator import is_
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast, get_args
 
 from typing_extensions import assert_never
 
-from misen.utils.hashes import short_hash
-from misen.utils.settings import FromSettingsABC
-
 from .task import Task, TaskResources
+from .utils.hashes import short_hash
+from .utils.settings import FromSettingsABC
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from .utils.graph import DependencyGraph
     from .workspace import Workspace
 
-__all__ = ["Executor"]
+__all__ = ["Executor", "Job"]
 
 ExecutorType: TypeAlias = Literal["local", "slurm"]
-
-
-class Job(ABC):
-    @abstractmethod
-    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
-
-
-JobT = TypeVar("JobT", bound=Job)
-
-
-class CompletedJob(Job):
-    def state(self) -> Literal["done"]:
-        return "done"
-
-
-# TODO: submit array?
+JobT = TypeVar("JobT", bound="Job")
 
 
 class Executor(FromSettingsABC, Generic[JobT]):
     """Abstract interface for implementing an Executor for a specific backend."""
+
+    def submit(
+        self,
+        tasks: set[Task],
+        workspace: Workspace,
+    ) -> tuple[DependencyGraph[WorkUnit], dict[WorkUnit, CompletedJob | JobT]]:
+        """
+        Submit a set of tasks for execution. Tasks will be run by backend respecting dependency order.
+
+        Args:
+            tasks: The set of tasks whose transitive dependencies define the Task DAG to run.
+            workspace: Workspace providing Task artifact caching and retrieval.
+
+        Returns:
+            (work_graph, jobs)
+            - work_graph: A dependency graph of WorkUnits. Where WorkUnits point to WorkUnits they depend on.
+            - jobs: Mapping from each WorkUnit in `work_graph` to either CompletedJob() if already complete or a
+              backend-specific Job handle returned by `_dispatch`.
+        """
+        work_graph: DependencyGraph[WorkUnit] = self._build_work_graph(tasks=tasks, workspace=workspace)
+        jobs: dict[WorkUnit, CompletedJob | JobT] = {}
+
+        for w in work_graph:  # iterator in dependency order
+            if w.root.done(workspace=workspace):
+                jobs[w] = CompletedJob()
+            else:
+                dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
+                jobs[w] = self._dispatch(work_unit=w, dependencies=dependencies, workspace=workspace)
+
+        return work_graph, jobs
+
+    @abstractmethod
+    def _dispatch(self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace) -> JobT:
+        """
+        Dispatch a WorkUnit to the backend. Will run `work_unit.execute(workspace)` after dependencies are completed.
+
+        Args:
+            work_unit: The WorkUnit to dispatch.
+            dependencies: Job handles corresponding to prerequisite (incomplete) WorkUnits.
+            workspace: Workspace providing Task artifact caching and retrieval.
+
+        Returns:
+            A Job handle that can be queried for execution state.
+        """
+
+    @staticmethod
+    def _build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
+        """
+        Given a set of tasks, transform their Task DAG into a DAG of WorkUnits.
+        """
+        # Task dependency graph: dependents point to dependencies
+        union = Task((lambda *_: None), *tasks)
+        task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
+        task_graph.remove_node_by_value(union, cmp=is_, first=True)
+
+        # Retain only root and cachable tasks (and the induced graph minor)
+        anchor_graph = task_graph.copy()
+        anchor_graph.coarsen_to_anchors(
+            anchors=[
+                i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache
+            ],
+        )
+
+        # replace nodes with WorkUnit instances
+        work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
+        for i in work_graph.evaluation_order():
+            work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
+
+        return work_graph
+
+    """FromSettingsABC implementation. Permits initializing an Executor class from TOML settings or CLI."""
 
     @staticmethod
     def _settings_key() -> str:
@@ -86,38 +134,17 @@ class Executor(FromSettingsABC, Generic[JobT]):
                     assert_never(type_name)
         return super()._resolve_type(type_name)
 
-    @abstractmethod
-    def _dispatch(self, function: Callable, resources: TaskResources, dependencies: set[JobT]) -> JobT:
-        """For dispatching a function with the backend. Returns a Job."""
-
-    def submit(
-        self,
-        tasks: set[Task],
-        workspace: Workspace,
-    ) -> tuple[DependencyGraph[WorkUnit], dict[WorkUnit, CompletedJob | JobT]]:
-        """Entrypoint for submitting a Task's DAG to the Executor."""
-        work_graph: DependencyGraph[WorkUnit] = _build_work_graph(tasks=tasks, workspace=workspace)
-        jobs: dict[WorkUnit, CompletedJob | JobT] = {}
-
-        for i in work_graph.evaluation_order():
-            w: WorkUnit = work_graph[i]
-            if w.root.done(workspace=workspace):
-                jobs[w] = CompletedJob()
-            else:
-                jobs[w] = self._dispatch(
-                    functools.partial(w.execute, workspace=workspace),
-                    resources=w.resources,
-                    dependencies={jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)},
-                )
-
-        return work_graph, jobs
-
 
 class WorkUnit:
     """
-    A unit of work for processing, corresponding to a DAG of Tasks (`self.graph`). All Tasks are non-cacheable, with the
-    possible exception of the root. Tasks are executed one-by-one in dependency order. `self.resources` corresponds to
-    the resources required to execute any Task in the DAG.
+    A WorkUnit is a cache-bounded unit of execution.
+
+    It corresponds to the sub-DAG of non-cacheable tasks reachable from `root`, truncated at downstream cacheable tasks
+    (which become separate WorkUnits, i.e. `dependencies`).
+
+    Execution: Tasks in `graph` are executed sequentially in dependency order via `execute()`.
+
+    Specifies minimum resources to execute any Task in the DAG.
     """
 
     root: Task
@@ -127,10 +154,10 @@ class WorkUnit:
 
     def __init__(self, root: Task, dependencies: set[WorkUnit]) -> None:
         self.root = root
-        # WorkUnits which must be computed before this one
         self.dependencies = dependencies
 
-        # DAG of non-cacheable Tasks (truncated at downstream, cacheable Tasks) reachable from `task`
+        # Dependency graph of tasks.
+        # Truncated at caching boundaries since downstream cacheable nodes become WorkUnit dependencies.
         self.graph = root.dependency_graph(exclude_cacheable=True)
 
         # Union of resources for all tasks in graph
@@ -153,8 +180,7 @@ class WorkUnit:
         )
 
     def __hash__(self) -> int:
-        # Tasks and WorkUnits have a 1:1 correspondence, so we can defer to Task.__hash__
-        # Two Tasks may have equivalent `self.graph`s at runtime (determined after self.dependencies are resolved)
+        """WorkUnits have a 1:1 correspondence with the `root` Task, so we can defer to hash(`root`)."""
         return hash(self.root)
 
     def __eq__(self, other: object) -> bool:
@@ -164,50 +190,36 @@ class WorkUnit:
         return f"WorkUnit(hash={short_hash(self)})"
 
     def execute(self, workspace: Workspace) -> None:
-        """Execute the Tasks in self.graph one-by-one (in dependency order)."""
+        """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
+
         task_results: dict[Task, Any] = {}
 
-        evaluation_order = [self.graph[t] for t in self.graph.evaluation_order()]
-        for i, task in enumerate(evaluation_order):
+        def resolve_arg(arg: Any) -> Any:
+            return task_results[arg] if isinstance(arg, Task) else arg
+
+        ordered_tasks: list[Task] = list(self.graph)
+        for i, task in enumerate(ordered_tasks):
+            # only keep task results needed by future dependents
+            remaining_deps = {d for t in ordered_tasks[i:] for d in t.dependencies}
+            task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
+
+            # execute task, given cached dependencies
             task_results[task] = Task(
                 task.func,
-                *tuple(task_results[v] if isinstance(v, Task) and v in task_results else v for v in task.args),
-                **{
-                    k: task_results[v] if isinstance(v, Task) and v in task_results else v
-                    for k, v in task.kwargs.items()
-                },
-            ).result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=False)
-
-            # remove any results that are not needed by future dependents
-            remaining_tasks = evaluation_order[i + 1 :]
-            if len(remaining_tasks) > 0:
-                remaining_deps = set.union(*(t.dependencies for t in remaining_tasks))
-            else:
-                remaining_deps = set()
-
-            cached_tasks = set(task_results.keys())
-            for t in cached_tasks - remaining_deps:
-                del task_results[t]
+                *(resolve_arg(dep) for dep in task.args),
+                **{k: resolve_arg(dep) for k, dep in task.kwargs.items()},
+            ).result(
+                workspace=workspace,
+                compute_if_uncached=True,
+                compute_uncached_deps=False,
+            )
 
 
-def _build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
-    """
-    Given `root: Task`, transform its DAG of Tasks (excluding already cached subgraphs) into a DAG of WorkUnits.
-    """
-    # dependency graph: dependents point to dependencies
-    union = Task((lambda *_: None), *tasks)
-    task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
-    task_graph.remove_node_by_value(union, cmp=is_, first=True)
+class Job(ABC):
+    @abstractmethod
+    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
 
-    # Retain only root and cachable tasks (and the induced graph minor)
-    anchor_graph = task_graph.copy()
-    anchor_graph.coarsen_to_anchors(
-        anchors=[i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache],
-    )
 
-    # replace nodes with WorkUnit instances
-    work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
-    for i in work_graph.evaluation_order():
-        work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
-
-    return work_graph
+class CompletedJob(Job):
+    def state(self) -> Literal["done"]:
+        return "done"

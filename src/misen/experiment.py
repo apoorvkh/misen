@@ -12,7 +12,7 @@ import tyro
 from msgspec import Struct
 
 from .executor import Executor, ExecutorType
-from .task import Task, _resolve_executor, _resolve_workspace
+from .task import Task, resolve_auto
 from .utils.settings import DEFAULT_SETTINGS_FILE, Settings
 from .workspace import Workspace, WorkspaceType
 
@@ -39,8 +39,8 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
     def run(
         self, workspace: Workspace | Literal["auto"] = "auto", executor: Executor | Literal["auto"] = "auto"
     ) -> None:
-        workspace = _resolve_workspace(workspace)
-        executor = _resolve_executor(executor)
+        workspace = resolve_auto(workspace=workspace)
+        executor = resolve_auto(executor=executor)
         executor.submit(tasks=set(self.tasks().values()), workspace=workspace)
 
     @classmethod

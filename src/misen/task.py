@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cas
 from msgspec import Struct
 from typing_extensions import assert_never
 
+from .utils.auto import resolve_auto
 from .utils.graph import DependencyGraph
 from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
 from .utils.log_capture import capture_all_output
@@ -17,7 +18,7 @@ from .utils.object_io import DefaultSerializer, Serializer
 from .utils.sentinels import WORK_DIR
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from .executor import Executor
@@ -27,86 +28,6 @@ __all__ = ["Task", "resources", "task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-
-class TaskProperties(Struct, frozen=True):
-    id: str
-    cache: bool = False
-    version: int = 0
-    exclude: set[str] = set()
-    defaults: dict[str, Any] = {}
-    versions: dict[tuple[str, ResultHash], int] = {}
-    index_by: Literal["task", "result"] = "result"
-    serializer: type[Serializer] = DefaultSerializer
-
-
-def task(
-    *,
-    id: str | None,  # TODO: command to fill these in when None
-    cache: bool = False,
-    version: int = 0,
-    exclude: set[str] | None = None,
-    defaults: dict[str, Any] | None = None,
-    versions: dict[str, dict[Any, int]] | None = None,
-    index_by: Literal["task", "result"] = "result",
-    serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    # TODO: handle lambda
-    # TODO: Callable has no __qualname__
-    # TODO: handle func.__module__ == "__main__"
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
-            id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
-            cache=cache,
-            version=version,
-            exclude=(exclude or set()),
-            defaults=(defaults or {}),
-            versions={
-                (name, ResultHash.from_object(value)): vs
-                for name, vv in (versions or {}).items()
-                for value, vs in vv.items()
-            },
-            index_by=index_by,
-            serializer=serializer,
-        )
-        return func
-
-    return decorator
-
-
-class TaskResources(Struct):
-    time: int | None = None  # walltime (minutes)
-    nodes: int = 1  # number of nodes
-    memory: int = 8  # memory in GB
-    cpus: int = 1  # number of logical cores
-    gpus: int = 0  # number of GPUs
-    gpu_memory: int | None = None  # memory (GB) per GPU
-
-
-# TODO: resources as a function of arguments
-
-
-def resources(
-    *,
-    time: int | None = None,  # walltime (minutes)
-    nodes: int = 1,  # number of nodes
-    memory: int = 8,  # memory in GB
-    cpus: int = 1,  # number of logical cores
-    gpus: int = 0,  # number of GPUs
-    gpu_memory: int | None = None,  # memory (GB) per GPU
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        func.__task_resources__ = TaskResources(  # ty:ignore[unresolved-attribute]
-            time=time,
-            nodes=nodes,
-            memory=memory,
-            cpus=cpus,
-            gpus=gpus,
-            gpu_memory=gpu_memory,
-        )
-        return func
-
-    return decorator
 
 
 # TODO: walk dependency structures for Tasks
@@ -141,12 +62,14 @@ class Task(Generic[R]):
         return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
     def is_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
-        workspace = _resolve_workspace(workspace)
+        workspace = resolve_auto(workspace=workspace)
         return self.properties.cache and self in workspace.results
 
+    def uncached_deps(self, workspace: Workspace | Literal["auto"] = "auto") -> Iterator[Task]:
+        return filter(lambda t: t.properties.cache and not t.is_cached(workspace=workspace), self.dependencies)
+
     def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
-        workspace = _resolve_workspace(workspace)
-        return all(t.is_cached(workspace=workspace) for t in self.dependencies if t.properties.cache)
+        return all(self.uncached_deps(workspace=workspace))
 
     def done(self, workspace: Workspace) -> bool:
         try:
@@ -161,7 +84,7 @@ class Task(Generic[R]):
         return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).hex()).is_locked()
 
     def status(self, workspace: Workspace | Literal["auto"] = "auto") -> Literal["running", "done", "unknown"]:
-        workspace = _resolve_workspace(workspace)
+        workspace = resolve_auto(workspace=workspace)
 
         if self.done(workspace=workspace):
             return "done"
@@ -177,7 +100,7 @@ class Task(Generic[R]):
         workspace: Workspace | Literal["auto"] = "auto",
     ) -> DependencyGraph[Task]:
         if exclude_cached:
-            workspace = _resolve_workspace(workspace)
+            workspace = resolve_auto(workspace=workspace)
 
         @cache
         def _include(dependency: Task) -> bool:
@@ -220,8 +143,8 @@ class Task(Generic[R]):
         Submit task to an executor and return a mapping from each distributable task to its
         dependency set and runtime job status handle.
         """
-        executor = _resolve_executor(executor)
-        workspace = _resolve_workspace(workspace)
+        executor = resolve_auto(executor=executor)
+        workspace = resolve_auto(workspace=workspace)
         return executor.submit(tasks={self}, workspace=workspace)
 
     def result(
@@ -232,7 +155,7 @@ class Task(Generic[R]):
         compute_uncached_deps: bool = False,
     ) -> R:
         """Compute or retrieve the Task result and cache it."""
-        workspace = _resolve_workspace(workspace)
+        workspace = resolve_auto(workspace=workspace)
 
         if self.properties.cache:
             if (result := workspace.results.get(self)) is not None:
@@ -243,9 +166,7 @@ class Task(Generic[R]):
                 raise RuntimeError(msg)
 
         if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
-            uncached_deps = [
-                t for t in self.dependencies if t.properties.cache and not t.is_cached(workspace=workspace)
-            ]
+            uncached_deps = list(self.uncached_deps(workspace=workspace))
             msg = f"{self} has dependencies which must be computed and cached first: {uncached_deps}"
             raise RuntimeError(msg)
 
@@ -289,7 +210,7 @@ class Task(Generic[R]):
         return result
 
     def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
-        workspace = _resolve_workspace(workspace)
+        workspace = resolve_auto(workspace=workspace)
         return workspace.get_work_dir(task=self)
 
     def __hash__(self) -> int:
@@ -360,17 +281,81 @@ class Task(Generic[R]):
         }
 
 
-def _resolve_workspace(workspace: Workspace | Literal["auto"] = "auto") -> Workspace:
-    if workspace == "auto":
-        from .workspace import Workspace
+def task(
+    *,
+    id: str | None,  # TODO: command to fill these in when None
+    cache: bool = False,
+    version: int = 0,
+    exclude: set[str] | None = None,
+    defaults: dict[str, Any] | None = None,
+    versions: dict[str, dict[Any, int]] | None = None,
+    index_by: Literal["task", "result"] = "result",
+    serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    # TODO: handle lambda
+    # TODO: Callable has no __qualname__
+    # TODO: handle func.__module__ == "__main__"
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
+            id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
+            cache=cache,
+            version=version,
+            exclude=(exclude or set()),
+            defaults=(defaults or {}),
+            versions={
+                (name, ResultHash.from_object(value)): vs
+                for name, vv in (versions or {}).items()
+                for value, vs in vv.items()
+            },
+            index_by=index_by,
+            serializer=serializer,
+        )
+        return func
 
-        workspace = Workspace.auto()
-    return workspace
+    return decorator
 
 
-def _resolve_executor(executor: Executor | Literal["auto"] = "auto") -> Executor:
-    if executor == "auto":
-        from .executor import Executor
+# TODO: resources as a function of arguments
 
-        executor = Executor.auto()
-    return executor
+
+def resources(
+    *,
+    time: int | None = None,  # walltime (minutes)
+    nodes: int = 1,  # number of nodes
+    memory: int = 8,  # memory in GB
+    cpus: int = 1,  # number of logical cores
+    gpus: int = 0,  # number of GPUs
+    gpu_memory: int | None = None,  # memory (GB) per GPU
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        func.__task_resources__ = TaskResources(  # ty:ignore[unresolved-attribute]
+            time=time,
+            nodes=nodes,
+            memory=memory,
+            cpus=cpus,
+            gpus=gpus,
+            gpu_memory=gpu_memory,
+        )
+        return func
+
+    return decorator
+
+
+class TaskProperties(Struct, frozen=True):
+    id: str
+    cache: bool = False
+    version: int = 0
+    exclude: set[str] = set()
+    defaults: dict[str, Any] = {}
+    versions: dict[tuple[str, ResultHash], int] = {}
+    index_by: Literal["task", "result"] = "result"
+    serializer: type[Serializer] = DefaultSerializer
+
+
+class TaskResources(Struct):
+    time: int | None = None  # walltime (minutes)
+    nodes: int = 1  # number of nodes
+    memory: int = 8  # memory in GB
+    cpus: int = 1  # number of logical cores
+    gpus: int = 0  # number of GPUs
+    gpu_memory: int | None = None  # memory (GB) per GPU

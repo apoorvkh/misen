@@ -1,11 +1,10 @@
-from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
 import submitit
 
-from misen.executor import Executor, Job
-from misen.task import TaskResources
+from misen.executor import Executor, Job, WorkUnit
+from misen.workspace import Workspace
 
 
 class SlurmJob(Job):
@@ -40,13 +39,10 @@ class SlurmExecutor(Executor[SlurmJob]):
     def __post_init__(self) -> None:
         self.slurm_executor = submitit.SlurmExecutor(folder=Path(self.folder))
 
-    def _dispatch(
-        self,
-        function: Callable,
-        resources: TaskResources,
-        dependencies: set[SlurmJob],
-    ) -> SlurmJob:
+    def _dispatch(self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace) -> SlurmJob:
         dependency = ",".join([f"afterok:{j.submitit_job.job_id}" for j in dependencies])
+
+        resources = work_unit.resources
 
         self.slurm_executor.update_parameters(
             stderr_to_stdout=True,
@@ -60,6 +56,6 @@ class SlurmExecutor(Executor[SlurmJob]):
             dependency=dependency,
         )
 
-        job = self.slurm_executor.submit(function)
+        job = self.slurm_executor.submit(work_unit.execute, workspace)
 
         return SlurmJob(submitit_job=job)

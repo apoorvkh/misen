@@ -8,9 +8,8 @@ from typing import TYPE_CHECKING, Any, Literal, TextIO, TypeAlias, TypeVar, cast
 
 from typing_extensions import assert_never
 
-from misen.utils.settings import FromSettingsABC
-
 from .task import Task
+from .utils.settings import FromSettingsABC
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,7 +32,7 @@ class Workspace(FromSettingsABC):
 
     @staticmethod
     def _default() -> Workspace:
-        from misen.workspaces.disk import DiskWorkspace
+        from .workspaces.disk import DiskWorkspace
 
         return DiskWorkspace()
 
@@ -43,7 +42,7 @@ class Workspace(FromSettingsABC):
             type_name = cast("WorkspaceType", type_name)
             match type_name:
                 case "disk":
-                    from misen.workspaces.disk import DiskWorkspace
+                    from .workspaces.disk import DiskWorkspace
 
                     return DiskWorkspace
                 case _:
@@ -63,7 +62,7 @@ class Workspace(FromSettingsABC):
         # workspace caches
         self._resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash] = resolved_hash_cache
         self._result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash] = result_hash_cache
-        self._result_store: MutableMapping[ResultHash, Path] = result_store
+        self._result_map = ResultMap(result_store=result_store, workspace=self)
 
     def get_resolved_hash(self, task: Task) -> ResolvedTaskHash | None:
         task_hash = task.task_hash()
@@ -106,7 +105,7 @@ class Workspace(FromSettingsABC):
 
     @property
     def results(self) -> ResultMap:
-        return ResultMap(result_store=self._result_store, workspace=self)
+        return self._result_map
 
     @abstractmethod
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike: ...

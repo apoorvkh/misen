@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import functools
 import multiprocessing
 import os
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Literal
 
 import cloudpickle
 
-from ..executor import Executor, Job
+from misen.executor import Executor, Job, WorkUnit
 
 if TYPE_CHECKING:
-    from ..task import TaskResources
+    from misen.task import TaskResources
+    from misen.workspace import Workspace
 
 
 def _infer_total_memory_gb() -> int:
@@ -160,20 +162,17 @@ class LocalExecutor(Executor[LocalJob]):
         )
         self._scheduler = _LocalScheduler(self._resource_budget)
 
-    def _dispatch(
-        self,
-        function: Callable,
-        resources: TaskResources,
-        dependencies: set[LocalJob],
-    ) -> LocalJob:
+    def _dispatch(self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace) -> LocalJob:
+        resources = work_unit.resources
         if not self._resource_budget.fits(resources):
-            raise ValueError(
+            msg = (
                 "Requested resources exceed LocalExecutor limits: "
                 f"requested cpus={resources.cpus}, memory={resources.memory}, gpus={resources.gpus}; "
                 f"limits cpus={self._resource_budget.cpus}, memory={self._resource_budget.memory}, "
                 f"gpus={self._resource_budget.gpus}."
             )
-        payload = cloudpickle.dumps(function)
+            raise ValueError(msg)
+        payload = cloudpickle.dumps(functools.partial(work_unit.execute, workspace=workspace))
         job = LocalJob(resources=resources, dependencies=dependencies, payload=payload)
         self._scheduler.submit(job)
         return job

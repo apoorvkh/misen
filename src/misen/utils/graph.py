@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 import rustworkx as rx
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 __all__ = ["DependencyGraph"]
 
@@ -48,17 +48,23 @@ class DependencyGraph(Generic[T]):
     def is_root(self, node_index: int) -> bool:
         return self._g.in_degree(node_index) == 0
 
-    def remove_node_by_value(self, value: Any, cmp: Callable[[Any, Any], bool] = eq, first: bool = False) -> None:
+    def remove_node_by_value(self, value: Any, *, cmp: Callable[[Any, Any], bool] = eq, first: bool = False) -> None:
+        indices_to_remove = []
         for node_index in self._g.node_indices():
             if cmp(self._g[node_index], value):
-                self._g.remove_node(node_index)
+                indices_to_remove.append(node_index)
                 if first:
                     break
+        self._g.remove_nodes_from(indices_to_remove)
 
     ## Custom functions
 
     def evaluation_order(self) -> list[int]:
         return list(rx.topological_sort(self._g))[::-1]
+
+    def __iter__(self) -> Iterator[T]:
+        for i in self.evaluation_order():
+            yield self._g[i]
 
     def coarsen_to_anchors(self, anchors: list[int]) -> None:
         for node in reversed(self._g.node_indices()):
