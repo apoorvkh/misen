@@ -1,6 +1,4 @@
-from misen import Task, task
-from misen.executors.slurm import SlurmExecutor
-from misen.workspaces.disk import DiskWorkspace
+from misen import Experiment, Task, task
 
 
 @task(id="add", cache=False)
@@ -48,31 +46,39 @@ def generate_numbers(n: int) -> list[float]:
     return [float(i) for i in range(1, n + 1)]
 
 
-def graph() -> Task:
-    gen_task = Task(generate_numbers, n=5)
-    sum_task = Task(sum_list, numbers=gen_task.T)
-    mean_task = Task(mean, numbers=gen_task.T)
-    var_task = Task(variance, numbers=gen_task.T)
-    mult_task = Task(multiply, a=sum_task.T, b=mean_task.T)
+class MyExperiment(Experiment):
+    def tasks(self):
+        gen_task = Task(generate_numbers, n=5)
+        sum_task = Task(sum_list, numbers=gen_task.T)
+        mean_task = Task(mean, numbers=gen_task.T)
+        var_task = Task(variance, numbers=gen_task.T)
+        mult_task = Task(multiply, a=sum_task.T, b=mean_task.T)
 
-    add_task = Task(add, a=mult_task.T, b=var_task.T)
-    add_task_dup = Task(add, a=mult_task.T, b=var_task.T)
+        add_task = Task(add, a=mult_task.T, b=var_task.T)
+        add_task_dup = Task(add, a=mult_task.T, b=var_task.T)
 
-    final_multiply_task = Task(multiply, a=add_task.T, b=add_task_dup.T)
+        final_multiply_task = Task(multiply, a=add_task.T, b=add_task_dup.T)
 
-    # Expected calculations:
-    # numbers = [1,2,3,4,5]
-    # sum = 15
-    # mean = 3.0
-    # variance = (sum of (x-3)^2 for x in [1,2,3,4,5]) / 5 = (4+1+0+1+4)/5 = 10/5 = 2.0
-    # mult = 15 * 3.0 = 45.0
-    # final = 45.0 + 2.0 = 47.0
+        other_task = Task(add, a=5, b=10)
 
-    return final_multiply_task
+        # Expected calculations:
+        # numbers = [1,2,3,4,5]
+        # sum = 15
+        # mean = 3.0
+        # variance = (sum of (x-3)^2 for x in [1,2,3,4,5]) / 5 = (4+1+0+1+4)/5 = 10/5 = 2.0
+        # mult = 15 * 3.0 = 45.0
+        # final = 45.0 + 2.0 = 47.0
+
+        return {
+            "numbers": gen_task.T,
+            "sum": sum_task.T,
+            "mean": mean_task.T,
+            "variance": var_task.T,
+            "mult": mult_task.T,
+            "final": final_multiply_task.T,
+            "other": other_task.T,
+        }
 
 
 if __name__ == "__main__":
-    workspace = DiskWorkspace()
-    executor = SlurmExecutor()
-    t = graph()
-    executor.submit(t, workspace=workspace)
+    MyExperiment.cli()
