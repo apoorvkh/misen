@@ -3,7 +3,7 @@ from __future__ import annotations
 import itertools
 from contextlib import nullcontext
 from functools import cache
-from inspect import signature
+from inspect import Signature, signature
 from time import time_ns
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
@@ -28,10 +28,6 @@ __all__ = ["Task", "resources", "task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-
-# TODO: walk dependency structures for Tasks
-# TODO: signature(self.func).bind(...) is slow?
 
 
 class Task(Generic[R]):
@@ -266,7 +262,9 @@ class Task(Generic[R]):
         hash_task_by_result: bool = False,
         workspace: Workspace | Literal["auto"] = "auto",
     ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
-        bound_arguments = signature(self.func).bind(*self.args, **self.kwargs)
+        if not hasattr(self, "_cached_signature"):
+            self._cached_signature = signature(self.func)
+        bound_arguments = cast("Signature", self._cached_signature).bind(*self.args, **self.kwargs)
         bound_arguments.apply_defaults()
 
         def resolve(key: str, value: Any) -> tuple[TaskHash | ResultHash, int]:

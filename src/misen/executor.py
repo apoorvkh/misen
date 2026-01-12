@@ -13,6 +13,7 @@ Overview:
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from operator import is_
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast, get_args
@@ -52,14 +53,19 @@ class Executor(FromSettingsABC, Generic[JobT]):
             A dependency graph of backend-specific Job handles corresponding to WorkUnits.
         """
         work_graph: DependencyGraph[WorkUnit] = self._build_work_graph(tasks=tasks, workspace=workspace)
+
+        # dispatch work units and collect job handles
+
         jobs: dict[WorkUnit, CompletedJob | JobT] = {}
 
-        for w in work_graph:  # iterator in dependency order
+        for w in work_graph:  # dependency order
             if w.root.done(workspace=workspace):
                 jobs[w] = CompletedJob(work_unit=w)
             else:
                 dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
                 jobs[w] = self._dispatch(work_unit=w, dependencies=dependencies, workspace=workspace)
+
+        # return job graph corresponding to work graph
 
         job_graph = cast("DependencyGraph[CompletedJob | JobT]", work_graph.copy())
         for i in job_graph.node_indices():
@@ -86,7 +92,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
         """
         Given a set of tasks, transform their Task DAG into a DAG of WorkUnits.
         """
-        # Task dependency graph: dependents point to dependencies
+        # Task dependency graph: an edge from A to B means A depends on B
         union = Task((lambda *_: None), *tasks)
         task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
         task_graph.remove_node_by_value(union, cmp=is_, first=True)
@@ -222,6 +228,12 @@ class Job(ABC):
 
     @abstractmethod
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
+
+    def wait(self, poll_s: float = 0.5) -> None:
+        while True:
+            if self.state() in ("done", "failed"):
+                return
+            time.sleep(poll_s)
 
 
 class CompletedJob(Job):
