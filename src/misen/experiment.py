@@ -12,7 +12,8 @@ import tyro
 from msgspec import Struct
 
 from .executor import Executor, ExecutorType
-from .task import Task, resolve_auto
+from .task import Task
+from .utils.auto import resolve_auto
 from .utils.settings import DEFAULT_SETTINGS_FILE, Settings
 from .workspace import Workspace, WorkspaceType
 

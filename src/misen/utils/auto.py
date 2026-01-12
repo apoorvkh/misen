@@ -1,7 +1,10 @@
-from typing import Literal, overload
+from __future__ import annotations
 
-from misen.executor import Executor
-from misen.workspace import Workspace
+from typing import TYPE_CHECKING, Literal, overload
+
+if TYPE_CHECKING:
+    from misen.executor import Executor
+    from misen.workspace import Workspace
 
 __all__ = ["resolve_auto"]
 
@@ -17,10 +20,14 @@ def resolve_auto(
 ) -> Workspace | Executor:
     if workspace is not None:
         if workspace == "auto":
+            from misen.workspace import Workspace
+
             return Workspace.auto()
         return workspace
     if executor is not None:
         if executor == "auto":
+            from misen.executor import Executor
+
             return Executor.auto()
         return executor
     msg = "Either workspace or executor must be specified"
