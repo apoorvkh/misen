@@ -202,7 +202,9 @@ class WorkUnit:
         task_results: dict[Task, Any] = {}
 
         def resolve_arg(arg: Any) -> Any:
-            return task_results[arg] if isinstance(arg, Task) else arg
+            if isinstance(arg, Task) and not arg.properties.cache:
+                return task_results[arg]
+            return arg
 
         ordered_tasks: list[Task] = list(self.graph)
         for i, task in enumerate(ordered_tasks):
@@ -210,7 +212,9 @@ class WorkUnit:
             remaining_deps = {d for t in ordered_tasks[i:] for d in t.dependencies}
             task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
 
-            # execute task, given cached dependencies
+            # execute task
+            # retrieving results of non-cacheable dependencies from `task_results`
+            # cacheable dependencies will be resolved from Workspace in `.result()`
             task_results[task] = Task(
                 task.func,
                 *(resolve_arg(dep) for dep in task.args),
