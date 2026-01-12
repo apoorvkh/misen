@@ -558,6 +558,7 @@ name = "misen"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cloudpickle" },
     { name = "dill" },
     { name = "flufl-lock" },
     { name = "lmdb" },
@@ -565,6 +566,7 @@ dependencies = [
     { name = "msgspec" },
     { name = "rustworkx" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
     { name = "tyro" },
 ]
 
@@ -587,6 +589,7 @@ slurm = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cloudpickle", specifier = ">=3.0" },
     { name = "dill", specifier = ">=0.4.0" },
     { name = "flufl-lock", specifier = ">=8.2.0" },
     { name = "lmdb", specifier = ">=1.7.5" },
@@ -594,6 +597,7 @@ requires-dist = [
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "rustworkx", specifier = ">=0.15.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1.0" },
+    { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "tyro", specifier = ">=1.0.0" },
 ]
 
