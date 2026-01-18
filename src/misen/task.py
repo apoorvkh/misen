@@ -225,13 +225,7 @@ class Task(Generic[R]):
     def task_hash(self) -> TaskHash:
         """A hash that represents the Task object using its constituent task graph."""
         if not hasattr(self, "_cached_task_hash"):
-            self._cached_task_hash = TaskHash.from_object(
-                (
-                    self.properties.id,
-                    self.properties.version,
-                    self._hashed_arguments(),
-                ),
-            )
+            self._cached_task_hash = TaskHash.from_object((self.properties.id, self._hashed_arguments()))
         return self._cached_task_hash
 
     def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
@@ -239,14 +233,8 @@ class Task(Generic[R]):
         resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
 
         if resolved_hash is None:
-            resolved_hash = ResolvedTaskHash.from_object(
-                (
-                    self.properties.id,
-                    self.properties.version,
-                    self._hashed_arguments(hash_task_by_result=True, workspace=workspace),
-                ),
-            )
-
+            hashed_arguments = self._hashed_arguments(hash_task_by_result=True, workspace=workspace)
+            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, hashed_arguments))
             workspace.set_resolved_hash(self, resolved_hash)
 
         return resolved_hash
@@ -288,7 +276,6 @@ def task(
     *,
     id: str | None,  # TODO: command to fill these in when None
     cache: bool = False,
-    version: int = 0,
     exclude: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
     versions: dict[str, dict[Any, int]] | None = None,
@@ -302,7 +289,6 @@ def task(
         func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
             id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
             cache=cache,
-            version=version,
             exclude=(exclude or set()),
             defaults=(defaults or {}),
             versions={
@@ -347,7 +333,6 @@ def resources(
 class TaskProperties(Struct, frozen=True):
     id: str
     cache: bool = False
-    version: int = 0
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
     versions: dict[tuple[str, ResultHash], int] = {}
