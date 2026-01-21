@@ -1,7 +1,7 @@
 """
-Executor interface for submitting a Task's DAG to an execution backend (e.g. a local background process or SLURM).
+Executor interface for submitting a Task's DAG to an execution backend (e.g. a local process or SLURM).
 
-Convention: Dependency graph edges A -> B indicate that A depends on B.
+Convention: Graph edge A -> B indicates that A depends on B.
 
 Overview:
   1. The Task DAG is decomposed into WorkUnits (connected subgraphs), anchored at DAG roots and cacheable Tasks.

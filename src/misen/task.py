@@ -1,3 +1,20 @@
+"""
+This module provides:
+    1. A `Task` wrapper for Python functions and their arguments.
+    2. An `@task` decorator to control how Tasks are identified and how results are stored.
+    3. An `@resources` decorator to specify the hardware resources needed to compute a function.
+
+Tasks may form a dependency graph (a DAG; see `Task.dependency_graph()`), containing edges from Tasks to dependencies.
+
+`Task.submit()` will submit the task to an Executor for execution.
+`Task.result()` will run necessary and specified computations and return the result. This function will retrieve any
+necessary dependency results from and write any computational artifacts (runtime logs, result, etc.) to the Workspace.
+We typically prefer to `submit()` Tasks to an Executor, before calling `result()`.
+
+Tasks can be identified by: `task_hash()` (by dependency graph) or `resolved_hash()` (by resolved arguments).
+Results are identified by `result_hash()`. Any task which computes the same result should have the same `result_hash()`.
+"""
+
 from __future__ import annotations
 
 import itertools
@@ -22,6 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .executor import Executor, Job
+    from .utils.locks import LockLike
     from .workspace import Workspace
 
 __all__ = ["Task", "resources", "task"]
@@ -31,12 +49,30 @@ R = TypeVar("R")
 
 
 class Task(Generic[R]):
+    """
+    A Task is a lazy wrapper for a function and its arguments.
+
+    Attributes
+    ----------
+    func:
+        The underlying callable.
+    args / kwargs:
+        Arguments to pass to `func`. Any value that is itself a `Task` is considered a dependency.
+    properties:
+        TaskProperties metadata (typically attached to `func` via `@task(...)`).
+    resources:
+        TaskResources metadata (typically attached to `func` via `@resources(...)`).
+    """
+
+    __slots__ = ("_cached_signature", "_cached_task_hash", "args", "func", "kwargs", "properties", "resources")
+
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> None:
+        # Metadata is attached by decorators; fall back to defaults if absent.
         self.properties: TaskProperties = getattr(
             func,
             "__task_properties__",
             TaskProperties(f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
-        )
+        )  # TODO: handling of builtins, imports from other packages
         self.resources: TaskResources = getattr(func, "__task_resources__", TaskResources())
 
         self.func: Callable[P, R] = func
@@ -51,42 +87,29 @@ class Task(Generic[R]):
 
     @property
     def T(self) -> R:  # noqa: N802
+        """
+        Cast Task to its result type. Useful for type checking compliance when instantiating Tasks with dependencies.
+        """
         return cast("R", self)
 
     @property
     def dependencies(self) -> set[Task]:
+        """Immediate Task dependencies discovered from args/kwargs."""
+        # TODO: nested structures?
         return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
     def is_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
+        """Check if Task's result is cached in the Workspace."""
         workspace = resolve_auto(workspace=workspace)
         return self.properties.cache and self in workspace.results
 
     def uncached_deps(self, workspace: Workspace | Literal["auto"] = "auto") -> Iterator[Task]:
+        """Yields immediate dependencies that are cacheable but not cached."""
         return filter(lambda t: t.properties.cache and not t.is_cached(workspace=workspace), self.dependencies)
 
     def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
-        return all(self.uncached_deps(workspace=workspace))
-
-    def done(self, workspace: Workspace) -> bool:
-        try:
-            workspace.get_result_hash(task=self)
-        except RuntimeError:
-            return False
-        return True
-
-    def is_running(self, workspace: Workspace) -> bool:
-        if not self.are_deps_cached(workspace=workspace):
-            return False
-        return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).hex()).is_locked()
-
-    def status(self, workspace: Workspace | Literal["auto"] = "auto") -> Literal["running", "done", "unknown"]:
-        workspace = resolve_auto(workspace=workspace)
-
-        if self.done(workspace=workspace):
-            return "done"
-        if self.is_running(workspace=workspace):
-            return "running"
-        return "unknown"
+        """Are all immediate dependencies cached?"""
+        return not any(self.uncached_deps(workspace=workspace))  # "if there are not any uncached deps"
 
     def dependency_graph(
         self,
@@ -95,6 +118,20 @@ class Task(Generic[R]):
         exclude_cached: bool = False,
         workspace: Workspace | Literal["auto"] = "auto",
     ) -> DependencyGraph[Task]:
+        """
+        Build a DependencyGraph rooted at this Task. Directed edges: task -> dependency.
+
+        Args:
+            exclude_cacheable:
+                Omit any dependency Task with `properties.cache == True`.
+            exclude_cached:
+                Omit any dependency that is already cached in the Workspace.
+            workspace:
+                Required only if `exclude_cached=True`.
+
+        Returns:
+            A DependencyGraph containing all reachable Tasks (based on inclusion criteria).
+        """
         if exclude_cached:
             workspace = resolve_auto(workspace=workspace)
 
@@ -115,8 +152,7 @@ class Task(Generic[R]):
                 i = nodes[t] = graph.add_node(t)
             return i
 
-        # DFS to traverse Task graph and build DAG
-
+        # DFS to traverse the Task DAG and materialize nodes/edges.
         stack: list[Task] = [self]
         seen: set[Task] = {self}
 
@@ -134,15 +170,37 @@ class Task(Generic[R]):
 
         return graph
 
-    def run(
+    def done(self, workspace: Workspace) -> bool:
+        """If Workspace contains a ResultHash for this Task (expected regardless of result caching)."""
+        try:
+            workspace.get_result_hash(task=self)
+        except RuntimeError:
+            return False
+        return True
+
+    def is_running(self, workspace: Workspace) -> bool:
+        """
+        For cacheable Tasks, if runtime lock (managed by Workspace) is unavailable.
+        Non-cacheable Tasks always return False, since they can freely run concurrently.
+        """
+        # TODO: non-cacheable case?
+        try:
+            return self._runtime_lock(workspace=workspace).is_locked()
+        except RuntimeError:
+            # raised if dependencies are not cached (pre-requisite to Task runtime)
+            return False
+
+    def submit(
         self,
         *,
         workspace: Workspace | Literal["auto"] = "auto",
         executor: Executor | Literal["auto"] = "auto",
     ) -> DependencyGraph[Job]:
         """
-        Submit task to an executor and return a mapping from each distributable task to its
-        dependency set and runtime job status handle.
+        Submit this Task (and its dependency DAG) to an Executor for deferred execution.
+
+        Returns:
+            DependencyGraph of Jobs (for monitoring progress of chunked units of work).
         """
         executor = resolve_auto(executor=executor)
         workspace = resolve_auto(workspace=workspace)
@@ -155,9 +213,27 @@ class Task(Generic[R]):
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
     ) -> R:
-        """Compute or retrieve the Task result and cache it."""
+        """
+        Compute (or retrieve) this Task's result.
+
+        Do minimal computation necessary to return the result. Looks up cached results whenever possible.
+
+        Flags control which dependencies are computed:
+          - compute_if_uncached: Compute if cacheable but not cached. Otherwise, this condition raises RuntimeError.
+          - compute_uncached_deps: If True, (recursively) compute all uncached, cacheable dependencies.
+
+        Side effects:
+            - Locking: cacheable Tasks acquire a runtime lock from the Workspace. Fails fast if lock is already held.
+            - Logs: all runtime stdout/stderr/logging captured and written to the Workspace.
+            - ResultHash: To index result object from Workspace. Task -> ResultHash mapping is stored upon completion.
+            - Result: For cacheable Tasks, the computed result is stored in Workspace.
+
+        Returns:
+            Result object of function(*args, **kwargs)
+        """
         workspace = resolve_auto(workspace=workspace)
 
+        # Retrieve result if cached
         if self.properties.cache:
             if (result := workspace.results.get(self)) is not None:
                 return result
@@ -166,38 +242,46 @@ class Task(Generic[R]):
                 msg = f"{self} is not cached."
                 raise RuntimeError(msg)
 
+        # Raise RuntimeError if dependencies are not cached and we don't want to compute them
         if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
             uncached_deps = list(self.uncached_deps(workspace=workspace))
             msg = f"{self} has dependencies which must be computed and cached first: {uncached_deps}"
             raise RuntimeError(msg)
 
+        # Get (or recursively compute) results of dependencies
         dep_results: dict[Task, Any] = {
             t: t.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
             for t in self.dependencies
         }
 
         def resolve_argument(dep: Task | Any) -> Any:
+            """Resolve a single argument value for execution."""
             if isinstance(dep, Task):
                 return dep_results[dep]
             if dep is WORK_DIR:
                 return workspace.get_work_dir(task=self)
             return dep
 
-        resolved_hash = self.resolved_hash(workspace=workspace)
+        # Runtime lock: should not run cached Tasks if already being computed; fails immediately if so.
 
         with (
-            workspace.lock(namespace="task", key=resolved_hash.hex()).context(blocking=False)
-            if self.properties.cache
-            else nullcontext()
+            self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
         ):
+            # Redirect all logging/stdout/stderr to Workspace
+            # Compute function using resolved arguments
             with capture_all_output(workspace.open_log(task=self, mode="a", timestamp=time_ns())):
                 args = (resolve_argument(v) for v in self.args)
                 kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
                 result = self.func(*args, **kwargs)
 
+            # Store `Task -> hash(result)` mapping in Workspace
+            # Indicator of Task completion
+
+            # Index the result by the resolved Task or result object
+            # "task" is better if expecting unique argument <-> result correspondence
             match self.properties.index_by:
                 case "task":
-                    index = resolved_hash
+                    index = self.resolved_hash(workspace=workspace)
                 case "result":
                     index = result
                 case _:
@@ -205,31 +289,48 @@ class Task(Generic[R]):
 
             workspace.set_result_hash(self, ResultHash.from_object(index))
 
+            # Cache result in Workspace
+
             if self.properties.cache:
                 workspace.results[self] = result
+                # TODO: if this fails, delete ResultHash?
+                # Consider cases for cacheable Tasks, where ResultHash is stored, but Result is not
 
         return result
 
     def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
+        """Returns work directory from Workspace."""
+        # TODO: non-unique only for cacheable tasks?
         workspace = resolve_auto(workspace=workspace)
         return workspace.get_work_dir(task=self)
 
+    def _runtime_lock(self, workspace: Workspace) -> LockLike:
+        """Workspace manages a lock for each Task, expected to be held during runtime."""
+        if not self.are_deps_cached(workspace=workspace):  # necessary to compute resolved_hash
+            msg = f"Dependencies of {self} must be run before acquiring runtime lock"
+            raise RuntimeError(msg)
+        return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).hex())
+
     def __hash__(self) -> int:
+        """Hash for using Task as a Pythonic key, based on `task_hash()`."""
         return hash(int(self.task_hash()))
 
     def __eq__(self, other: object) -> bool:
+        """Task equality is based on `task_hash()`."""
         if not isinstance(other, Task):
             return NotImplemented
         return self.task_hash() == other.task_hash()
 
     def task_hash(self) -> TaskHash:
-        """A hash that represents the Task object using its constituent task graph."""
+        """Identifier for Task, based on dependency structure."""
+        # Cached as an object attribute
+        # Task hash should not change, assuming Task object is not mutated (TODO)
         if not hasattr(self, "_cached_task_hash"):
             self._cached_task_hash = TaskHash.from_object((self.properties.id, self._hashed_arguments()))
         return self._cached_task_hash
 
     def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
-        """A hash that represents the Task object using its resolved arguments."""
+        """Identifier for Task, based on resolved arguments. Requires dependencies to be computed first."""
         resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
 
         if resolved_hash is None:
@@ -240,8 +341,12 @@ class Task(Generic[R]):
         return resolved_hash
 
     def result_hash(self, workspace: Workspace) -> ResultHash:
-        """Hash of the task's result object (getter from workspace cache)."""
-        """Raises RuntimeError if the task has not been computed."""
+        """
+        Return the stored ResultHash for this task.
+
+        Raises:
+            RuntimeError: if the task has not been computed / recorded in the workspace.
+        """
         return workspace.get_result_hash(self)
 
     def _hashed_arguments(
@@ -250,11 +355,28 @@ class Task(Generic[R]):
         hash_task_by_result: bool = False,
         workspace: Workspace | Literal["auto"] = "auto",
     ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
+        """
+        Hash for each argument.
+
+        Args:
+            hash_task_by_result: Represent Task-valued arguments by ResultHash if True, otherwise by TaskHash.
+            workspace:
+                For looking up a Task's ResultHash (required only if `hash_task_by_result=True`).
+
+        Returns:
+            Mapping of {argument_name : hash(argument value)}
+            Excluding:
+                - any keys in `properties.exclude`
+                - any keys whose value equals declared default in `properties.defaults`
+            Note: hash "version" of a specific (argument, value) pair can be set from `properties.versions`.
+        """
+        # Signature of function is used for creating {argument_name : value} map
         if not hasattr(self, "_cached_signature"):
             self._cached_signature = signature(self.func)
         bound_arguments = cast("Signature", self._cached_signature).bind(*self.args, **self.kwargs)
         bound_arguments.apply_defaults()
 
+        # Get hash & version for each argument
         def resolve(key: str, value: Any) -> tuple[TaskHash | ResultHash, int]:
             h = (
                 (value.result_hash(workspace=workspace) if hash_task_by_result else value.task_hash())
@@ -274,7 +396,7 @@ class Task(Generic[R]):
 
 def task(
     *,
-    id: str | None,  # TODO: command to fill these in when None
+    id: str | None = None,  # TODO: command to fill these in when None  # TODO: shadow
     cache: bool = False,
     exclude: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
@@ -282,12 +404,40 @@ def task(
     index_by: Literal["task", "result"] = "result",
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    # TODO: handle lambda
-    # TODO: Callable has no __qualname__
-    # TODO: handle func.__module__ == "__main__"
+    """
+    Decorator to control how a Task is identified and cached.
+
+    Attaches `__task_properties__: TaskProperties` attribute to `self.func`.
+
+    Args:
+        id:
+            Stable identifier for the task definition. Will raise ValueError if None.
+        cache:
+            If True, `Task.result()` may store results in the Workspace.
+        exclude:
+            Exclude arguments (by name) from hashing.
+        defaults:
+            If an argument value matches the provided default, it is omitted from hashing.
+        versions:
+            For versioning per (argument, value) pair. Normalized to a {argument : ResultHash(value)} mapping.
+        index_by:
+            Determines how result is indexed (i.e. how ResultHash is computed) in Workspace:
+            - "task": index by resolved task hash
+            - "result": index by the result object
+        serializer:
+            Serializer type for saving/loading results.
+
+    Returns:
+        A decorator that mutates `func` by setting `func.__task_properties__`.
+    """
+
+    if id is None:
+        msg = "id must be provided."
+        raise ValueError(msg)
+
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
-            id=(id or f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
+            id=id,
             cache=cache,
             exclude=(exclude or set()),
             defaults=(defaults or {}),
@@ -309,13 +459,30 @@ def task(
 
 def resources(
     *,
-    time: int | None = None,  # walltime (minutes)
-    nodes: int = 1,  # number of nodes
-    memory: int = 8,  # memory in GB
-    cpus: int = 1,  # number of logical cores
-    gpus: int = 0,  # number of GPUs
-    gpu_memory: int | None = None,  # memory (GB) per GPU
+    time: int | None = None,
+    nodes: int = 1,
+    memory: int = 8,
+    cpus: int = 1,
+    gpus: int = 0,
+    gpu_memory: int | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
+    """
+    Decorator to attach resource requirements to a callable.
+
+    Metadata used by Executors (e.g. SLURM submission) for scheduling concurrent Jobs.
+
+    Args:
+        time: Walltime (minutes)
+        nodes: Number of nodes
+        memory: Memory in GB
+        cpus: Number of logical cores
+        gpus: GPU count
+        gpu_memory: Memory (GB) per GPU
+
+    Returns:
+        A decorator that mutates `func` by setting `func.__task_resources__`.
+    """
+
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         func.__task_resources__ = TaskResources(  # ty:ignore[unresolved-attribute]
             time=time,
@@ -331,6 +498,8 @@ def resources(
 
 
 class TaskProperties(Struct, frozen=True):
+    """Immutable metadata describing how a Task should be identified and cached."""
+
     id: str
     cache: bool = False
     exclude: set[str] = set()
@@ -341,9 +510,11 @@ class TaskProperties(Struct, frozen=True):
 
 
 class TaskResources(Struct):
-    time: int | None = None  # walltime (minutes)
-    nodes: int = 1  # number of nodes
-    memory: int = 8  # memory in GB
-    cpus: int = 1  # number of logical cores
-    gpus: int = 0  # number of GPUs
-    gpu_memory: int | None = None  # memory (GB) per GPU
+    """Resource requirements for executing a Task. Executor-facing metadata."""
+
+    time: int | None = None
+    nodes: int = 1
+    memory: int = 8
+    cpus: int = 1
+    gpus: int = 0
+    gpu_memory: int | None = None

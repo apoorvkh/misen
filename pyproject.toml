@@ -24,6 +24,7 @@ dependencies = [
     "lmdb>=1.7.5",
     "typing_extensions>=4.1.0",
     "misen_hash",
+    "psutil"
 ]
 [dependency-groups]
 dev = [

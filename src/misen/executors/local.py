@@ -16,16 +16,6 @@ if TYPE_CHECKING:
     from misen.workspace import Workspace
 
 
-def _infer_total_memory_gb() -> int:
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        page_count = os.sysconf("SC_PHYS_PAGES")
-        total_bytes = int(page_size) * int(page_count)
-        return max(1, total_bytes // (1024**3))
-    except (ValueError, OSError, AttributeError):
-        return 1
-
-
 @dataclass(frozen=True)
 class _ResourceBudget:
     cpus: int
@@ -183,3 +173,13 @@ class LocalExecutor(Executor[LocalJob]):
         job = LocalJob(work_unit=work_unit, resources=resources, dependencies=dependencies, payload=payload)
         self._scheduler.submit(job)
         return job
+
+
+def _infer_total_memory_gb() -> int:
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        total_bytes = int(page_size) * int(page_count)
+        return max(1, total_bytes // (1024**3))
+    except (ValueError, OSError, AttributeError):
+        return 1
