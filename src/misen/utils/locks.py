@@ -21,6 +21,13 @@ class LockLike(Protocol):
 
 
 class NFSLock:
+    __slots__ = ("_lock", "_refresh_interval", "_stop", "_thread")
+
+    _lock: flufl.Lock
+    _refresh_interval: int | None
+    _stop: threading.Event
+    _thread: threading.Thread | None
+
     def __init__(
         self,
         lockfile: Path,
@@ -32,7 +39,7 @@ class NFSLock:
         self._refresh_interval = refresh_interval
         if self._refresh_interval is not None:
             self._stop = threading.Event()
-            self._thread: threading.Thread | None = None
+            self._thread = None
 
     def _refresh_loop(self) -> None:
         try:

@@ -154,6 +154,8 @@ class WorkUnit:
     Specifies minimum resources to execute any Task in the DAG.
     """
 
+    __slots__ = ("dependencies", "graph", "resources", "root")
+
     root: Task
     graph: DependencyGraph[Task]
     resources: TaskResources
@@ -227,6 +229,10 @@ class WorkUnit:
 
 
 class Job(ABC):
+    __slots__ = ("work_unit",)
+
+    work_unit: WorkUnit
+
     def __init__(self, work_unit: WorkUnit) -> None:
         self.work_unit = work_unit
 
@@ -241,6 +247,8 @@ class Job(ABC):
 
 
 class CompletedJob(Job):
+    __slots__ = ()
+
     def __init__(self, work_unit: WorkUnit) -> None:
         super().__init__(work_unit=work_unit)
 

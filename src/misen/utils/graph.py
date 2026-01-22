@@ -14,6 +14,8 @@ T = TypeVar("T")
 
 
 class DependencyGraph(Generic[T]):
+    __slots__ = ("_g",)
+
     def __init__(self) -> None:
         self._g = rx.PyDiGraph(check_cycle=True, multigraph=False)
 

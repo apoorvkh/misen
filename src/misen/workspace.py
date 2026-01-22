@@ -129,6 +129,8 @@ class Workspace(FromSettingsABC):
 
 
 class ResultMap(MutableMapping[Task[Any], Any]):
+    __slots__ = ("result_store", "workspace")
+
     def __init__(self, result_store: MutableMapping[ResultHash, Path], workspace: Workspace) -> None:
         self.result_store = result_store
         self.workspace = workspace

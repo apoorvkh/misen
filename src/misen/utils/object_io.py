@@ -15,6 +15,8 @@ T = TypeVar("T")
 class Serializer(ABC, Generic[T]):
     """Serialize/deserialize an object to/from a directory."""
 
+    __slots__ = ()
+
     @staticmethod
     @abstractmethod
     def save(obj: T, directory: Path) -> None: ...
@@ -28,6 +30,8 @@ class Serializer(ABC, Generic[T]):
 
 
 class DefaultSerializer(Serializer[Any]):
+    __slots__ = ()
+
     @staticmethod
     def save(obj: Any, directory: Path) -> None:
         (directory / "data.dill").write_bytes(dill.dumps(obj))

@@ -8,6 +8,10 @@ from misen.workspace import Workspace
 
 
 class SlurmJob(Job):
+    __slots__ = ("submitit_job",)
+
+    submitit_job: submitit.Job
+
     def __init__(self, work_unit: WorkUnit, submitit_job: submitit.Job) -> None:
         super().__init__(work_unit=work_unit)
         self.submitit_job = submitit_job

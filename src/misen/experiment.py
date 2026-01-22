@@ -29,7 +29,8 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
-        setattr(cls, "tasks", cache(cls.tasks))
+        # @cache downstream implementations of `tasks()`
+        setattr(cls, "tasks", cache(cls.tasks))  # noqa: B010
 
     def __getitem__(self, key: str) -> Task:
         return self.tasks()[key]

@@ -22,6 +22,10 @@ VT = TypeVar("VT", bound=Hash)
 class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     _key_type: type[KT]
     _value_type: type[VT]
+    lock: NFSLock
+    env: lmdb.Environment  # ty:ignore[possibly-missing-attribute]
+
+    __slots__ = ("_key_type", "_value_type", "env", "lock")
 
     def __class_getitem__(cls, item: tuple[type[KT], type[VT]]):
         key_t, val_t = item
@@ -89,6 +93,10 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
 
 
 class DiskResultStore(MutableMapping[ResultHash, Path]):
+    __slots__ = ("directory",)
+
+    directory: Path
+
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
