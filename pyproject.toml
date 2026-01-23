@@ -1,41 +1,53 @@
+[project]
+name = "misen"
+version = "0.1.0"
+description = "DAG execution engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Apoorv Khandelwal", email = "mail@apoorvkh.com" }]
+dependencies = [
+  "cloudpickle>=3.0",
+  "dill>=0.4.0",
+  "flufl-lock>=8.2.0",
+  "lmdb>=1.7.5",
+  "misen_hash",
+  "msgspec>=0.20.0",
+  "psutil",
+  "rustworkx>=0.15.0",
+  "tomli>=1.1.0 ; python_version < '3.11'",
+  "typing_extensions>=4.1.0",
+  "tyro>=1.0.0"
+]
+
+[project.optional-dependencies]
+slurm = ["submitit>=1.5.0", "setuptools"]
+
+[dependency-groups]
+dev = [
+  "pytest==8.3.3",
+  "ruff==0.14.11",
+  "ty==0.0.11",
+]
+docs = [
+  "mkdocstrings-python>=2.0.1",
+  "zensical>=0.0.17",
+]
+
 [build-system]
 requires = ["uv_build"]
 build-backend = "uv_build"
 
-[project]
-name = "misen"
-version = "0.1.0"
+[tool.ruff]
+line-length = 120
+src = ["src", "tests", "packages"]
 
-authors = [{ name = "Apoorv Khandelwal", email = "mail@apoorvkh.com" }]
-description = "DAG execution engine"
-readme = "README.md"
-license = { file = "LICENSE" }
-requires-python = ">=3.10"
-dependencies = [
-    "cloudpickle>=3.0",
-    "dill>=0.4.0",
-    "rustworkx>=0.15.0",
-    "msgspec>=0.20.0",
-    "tomli>=1.1.0 ; python_version < '3.11'",
-    "tyro>=1.0.0",
-    "flufl-lock>=8.2.0",
-    "lmdb>=1.7.5",
-    "typing_extensions>=4.1.0",
-    "misen_hash",
-    "psutil"
-]
-[project.optional-dependencies]
-slurm = ["submitit>=1.5.0", "setuptools"]
-[dependency-groups]
-dev = [
-    "ruff==0.14.11",
-    "ty==0.0.11",
-    "pytest==8.3.3",
-]
-docs = [
-    "zensical>=0.0.17",
-    "mkdocstrings-python>=2.0.1",
-]
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["FIX", "TD", "PLC0415", "PLR0913", "C901", "ANN401", "SIM117"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.uv]
 default-groups = "all"
@@ -45,12 +57,3 @@ misen-hash = { workspace = true }
 
 [tool.uv.workspace]
 members = ["packages/*"]
-
-[tool.ruff]
-line-length = 120
-src = ["src", "tests", "packages"]
-[tool.ruff.lint]
-select = ["ALL"]
-ignore = ["FIX", "TD", "PLC0415", "PLR0913", "C901", "ANN401", "SIM117"]
-[tool.ruff.lint.pydocstyle]
-convention = "google"
