@@ -312,6 +312,12 @@ dependencies = [
     { name = "tyro" },
 ]
 
+[package.optional-dependencies]
+slurm = [
+    { name = "setuptools" },
+    { name = "submitit" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -321,10 +327,6 @@ dev = [
 docs = [
     { name = "mkdocstrings-python" },
     { name = "zensical" },
-]
-slurm = [
-    { name = "setuptools" },
-    { name = "submitit" },
 ]
 
 [package.metadata]
@@ -337,10 +339,13 @@ requires-dist = [
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "psutil" },
     { name = "rustworkx", specifier = ">=0.15.0" },
+    { name = "setuptools", marker = "extra == 'slurm'" },
+    { name = "submitit", marker = "extra == 'slurm'", specifier = ">=1.5.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=1.1.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "tyro", specifier = ">=1.0.0" },
 ]
+provides-extras = ["slurm"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -351,10 +356,6 @@ dev = [
 docs = [
     { name = "mkdocstrings-python", specifier = ">=2.0.1" },
     { name = "zensical", specifier = ">=0.0.17" },
-]
-slurm = [
-    { name = "setuptools" },
-    { name = "submitit", specifier = ">=1.5.0" },
 ]
 
 [[package]]

@@ -6,9 +6,7 @@ build-backend = "uv_build"
 name = "misen"
 version = "0.1.0"
 
-authors = [
-    { name = "Apoorv Khandelwal", email = "mail@apoorvkh.com" }
-]
+authors = [{ name = "Apoorv Khandelwal", email = "mail@apoorvkh.com" }]
 description = "DAG execution engine"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -26,17 +24,21 @@ dependencies = [
     "misen_hash",
     "psutil"
 ]
+[project.optional-dependencies]
+slurm = ["submitit>=1.5.0", "setuptools"]
 [dependency-groups]
 dev = [
     "ruff==0.14.11",
     "ty==0.0.11",
     "pytest==8.3.3",
 ]
-slurm = ["submitit>=1.5.0", "setuptools"]
 docs = [
     "zensical>=0.0.17",
     "mkdocstrings-python>=2.0.1",
 ]
+
+[tool.uv]
+default-groups = "all"
 
 [tool.uv.sources]
 misen-hash = { workspace = true }
@@ -52,6 +54,3 @@ select = ["ALL"]
 ignore = ["FIX", "TD", "PLC0415", "PLR0913", "C901", "ANN401", "SIM117"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
-
-[tool.ty.src]
-include = ["src"]
