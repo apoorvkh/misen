@@ -34,10 +34,8 @@ dev = [
 ]
 slurm = ["submitit>=1.5.0", "setuptools"]
 docs = [
-  "sphinx==7.4.7",
-  "furo==2024.8.6",
-  "myst-parser==3.0.1",
-  "sphinx-toolbox==3.8.2",
+    "zensical>=0.0.17",
+    "mkdocstrings-python>=2.0.1",
 ]
 
 [tool.uv.sources]
@@ -51,7 +49,7 @@ line-length = 120
 src = ["src", "tests", "packages"]
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D", "FIX", "TD", "PLC0415", "PLR0913", "C901", "ANN401", "SIM117"]
+ignore = ["FIX", "TD", "PLC0415", "PLR0913", "C901", "ANN401", "SIM117"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
