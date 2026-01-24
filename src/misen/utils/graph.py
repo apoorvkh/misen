@@ -14,43 +14,62 @@ T = TypeVar("T")
 
 
 class DependencyGraph(Generic[T]):
+    """Directed acyclic graph wrapper with dependency semantics."""
+
     __slots__ = ("_g",)
 
     def __init__(self) -> None:
+        """Initialize an empty dependency graph."""
         self._g = rx.PyDiGraph(check_cycle=True, multigraph=False)
 
     ## Wrapper functions
 
     def copy(self) -> DependencyGraph[T]:
+        """Return a shallow copy of the graph."""
         new = DependencyGraph()
         new._g = self._g.copy()
         return new
 
     def nodes(self) -> list[T]:
+        """Return node values in storage order."""
         return self._g.nodes()
 
     def node_indices(self) -> list[int]:
+        """Return node indices in storage order."""
         return list(self._g.node_indices())
 
     def add_node(self, node: T) -> int:
+        """Add a node and return its index."""
         return self._g.add_node(node)
 
     def __getitem__(self, key: int) -> T:
+        """Return the node value at the given index."""
         return self._g.__getitem__(key)
 
     def __setitem__(self, key: int, value: T) -> None:
+        """Replace the node value at the given index."""
         self._g.__setitem__(key, value)
 
     def add_edge(self, parent: int, child: int, edge: Any = None) -> None:
+        """Add an edge from parent to child with optional edge data."""
         self._g.add_edge(parent, child, edge)
 
     def successors(self, node_index: int) -> list[T]:
+        """Return successors of the given node index."""
         return self._g.successors(node_index)
 
     def is_root(self, node_index: int) -> bool:
+        """Return True when the node has no incoming edges."""
         return self._g.in_degree(node_index) == 0
 
     def remove_node_by_value(self, value: Any, *, cmp: Callable[[Any, Any], bool] = eq, first: bool = False) -> None:
+        """Remove nodes that compare equal to the given value.
+
+        Args:
+            value: The value to match against nodes.
+            cmp: Comparator for matching nodes against the value.
+            first: Whether to remove only the first matching node.
+        """
         indices_to_remove = []
         for node_index in self._g.node_indices():
             if cmp(self._g[node_index], value):
@@ -62,13 +81,16 @@ class DependencyGraph(Generic[T]):
     ## Custom functions
 
     def evaluation_order(self) -> list[int]:
+        """Return node indices in dependency evaluation order."""
         return list(rx.topological_sort(self._g))[::-1]
 
     def __iter__(self) -> Iterator[T]:
+        """Yield node values in evaluation order."""
         for i in self.evaluation_order():
             yield self._g[i]
 
     def coarsen_to_anchors(self, anchors: list[int]) -> None:
+        """Remove non-anchor nodes while retaining edges between anchors."""
         for node in reversed(self._g.node_indices()):
             if node not in anchors:
                 self._g.remove_node_retain_edges(node)
@@ -80,13 +102,13 @@ class DependencyGraph(Generic[T]):
         max_depth: int | None = None,
         show_duplicates: bool = False,
     ) -> None:
-        """
-        Pretty-print a dependency graph as a hierarchy.
+        """Pretty-print a dependency graph as a hierarchy.
 
         Interprets edges as: u -> v  means "u depends on v" (so v is printed under u).
         """
 
         def sort_key(x: T) -> str:
+            """Return a deterministic sort key for nodes."""
             # Deterministic ordering even for unorderable node types
             return str(x)
 
@@ -109,6 +131,7 @@ class DependencyGraph(Generic[T]):
         printed: set[T] = set()
 
         def walk(node: T, prefix: str, is_last: bool, depth: int, stack: set[T]) -> None:
+            """Recursively print a node subtree with indentation."""
             connector = "└── " if is_last else "├── "
 
             if node in stack:

@@ -10,17 +10,31 @@ from typing_extensions import Self
 __all__ = ["LockLike", "LockUnavailableError", "NFSLock"]
 
 
-class LockUnavailableError(TimeoutError): ...  # TODO: raise this in NFSLock?
+class LockUnavailableError(TimeoutError):
+    """Raised when a lock cannot be acquired within the timeout."""
+
+    # TODO: raise this in NFSLock?
 
 
 class LockLike(Protocol):
-    def acquire(self, *, blocking: bool = True, timeout: int | None = None) -> None: ...
-    def release(self) -> None: ...
-    def context(self, *, blocking: bool = True, timeout: int | None = None) -> AbstractContextManager[Self]: ...
-    def is_locked(self) -> bool: ...
+    """Protocol describing a lock with context-manager support."""
+
+    def acquire(self, *, blocking: bool = True, timeout: int | None = None) -> None:
+        """Acquire the lock."""
+
+    def release(self) -> None:
+        """Release the lock."""
+
+    def context(self, *, blocking: bool = True, timeout: int | None = None) -> AbstractContextManager[Self]:
+        """Return a context manager that acquires/releases the lock."""
+
+    def is_locked(self) -> bool:
+        """Return True if the lock is currently held."""
 
 
 class NFSLock:
+    """Lock implementation backed by a lock file suitable for NFS."""
+
     __slots__ = ("_lock", "_refresh_interval", "_stop", "_thread")
 
     _lock: flufl.Lock
@@ -34,6 +48,13 @@ class NFSLock:
         lifetime: int = 15,
         refresh_interval: int | None = None,
     ) -> None:
+        """Initialize the lock.
+
+        Args:
+            lockfile: Path to the lock file.
+            lifetime: Lock lifetime in seconds for the underlying lock file.
+            refresh_interval: Optional refresh interval in seconds.
+        """
         self._lock = flufl.Lock(lockfile=str(lockfile), lifetime=lifetime)
 
         self._refresh_interval = refresh_interval
@@ -42,6 +63,7 @@ class NFSLock:
             self._thread = None
 
     def _refresh_loop(self) -> None:
+        """Periodically refresh the lock until stopped."""
         try:
             while not self._stop.wait(self._refresh_interval):
                 self._lock.refresh()
@@ -49,6 +71,7 @@ class NFSLock:
             pass
 
     def acquire(self, *, blocking: bool = True, timeout: int | None = None) -> None:
+        """Acquire the lock, optionally waiting up to the timeout."""
         timeout = timeout if blocking else 0
         self._lock.lock(timeout=timeout)
 
@@ -61,6 +84,7 @@ class NFSLock:
             self._thread.start()
 
     def release(self) -> None:
+        """Release the lock and stop any refresh thread."""
         if self._refresh_interval is not None:
             self._stop.set()
             if self._thread is not None and self._thread.is_alive():
@@ -71,6 +95,7 @@ class NFSLock:
 
     @contextmanager
     def context(self, *, blocking: bool = True, timeout: int | None = None) -> Iterator[Self]:
+        """Context manager that acquires/releases the lock."""
         self.acquire(blocking=blocking, timeout=timeout)
         try:
             yield self
@@ -78,4 +103,5 @@ class NFSLock:
             self.release()
 
     def is_locked(self) -> bool:
+        """Return True if the lock is currently held."""
         return self._lock.is_locked

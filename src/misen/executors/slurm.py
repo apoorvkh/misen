@@ -8,15 +8,19 @@ from misen.workspace import Workspace
 
 
 class SlurmJob(Job):
+    """Job implementation backed by submitit/SLURM."""
+
     __slots__ = ("submitit_job",)
 
     submitit_job: submitit.Job
 
     def __init__(self, work_unit: WorkUnit, submitit_job: submitit.Job) -> None:
+        """Initialize a SLURM job wrapper."""
         super().__init__(work_unit=work_unit)
         self.submitit_job = submitit_job
 
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
+        """Return the job state based on submitit status."""
         match self.submitit_job.state:
             case "PENDING" | "SUSPENDED":
                 return "pending"
@@ -39,12 +43,16 @@ class SlurmJob(Job):
 
 
 class SlurmExecutor(Executor[SlurmJob]):
+    """Executor implementation that submits work to SLURM."""
+
     folder: str = ".submitit"
 
     def __post_init__(self) -> None:
+        """Initialize the submitit executor."""
         self.slurm_executor = submitit.SlurmExecutor(folder=Path(self.folder))
 
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace) -> SlurmJob:
+        """Dispatch a work unit to SLURM via submitit."""
         dependency = ",".join([f"afterok:{j.submitit_job.job_id}" for j in dependencies])
 
         resources = work_unit.resources

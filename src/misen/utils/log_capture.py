@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 
 def _try(fn: Callable, *args, **kwargs):
+    """Call a function and swallow any exception."""
     try:
         return fn(*args, **kwargs)
     except Exception:  # noqa: BLE001
@@ -22,10 +23,12 @@ def _try(fn: Callable, *args, **kwargs):
 
 
 def _fflush_all() -> None:
+    """Flush all C stdio buffers."""
     ctypes.CDLL(None).fflush(None)
 
 
 def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
+    """Write text to a target stream with locking and flush."""
     if not text:
         return
     with lock:
@@ -34,10 +37,12 @@ def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
 
 
 def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
+    """Create an incremental decoder for the given encoding."""
     return codecs.getincrementaldecoder(enc)(errors="replace")
 
 
 def _wrap_fd(fd: int, enc: str) -> TextIO:
+    """Wrap a file descriptor in a text writer."""
     raw = io.FileIO(fd, mode="w", closefd=False)
     buf = io.BufferedWriter(raw)
     return io.TextIOWrapper(
@@ -50,14 +55,13 @@ def _wrap_fd(fd: int, enc: str) -> TextIO:
 
 
 def _join_until(th: threading.Thread, deadline: float) -> None:
+    """Join a thread until a deadline."""
     th.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 @contextlib.contextmanager
 def capture_all_output(target: TextIO, timeout: float = 10.0):
-    """
-    Capture everything written to OS fds 1/2 (stdout/stderr), including C/C++ writes,
-    and tee into `target`.
+    """Capture everything written to OS fds 1/2 (stdout/stderr), including C/C++ writes, and tee into `target`.
 
     Exit behavior:
       - waits up to `timeout` seconds to drain cleanly
@@ -104,6 +108,7 @@ def capture_all_output(target: TextIO, timeout: float = 10.0):
     os.set_inheritable(wfd, False)
 
     def reader() -> None:
+        """Read pipe output and write decoded text to the target."""
         dec = _make_decoder(encoding)
         try:
             while True:

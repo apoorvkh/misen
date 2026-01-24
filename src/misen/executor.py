@@ -1,5 +1,4 @@
-"""
-Executor interface for submitting a Task's DAG to an execution backend (e.g. a local process or SLURM).
+"""Executor interface for submitting a Task's DAG to an execution backend (e.g. a local process or SLURM).
 
 Convention: Graph edge A -> B indicates that A depends on B.
 
@@ -37,17 +36,8 @@ JobT = TypeVar("JobT", bound="Job")
 class Executor(FromSettingsABC, Generic[JobT]):
     """Abstract interface for implementing an Executor for a specific backend."""
 
-    def submit(
-        self,
-        tasks: set[Task],
-        workspace: Workspace,
-    ) -> DependencyGraph[CompletedJob | JobT]:
-        """
-        Submit a set of tasks for execution. Tasks will be run by backend respecting dependency order.
-
-        Args:
-            tasks: The set of tasks whose transitive dependencies define the Task DAG to run.
-            workspace: Workspace providing Task artifact caching and retrieval.
+    def submit(self, tasks: set[Task], workspace: Workspace) -> DependencyGraph[CompletedJob | JobT]:
+        """Submit a set of tasks for execution. Tasks will be run by backend respecting dependency order.
 
         Returns:
             A dependency graph of backend-specific Job handles corresponding to WorkUnits.
@@ -75,8 +65,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
 
     @abstractmethod
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace) -> JobT:
-        """
-        Dispatch a WorkUnit to the backend. Will run `work_unit.execute(workspace)` after dependencies are completed.
+        """Dispatch a WorkUnit to the backend. Will run `work_unit.execute(workspace)` after dependencies are completed.
 
         Args:
             work_unit: The WorkUnit to dispatch.
@@ -89,9 +78,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
 
     @staticmethod
     def _build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
-        """
-        Given a set of tasks, transform their Task DAG into a DAG of WorkUnits.
-        """
+        """Given a set of tasks, transform their Task DAG into a DAG of WorkUnits."""
         # Task dependency graph: an edge from A to B means A depends on B
         union = Task((lambda *_: None), *tasks)
         task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
@@ -112,20 +99,23 @@ class Executor(FromSettingsABC, Generic[JobT]):
 
         return work_graph
 
-    """FromSettingsABC implementation. Permits initializing an Executor class from TOML settings or CLI."""
+    # Below: FromSettingsABC implementation. Permits initializing an Executor class from TOML settings or CLI.
 
     @staticmethod
     def _settings_key() -> str:
+        """Return the TOML settings key for executor configuration."""
         return "executor"
 
     @staticmethod
     def _default() -> Executor:
+        """Return the default executor implementation."""
         from .executors.local import LocalExecutor
 
         return LocalExecutor()
 
     @classmethod
     def _resolve_type(cls, type_name: str | ExecutorType) -> type[Executor]:
+        """Resolve an executor type name to a class."""
         if type_name in get_args(ExecutorType):
             type_name = cast("ExecutorType", type_name)
             match type_name:
@@ -143,8 +133,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
 
 
 class WorkUnit:
-    """
-    A WorkUnit is a cache-bounded unit of execution.
+    """A WorkUnit is a cache-bounded unit of execution.
 
     It corresponds to the sub-DAG of non-cacheable tasks reachable from `root`, truncated at downstream cacheable tasks
     (which become separate WorkUnits, i.e. `dependencies`).
@@ -162,6 +151,12 @@ class WorkUnit:
     dependencies: set[WorkUnit]
 
     def __init__(self, root: Task, dependencies: set[WorkUnit]) -> None:
+        """Initialize a WorkUnit rooted at the given task.
+
+        Args:
+            root: Cacheable root task for this work unit.
+            dependencies: Downstream work units that depend on this unit.
+        """
         self.root = root
         self.dependencies = dependencies
 
@@ -193,17 +188,19 @@ class WorkUnit:
         return hash(self.root)
 
     def __eq__(self, other: object) -> bool:
+        """Return True if the other WorkUnit has the same root task."""
         return isinstance(other, WorkUnit) and self.root == other.root
 
     def __repr__(self) -> str:
+        """Return a short debug representation for the work unit."""
         return f"WorkUnit(hash={short_hash(self)})"
 
     def execute(self, workspace: Workspace) -> None:
         """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
-
         task_results: dict[Task, Any] = {}
 
         def resolve_arg(arg: Any) -> Any:
+            """Resolve a task argument from cached runtime results."""
             if isinstance(arg, Task) and not arg.properties.cache:
                 return task_results[arg]
             return arg
@@ -229,17 +226,23 @@ class WorkUnit:
 
 
 class Job(ABC):
+    """Abstract job handle returned by an executor."""
+
     __slots__ = ("work_unit",)
 
     work_unit: WorkUnit
 
     def __init__(self, work_unit: WorkUnit) -> None:
+        """Initialize the job wrapper for a work unit."""
         self.work_unit = work_unit
 
     @abstractmethod
-    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]: ...
+    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
+        """Return the current job state."""
+        ...
 
     def wait(self, poll_s: float = 0.5) -> None:
+        """Block until the job reaches a terminal state."""
         while True:
             if self.state() in ("done", "failed"):
                 return
@@ -247,10 +250,14 @@ class Job(ABC):
 
 
 class CompletedJob(Job):
+    """Job placeholder for already-completed work units."""
+
     __slots__ = ()
 
     def __init__(self, work_unit: WorkUnit) -> None:
+        """Initialize a completed job wrapper."""
         super().__init__(work_unit=work_unit)
 
     def state(self) -> Literal["done"]:
+        """Return the completed state."""
         return "done"

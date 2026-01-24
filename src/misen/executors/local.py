@@ -18,14 +18,18 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class _ResourceBudget:
+    """Simple resource budget tracker for local execution."""
+
     cpus: int
     memory: int
     gpus: int
 
     def fits(self, resources: TaskResources) -> bool:
+        """Return True if the resources fit within the budget."""
         return resources.cpus <= self.cpus and resources.memory <= self.memory and resources.gpus <= self.gpus
 
     def subtract(self, resources: TaskResources) -> _ResourceBudget:
+        """Return a new budget with the resources subtracted."""
         return _ResourceBudget(
             cpus=self.cpus - resources.cpus,
             memory=self.memory - resources.memory,
@@ -33,6 +37,7 @@ class _ResourceBudget:
         )
 
     def add(self, resources: TaskResources) -> _ResourceBudget:
+        """Return a new budget with the resources added."""
         return _ResourceBudget(
             cpus=self.cpus + resources.cpus,
             memory=self.memory + resources.memory,
@@ -41,11 +46,14 @@ class _ResourceBudget:
 
 
 def _run_pickled(payload: bytes) -> None:
+    """Run a pickled callable payload in a worker process."""
     func = cloudpickle.loads(payload)
     func()
 
 
 class LocalJob(Job):
+    """Job implementation backed by a multiprocessing.Process."""
+
     def __init__(
         self,
         work_unit: WorkUnit,
@@ -53,6 +61,7 @@ class LocalJob(Job):
         dependencies: set[LocalJob],
         payload: bytes,
     ) -> None:
+        """Initialize a local job for a work unit."""
         super().__init__(work_unit=work_unit)
         self.resources = resources
         self.dependencies = dependencies
@@ -62,6 +71,7 @@ class LocalJob(Job):
         self._lock = threading.Lock()
 
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
+        """Return the current process state."""
         with self._lock:
             if self._state in {"done", "failed"}:
                 return self._state
@@ -79,17 +89,22 @@ class LocalJob(Job):
             return self._state
 
     def _set_process(self, process: multiprocessing.Process) -> None:
+        """Set the underlying process and mark running."""
         with self._lock:
             self._process = process
             self._state = "running"
 
     def _mark_failed(self) -> None:
+        """Mark the job as failed."""
         with self._lock:
             self._state = "failed"
 
 
 class _LocalScheduler:
-    def __init__(self, total_budget: _ResourceBudget):
+    """Background scheduler for managing local job execution."""
+
+    def __init__(self, total_budget: _ResourceBudget) -> None:
+        """Initialize the scheduler with a total resource budget."""
         self._total_budget = total_budget
         self._available_budget = total_budget
         self._pending: list[LocalJob] = []
@@ -100,11 +115,13 @@ class _LocalScheduler:
         self._thread.start()
 
     def submit(self, job: LocalJob) -> None:
+        """Submit a job for scheduling."""
         with self._condition:
             self._pending.append(job)
             self._condition.notify_all()
 
     def _run(self) -> None:
+        """Scheduler loop that launches ready jobs."""
         while True:
             with self._condition:
                 self._collect_finished()
@@ -115,6 +132,7 @@ class _LocalScheduler:
                     self._condition.wait(timeout=0.1)
 
     def _collect_finished(self) -> None:
+        """Collect finished jobs and release their resources."""
         finished = {job for job in self._running if job.state() in {"done", "failed"}}
         if not finished:
             return
@@ -124,6 +142,7 @@ class _LocalScheduler:
         self._condition.notify_all()
 
     def _start_ready_jobs(self) -> bool:
+        """Start pending jobs that are ready and return True if any started."""
         started_any = False
         for job in list(self._pending):
             dependency_states = {dep.state() for dep in job.dependencies}
@@ -147,11 +166,14 @@ class _LocalScheduler:
 
 
 class LocalExecutor(Executor[LocalJob]):
+    """Executor implementation that runs tasks locally."""
+
     max_cpus: int | None = None
     max_memory: int | None = None
     max_gpus: int | None = None
 
     def __post_init__(self) -> None:
+        """Initialize the local scheduler and resource budget."""
         self._resource_budget = _ResourceBudget(
             cpus=self.max_cpus or (os.cpu_count() or 1),
             memory=self.max_memory or _infer_total_memory_gb(),
@@ -160,6 +182,7 @@ class LocalExecutor(Executor[LocalJob]):
         self._scheduler = _LocalScheduler(self._resource_budget)
 
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace) -> LocalJob:
+        """Dispatch a work unit to the local scheduler."""
         resources = work_unit.resources
         if not self._resource_budget.fits(resources):
             msg = (
@@ -176,6 +199,7 @@ class LocalExecutor(Executor[LocalJob]):
 
 
 def _infer_total_memory_gb() -> int:
+    """Infer total system memory in gigabytes."""
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
         page_count = os.sysconf("SC_PHYS_PAGES")

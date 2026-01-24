@@ -18,6 +18,14 @@ def resolve_auto(
     workspace: Workspace | Literal["auto"] | None = None,
     executor: Executor | Literal["auto"] | None = None,
 ) -> Workspace | Executor:
+    """Automatically instantiate workspace or executor from settings file or default construction.
+
+    Returns:
+        The resolved Workspace or Executor instance.
+
+    Raises:
+        ValueError: If neither workspace nor executor is provided.
+    """
     if workspace is not None:
         if workspace == "auto":
             from misen.workspace import Workspace

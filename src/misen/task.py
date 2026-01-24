@@ -1,15 +1,15 @@
-"""
-This module provides:
-    1. A `Task` wrapper for Python functions and their arguments.
-    2. An `@task` decorator to control how Tasks are identified and how results are stored.
-    3. An `@resources` decorator to specify the hardware resources needed to compute a function.
+"""This module provides utilities to create a Task from a Python function and arguments.
+
+1. `Task` is used to wrap a Python function and its arguments.
+2. `@task` controls how Tasks are identified and how results are stored (corresponding to the decorated function).
+3. `@resources` specifies the hardware resources needed to compute a function.
 
 Tasks may form a dependency graph (a DAG; see `Task.dependency_graph()`), containing edges from Tasks to dependencies.
 
-`Task.submit()` will submit the task to an Executor for execution.
-`Task.result()` will run necessary and specified computations and return the result. This function will retrieve any
-necessary dependency results from and write any computational artifacts (runtime logs, result, etc.) to the Workspace.
-We typically prefer to `submit()` Tasks to an Executor, before calling `result()`.
+Tasks can be submitted (`Task.submit()`) to the Executor for scheduled execution of the dependency graph.
+
+`Task.result()` will run necessary and specified computations and return the result, retrieving and writing artifacts
+(runtime logs, result, etc.) to the Workspace as needed. We typically prefer to `submit()` before calling `result()`.
 
 Tasks can be identified by: `task_hash()` (by dependency graph) or `resolved_hash()` (by resolved arguments).
 Results are identified by `result_hash()`. Any task which computes the same result should have the same `result_hash()`.
@@ -49,24 +49,19 @@ R = TypeVar("R")
 
 
 class Task(Generic[R]):
-    """
-    A Task is a lazy wrapper for a function and its arguments.
+    """A Task is a lazy wrapper for a function and its arguments.
 
-    Attributes
-    ----------
-    func:
-        The underlying callable.
-    args / kwargs:
-        Arguments to pass to `func`. Any value that is itself a `Task` is considered a dependency.
-    properties:
-        TaskProperties metadata (typically attached to `func` via `@task(...)`).
-    resources:
-        TaskResources metadata (typically attached to `func` via `@resources(...)`).
+    Attributes:
+        func: The underlying callable.
+        args / kwargs: Arguments to pass to `func`. Any value that is itself a `Task` is considered a dependency.
+        properties: TaskProperties metadata (typically attached to `func` via `@task(...)`).
+        resources: TaskResources metadata (typically attached to `func` via `@resources(...)`).
     """
 
     __slots__ = ("_cached_signature", "_cached_task_hash", "args", "func", "kwargs", "properties", "resources")
 
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> None:
+        """Initialize a Task with a function and arguments."""
         # Metadata is attached by decorators; fall back to defaults if absent.
         self.properties: TaskProperties = getattr(
             func,
@@ -80,6 +75,7 @@ class Task(Generic[R]):
         self.kwargs: P.kwargs = kwargs
 
     def __repr__(self) -> str:
+        """Return a short debug representation for the task."""
         return (
             f"Task({self.func.__module__}.{self.func.__qualname__}, "
             f"hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"
@@ -87,9 +83,7 @@ class Task(Generic[R]):
 
     @property
     def T(self) -> R:  # noqa: N802
-        """
-        Cast Task to its result type. Useful for type checking compliance when instantiating Tasks with dependencies.
-        """
+        """Cast Task to its result type. Useful for type checking compliance when passing Tasks as dependencies."""
         return cast("R", self)
 
     @property
@@ -118,16 +112,12 @@ class Task(Generic[R]):
         exclude_cached: bool = False,
         workspace: Workspace | Literal["auto"] = "auto",
     ) -> DependencyGraph[Task]:
-        """
-        Build a DependencyGraph rooted at this Task. Directed edges: task -> dependency.
+        """Build a DependencyGraph rooted at this Task. Directed edges: task -> dependency.
 
         Args:
-            exclude_cacheable:
-                Omit any dependency Task with `properties.cache == True`.
-            exclude_cached:
-                Omit any dependency that is already cached in the Workspace.
-            workspace:
-                Required only if `exclude_cached=True`.
+            exclude_cacheable: Omit any dependency Task with `properties.cache == True`.
+            exclude_cached: Omit any dependency that is already cached in the Workspace.
+            workspace: Required only if `exclude_cached=True`.
 
         Returns:
             A DependencyGraph containing all reachable Tasks (based on inclusion criteria).
@@ -137,6 +127,7 @@ class Task(Generic[R]):
 
         @cache
         def _include(dependency: Task) -> bool:
+            """Return True if the dependency should be included."""
             if exclude_cacheable:
                 return dependency.properties.cache is False
             if exclude_cached:
@@ -147,6 +138,7 @@ class Task(Generic[R]):
         nodes: dict[Task, int] = {}
 
         def _get_node(t: Task) -> int:
+            """Return the graph node index for the given task."""
             i = nodes.get(t)
             if i is None:
                 i = nodes[t] = graph.add_node(t)
@@ -179,10 +171,9 @@ class Task(Generic[R]):
         return True
 
     def is_running(self, workspace: Workspace) -> bool:
-        """
-        For cacheable Tasks, if runtime lock (managed by Workspace) is unavailable.
-        Non-cacheable Tasks always return False, since they can freely run concurrently.
-        """
+        """Indicator if this Task is currently running in given Workspace."""
+        # For cacheable Tasks, if runtime lock (managed by Workspace) is unavailable.
+        # Non-cacheable Tasks always return False, since they can freely run concurrently.
         # TODO: non-cacheable case?
         try:
             return self._runtime_lock(workspace=workspace).is_locked()
@@ -196,8 +187,7 @@ class Task(Generic[R]):
         workspace: Workspace | Literal["auto"] = "auto",
         executor: Executor | Literal["auto"] = "auto",
     ) -> DependencyGraph[Job]:
-        """
-        Submit this Task (and its dependency DAG) to an Executor for deferred execution.
+        """Submit this Task (and its dependency graph) to an Executor for deferred execution.
 
         Returns:
             DependencyGraph of Jobs (for monitoring progress of chunked units of work).
@@ -213,8 +203,7 @@ class Task(Generic[R]):
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
     ) -> R:
-        """
-        Compute (or retrieve) this Task's result.
+        """Compute (or retrieve) this Task's result.
 
         Do minimal computation necessary to return the result. Looks up cached results whenever possible.
 
@@ -341,8 +330,7 @@ class Task(Generic[R]):
         return resolved_hash
 
     def result_hash(self, workspace: Workspace) -> ResultHash:
-        """
-        Return the stored ResultHash for this task.
+        """Return the stored ResultHash for this task.
 
         Raises:
             RuntimeError: if the task has not been computed / recorded in the workspace.
@@ -355,8 +343,7 @@ class Task(Generic[R]):
         hash_task_by_result: bool = False,
         workspace: Workspace | Literal["auto"] = "auto",
     ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
-        """
-        Hash for each argument.
+        """Hash for each argument.
 
         Args:
             hash_task_by_result: Represent Task-valued arguments by ResultHash if True, otherwise by TaskHash.
@@ -378,6 +365,7 @@ class Task(Generic[R]):
 
         # Get hash & version for each argument
         def resolve(key: str, value: Any) -> tuple[TaskHash | ResultHash, int]:
+            """Return the hash and version tuple for an argument."""
             h = (
                 (value.result_hash(workspace=workspace) if hash_task_by_result else value.task_hash())
                 if isinstance(value, Task)
@@ -404,12 +392,11 @@ def task(
     index_by: Literal["task", "result"] = "result",
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """
-    Decorator to control how a Task is identified and cached.
+    """Decorator to control how a Task is identified and cached.
 
     Attaches `__task_properties__: TaskProperties` attribute to `self.func`.
 
-    Args:
+    Arguments:
         id:
             Stable identifier for the task definition. Will raise ValueError if None.
         cache:
@@ -430,12 +417,12 @@ def task(
     Returns:
         A decorator that mutates `func` by setting `func.__task_properties__`.
     """
-
     if id is None:
         msg = "id must be provided."
         raise ValueError(msg)
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        """Attach task properties to the decorated function."""
         func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
             id=id,
             cache=cache,
@@ -466,8 +453,7 @@ def resources(
     gpus: int = 0,
     gpu_memory: int | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """
-    Decorator to attach resource requirements to a callable.
+    """Decorator to attach resource requirements to a callable.
 
     Metadata used by Executors (e.g. SLURM submission) for scheduling concurrent Jobs.
 
@@ -484,6 +470,7 @@ def resources(
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        """Attach resource requirements to the decorated function."""
         func.__task_resources__ = TaskResources(  # ty:ignore[unresolved-attribute]
             time=time,
             nodes=nodes,

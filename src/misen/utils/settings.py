@@ -24,10 +24,13 @@ DEFAULT_SETTINGS_FILE = Path(os.environ.get("MISEN_SETTINGS_FILE") or (Path.cwd(
 
 
 class Settings(Struct, dict=True):
+    """Settings loader for TOML configuration files."""
+
     file: Path = DEFAULT_SETTINGS_FILE
 
     @cached_property
     def toml_data(self) -> dict[str, Any]:
+        """Return parsed TOML settings data."""
         try:
             return tomllib.loads(self.file.read_bytes().decode())
         except FileNotFoundError:
@@ -35,10 +38,12 @@ class Settings(Struct, dict=True):
 
 
 class FromSettingsMeta(msgspec.StructMeta, ABCMeta):
+    """Metaclass implementing a parameterized singleton."""
+
     _instances: ClassVar[dict[bytes, Any]] = {}
 
     def __call__(cls, **kwargs):
-        """Parameterized singleton"""
+        """Return a memoized instance for the given kwargs."""
         key = msgspec.json.encode((str(cls.__module__), str(cls.__qualname__), kwargs))
         if key not in FromSettingsMeta._instances:
             FromSettingsMeta._instances[key] = super().__call__(**kwargs)
@@ -46,22 +51,37 @@ class FromSettingsMeta(msgspec.StructMeta, ABCMeta):
 
 
 class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
-    @staticmethod
-    @abstractmethod
-    def _default() -> Self: ...
+    """Base class for settings-backed singleton structs."""
 
     @staticmethod
     @abstractmethod
-    def _settings_key() -> str: ...
+    def _default() -> Self:
+        """Return the default instance when no settings are provided."""
+        ...
+
+    @staticmethod
+    @abstractmethod
+    def _settings_key() -> str:
+        """Return the TOML settings key for this type."""
+        ...
 
     @classmethod
     @abstractmethod
     def _resolve_type(cls, type_name: str) -> type[Self]:
+        """Resolve a type name into a concrete subclass."""
         module, class_name = type_name.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
 
     @classmethod
     def auto(cls, settings: Settings | None = None) -> Self:
+        """Build an instance based on TOML settings or defaults.
+
+        Args:
+            settings: Optional settings object to read from.
+
+        Returns:
+            The resolved instance.
+        """
         if settings is None:
             settings = Settings()
 
@@ -69,14 +89,19 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
 
         if f"{key}_type" not in settings.toml_data:
             return cls._default()
+        if not isinstance(settings.toml_data[f"{key}_type"], str):
+            msg = f"Invalid type name for {key} in {settings.file}"
+            raise TypeError(msg)
 
-        class_type = cls._resolve_type(settings.toml_data.get[f"{key}_type"])
+        class_type = cls._resolve_type(settings.toml_data[f"{key}_type"])
         class_kwargs = settings.toml_data.get(f"{key}_kwargs", {})
         return class_type(**class_kwargs)
 
     def __reduce__(self) -> tuple[Callable[[type[msgspec.Struct], bytes], msgspec.Struct], tuple[type[Self], bytes]]:
+        """Support pickling by reconstructing from msgpack bytes."""
         return (_reconstruct_struct, (type(self), msgspec.msgpack.encode(self)))
 
 
 def _reconstruct_struct(cls: type[msgspec.Struct], serialized: bytes) -> msgspec.Struct:
+    """Reconstruct a msgspec Struct from msgpack bytes."""
     return msgspec.msgpack.decode(serialized, type=cls)

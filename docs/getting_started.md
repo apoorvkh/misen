@@ -27,6 +27,6 @@ my-project
 └── uv.lock
 ```
 
-You can then `import my_project`. And you should run your code as *modules*: for example `uv run -m src.my_project.__init__`, rather than `python src/my_project/__init__.py`.
+You can then `import my_project`. And you should run your code as *modules*: for example `uv run -m my_project.__init__`, rather than `python src/my_project/__init__.py`.
 
 Note about end-users. Note about system packages.

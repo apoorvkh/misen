@@ -26,18 +26,23 @@ WorkspaceType: TypeAlias = Literal["disk"]
 
 
 class Workspace(FromSettingsABC):
+    """Base class for workspace storage backends."""
+
     @staticmethod
     def _settings_key() -> str:
+        """Return the TOML settings key for workspace configuration."""
         return "workspace"
 
     @staticmethod
     def _default() -> Workspace:
+        """Return the default workspace implementation."""
         from .workspaces.disk import DiskWorkspace
 
         return DiskWorkspace()
 
     @classmethod
     def _resolve_type(cls, type_name: str | WorkspaceType) -> type[Workspace]:
+        """Resolve a workspace type name to a class."""
         if type_name in get_args(WorkspaceType):
             type_name = cast("WorkspaceType", type_name)
             match type_name:
@@ -55,6 +60,13 @@ class Workspace(FromSettingsABC):
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
         result_store: MutableMapping[ResultHash, Path],
     ) -> None:
+        """Initialize workspace caches and storage backends.
+
+        Args:
+            resolved_hash_cache: Persistent cache for task resolved hashes.
+            result_hash_cache: Persistent cache for task result hashes.
+            result_store: Store mapping result hashes to on-disk directories.
+        """
         # session-only (non-persistent) caches
         self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
         self._result_hashes: dict[TaskHash, ResultHash] = {}
@@ -65,6 +77,7 @@ class Workspace(FromSettingsABC):
         self._result_map = ResultMap(result_store=result_store, workspace=self)
 
     def get_resolved_hash(self, task: Task) -> ResolvedTaskHash | None:
+        """Return the resolved hash for a task if cached."""
         task_hash = task.task_hash()
         # fast (session-only) cache
         resolved_hash = self._resolved_hashes.get(task_hash)
@@ -78,11 +91,17 @@ class Workspace(FromSettingsABC):
         return resolved_hash
 
     def set_resolved_hash(self, task: Task, resolved_hash: ResolvedTaskHash) -> None:
+        """Persist the resolved hash for a task."""
         task_hash = task.task_hash()
         self._resolved_hashes[task_hash] = resolved_hash
         self._resolved_hash_cache[task_hash] = resolved_hash
 
     def get_result_hash(self, task: Task) -> ResultHash:
+        """Return the result hash for a completed task.
+
+        Raises:
+            RuntimeError: If the task has not been computed yet.
+        """
         # fast (session-only) cache
         task_hash = task.task_hash()
         result_hash = self._result_hashes.get(task_hash)
@@ -99,19 +118,25 @@ class Workspace(FromSettingsABC):
         return result_hash
 
     def set_result_hash(self, task: Task, result_hash: ResultHash) -> None:
+        """Persist the result hash for a task."""
         self._result_hashes[task.task_hash()] = result_hash
         resolved_hash = task.resolved_hash(workspace=self)
         self._result_hash_cache[resolved_hash] = result_hash
 
     @property
     def results(self) -> ResultMap:
+        """Return the result map interface for cached task results."""
         return self._result_map
 
     @abstractmethod
-    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike: ...
+    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
+        """Return a lock for task or result namespaces."""
+        ...
 
     @abstractmethod
-    def get_temp_dir(self) -> Path: ...
+    def get_temp_dir(self) -> Path:
+        """Return a temporary directory for workspace operations."""
+        ...
 
     @abstractmethod
     def get_work_dir(self, task: Task) -> Path:
@@ -125,17 +150,33 @@ class Workspace(FromSettingsABC):
         task: Task,
         mode: Literal["a", "r"],
         timestamp: int | Literal["latest"] = "latest",
-    ) -> TextIO: ...
+    ) -> TextIO:
+        """Open a log file for the given task.
+
+        Args:
+            task: Task associated with the log file.
+            mode: File open mode, usually "a" or "r".
+            timestamp: Timestamp to select a log file, or "latest".
+        """
+        ...
 
 
 class ResultMap(MutableMapping[Task[Any], Any]):
+    """Mapping interface for task results stored in a workspace."""
+
     __slots__ = ("result_store", "workspace")
 
     def __init__(self, result_store: MutableMapping[ResultHash, Path], workspace: Workspace) -> None:
+        """Initialize the result map wrapper."""
         self.result_store = result_store
         self.workspace = workspace
 
     def __getitem__(self, key: Task[R], /) -> R:
+        """Return the cached result for a task.
+
+        Raises:
+            KeyError: If the result is not present in the cache.
+        """
         try:
             result_hash = key.result_hash(workspace=self.workspace)
             directory = self.result_store[result_hash]
@@ -145,6 +186,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         return key.properties.serializer.load(directory)
 
     def __setitem__(self, key: Task[R], value: R, /) -> None:
+        """Persist a result for the given task."""
         result_hash = key.result_hash(workspace=self.workspace)
         with self.workspace.lock(namespace="result", key=result_hash.hex()).context(blocking=True, timeout=None):
             if result_hash not in self.result_store:
@@ -156,6 +198,11 @@ class ResultMap(MutableMapping[Task[Any], Any]):
                     shutil.rmtree(tmp_dir)
 
     def __delitem__(self, key: Task[R], /) -> None:
+        """Remove a cached result for a task.
+
+        Raises:
+            KeyError: If the result is not present in the cache.
+        """
         try:
             result_hash = key.result_hash(workspace=self.workspace)
             del self.result_store[result_hash]
@@ -164,12 +211,15 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             raise KeyError(msg) from e
 
     def __iter__(self) -> Iterator[Task]:
+        """Iterate over tasks in the mapping."""
         raise NotImplementedError
 
     def __len__(self) -> int:
+        """Return the number of cached results."""
         return len(self.result_store)
 
     def __contains__(self, key: object, /) -> bool:
+        """Return True if the task has a cached result."""
         if not isinstance(key, Task):
             return False
         try:
