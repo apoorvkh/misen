@@ -1,3 +1,5 @@
+"""SLURM-backed executor implementation."""
+
 from pathlib import Path
 from typing import Literal
 

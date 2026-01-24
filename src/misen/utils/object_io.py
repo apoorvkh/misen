@@ -1,3 +1,5 @@
+"""Serialization helpers for task results."""
+
 from abc import ABC, abstractmethod
 from pathlib import Path
 from pickle import UnpicklingError
@@ -52,30 +54,3 @@ class DefaultSerializer(Serializer[Any]):
             msg = f"Failed to load object from {directory}"
             raise ValueError(msg) from None
             # TODO: compare environment against _dill_required_libs
-
-
-# import importlib.util
-# import mmap
-# import pickletools
-# from typing import BinaryIO
-
-# def dill_dump_with_required_modules(obj: Any, file: BinaryIO, *, protocol: int | None = None) -> set[str]:
-#     """
-#     Dump `obj` to `file` with dill and return a best-effort set of module names that
-#     the unpickler will need to import/resolve (i.e., referenced globals).
-
-#     This is usually faster than scanning the output afterward *if you're dumping anyway*.
-#     """
-#     required: set[str] = set()
-
-#     class RecordingPickler(dill.Pickler):
-#         # dill/pickle typically route "by reference" objects through save_global
-#         def save_global(self, obj: Any, name: str | None = None, pack: Any = None) -> None:
-#             mod = getattr(obj, "__module__", None)
-#             if isinstance(mod, str) and mod:
-#                 required.add(mod)
-#             return super().save_global(obj, name=name, pack=pack)
-
-#     p = RecordingPickler(file, protocol=protocol) if protocol is not None else RecordingPickler(file)
-#     p.dump(obj)
-#     return required

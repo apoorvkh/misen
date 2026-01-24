@@ -1,3 +1,5 @@
+"""Settings utilities for configuring executors and workspaces."""
+
 import os
 import sys
 from abc import ABCMeta, abstractmethod
@@ -42,7 +44,7 @@ class FromSettingsMeta(msgspec.StructMeta, ABCMeta):
 
     _instances: ClassVar[dict[bytes, Any]] = {}
 
-    def __call__(cls, **kwargs):
+    def __call__(cls, **kwargs: Any) -> Any:
         """Return a memoized instance for the given kwargs."""
         key = msgspec.json.encode((str(cls.__module__), str(cls.__qualname__), kwargs))
         if key not in FromSettingsMeta._instances:
@@ -71,6 +73,11 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
         """Resolve a type name into a concrete subclass."""
         module, class_name = type_name.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
+
+    @classmethod
+    def resolve_type(cls, type_name: str) -> type[Self]:
+        """Resolve a type name into a concrete subclass (public wrapper)."""
+        return cls._resolve_type(type_name)
 
     @classmethod
     def auto(cls, settings: Settings | None = None) -> Self:

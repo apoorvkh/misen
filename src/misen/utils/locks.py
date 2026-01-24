@@ -1,3 +1,5 @@
+"""Lock helpers for workspace access."""
+
 import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager

@@ -44,7 +44,16 @@ src = ["src", "tests", "packages"]
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["FIX", "TD", "PLC0415", "PLR0913", "C901", "ANN401", "SIM117"]
+ignore = [
+  "FIX",  # tmp
+  "TD",  # tmp
+  "COM812",  # conflicts with formatter
+  "PLC0415",
+  "PLR0913",
+  "C901",
+  "ANN401",
+  "SIM117"
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

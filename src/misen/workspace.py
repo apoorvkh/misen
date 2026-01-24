@@ -1,3 +1,5 @@
+"""Workspace interfaces for caching task results."""
+
 from __future__ import annotations
 
 import contextlib

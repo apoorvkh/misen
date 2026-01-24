@@ -1,3 +1,5 @@
+"""Hash utilities for tasks and results."""
+
 from misen_hash import canonical_hash
 from typing_extensions import Self
 

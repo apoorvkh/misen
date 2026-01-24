@@ -1,3 +1,5 @@
+"""Local multiprocessing executor implementation."""
+
 from __future__ import annotations
 
 import functools
@@ -88,13 +90,13 @@ class LocalJob(Job):
                 self._state = "failed"
             return self._state
 
-    def _set_process(self, process: multiprocessing.Process) -> None:
+    def set_process(self, process: multiprocessing.Process) -> None:
         """Set the underlying process and mark running."""
         with self._lock:
             self._process = process
             self._state = "running"
 
-    def _mark_failed(self) -> None:
+    def mark_failed(self) -> None:
         """Mark the job as failed."""
         with self._lock:
             self._state = "failed"
@@ -147,7 +149,7 @@ class _LocalScheduler:
         for job in list(self._pending):
             dependency_states = {dep.state() for dep in job.dependencies}
             if "failed" in dependency_states:
-                job._mark_failed()
+                job.mark_failed()
                 self._pending.remove(job)
                 started_any = True
                 continue
@@ -157,7 +159,7 @@ class _LocalScheduler:
                 continue
             process = self._context.Process(target=_run_pickled, args=(job.payload,))
             process.start()
-            job._set_process(process)
+            job.set_process(process)
             self._available_budget = self._available_budget.subtract(job.resources)
             self._pending.remove(job)
             self._running.add(job)

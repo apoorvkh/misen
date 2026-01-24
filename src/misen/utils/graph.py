@@ -1,7 +1,10 @@
+"""Dependency graph utilities."""
+
 from __future__ import annotations
 
+import sys
 from operator import eq
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TextIO, TypeVar
 
 import rustworkx as rx
 
@@ -101,11 +104,23 @@ class DependencyGraph(Generic[T]):
         roots: list[T] | None = None,
         max_depth: int | None = None,
         show_duplicates: bool = False,
+        target: TextIO | None = None,
     ) -> None:
         """Pretty-print a dependency graph as a hierarchy.
 
         Interprets edges as: u -> v  means "u depends on v" (so v is printed under u).
+
+        Args:
+            roots: Optional list of root nodes to start from.
+            max_depth: Optional maximum depth to render.
+            show_duplicates: If True, show repeated nodes instead of back-references.
+            target: Stream to write to (defaults to sys.stdout).
         """
+        stream = sys.stdout if target is None else target
+
+        def write_line(text: str = "") -> None:
+            """Write a line to the target stream."""
+            stream.write(f"{text}\n")
 
         def sort_key(x: T) -> str:
             """Return a deterministic sort key for nodes."""
@@ -130,19 +145,19 @@ class DependencyGraph(Generic[T]):
 
         printed: set[T] = set()
 
-        def walk(node: T, prefix: str, is_last: bool, depth: int, stack: set[T]) -> None:
+        def walk(node: T, prefix: str, *, is_last: bool, depth: int, stack: set[T]) -> None:
             """Recursively print a node subtree with indentation."""
             connector = "└── " if is_last else "├── "
 
             if node in stack:
-                print(prefix + connector + f"{node} (cycle)")
+                write_line(prefix + connector + f"{node} (cycle)")
                 return
 
             if (not show_duplicates) and (node in printed):
-                print(prefix + connector + f"{node} (↩︎)")
+                write_line(prefix + connector + f"{node} (↩︎)")
                 return
 
-            print(prefix + connector + str(node))
+            write_line(prefix + connector + str(node))
             printed.add(node)
 
             if max_depth is not None and depth >= max_depth:
@@ -156,15 +171,15 @@ class DependencyGraph(Generic[T]):
             stack2.add(node)
 
             for i, child in enumerate(children):
-                walk(child, new_prefix, i == len(children) - 1, depth + 1, stack2)
+                walk(child, new_prefix, is_last=i == len(children) - 1, depth=depth + 1, stack=stack2)
 
         for r_i, root in enumerate(roots):
             # Print root without a connector for a cleaner look
             if r_i:
-                print()  # blank line between root trees
-            print(str(root))
+                write_line()  # blank line between root trees
+            write_line(str(root))
 
             children = list(adjacency.get(root, ()))
             children.sort(key=sort_key)
             for i, child in enumerate(children):
-                walk(child, "", i == len(children) - 1, 1, {root})
+                walk(child, "", is_last=i == len(children) - 1, depth=1, stack={root})

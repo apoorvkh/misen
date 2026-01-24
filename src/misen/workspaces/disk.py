@@ -1,3 +1,5 @@
+"""Disk-backed workspace implementation."""
+
 from __future__ import annotations
 
 import shutil

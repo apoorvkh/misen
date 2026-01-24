@@ -1,3 +1,5 @@
+"""Capture stdout/stderr output to a target stream."""
+
 from __future__ import annotations
 
 import codecs
@@ -8,13 +10,15 @@ import os
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+
+T = TypeVar("T")
 
 
-def _try(fn: Callable, *args, **kwargs):
+def _try(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T | None:
     """Call a function and swallow any exception."""
     try:
         return fn(*args, **kwargs)
@@ -60,7 +64,7 @@ def _join_until(th: threading.Thread, deadline: float) -> None:
 
 
 @contextlib.contextmanager
-def capture_all_output(target: TextIO, timeout: float = 10.0):
+def capture_all_output(target: TextIO, timeout: float = 10.0) -> Iterator[None]:  # noqa: PLR0912, PLR0915
     """Capture everything written to OS fds 1/2 (stdout/stderr), including C/C++ writes, and tee into `target`.
 
     Exit behavior:
@@ -97,15 +101,15 @@ def capture_all_output(target: TextIO, timeout: float = 10.0):
     # Save original inheritability of fds 1/2 and make them non-inheritable (best-effort)
     inh1 = _try(os.get_inheritable, 1)
     inh2 = _try(os.get_inheritable, 2)
-    _try(os.set_inheritable, 1, False)
-    _try(os.set_inheritable, 2, False)
+    _try(os.set_inheritable, 1, False)  # noqa: FBT003
+    _try(os.set_inheritable, 2, False)  # noqa: FBT003
 
     saved_fd1 = os.dup(1)
     saved_fd2 = os.dup(2)
 
     rfd, wfd = os.pipe()
-    os.set_inheritable(rfd, False)
-    os.set_inheritable(wfd, False)
+    os.set_inheritable(wfd, False)  # noqa: FBT003
+    os.set_inheritable(rfd, False)  # noqa: FBT003
 
     def reader() -> None:
         """Read pipe output and write decoded text to the target."""
@@ -120,8 +124,8 @@ def capture_all_output(target: TextIO, timeout: float = 10.0):
                     break
                 _write(dec.decode(chunk), lock=lock, target=target)
             _write(dec.decode(b"", final=True), lock=lock, target=target)
-        except Exception:
-            pass
+        except (OSError, ValueError) as exc:
+            _try(target.write, f"[misen] log capture reader stopped early: {exc}\n")
         finally:
             _try(os.close, rfd)
 
@@ -133,8 +137,8 @@ def capture_all_output(target: TextIO, timeout: float = 10.0):
         os.dup2(wfd, 1)
         os.dup2(wfd, 2)
         # Re-apply non-inheritable on 1/2 after dup2 (belt & suspenders)
-        _try(os.set_inheritable, 1, False)
-        _try(os.set_inheritable, 2, False)
+        _try(os.set_inheritable, 1, False)  # noqa: FBT003
+        _try(os.set_inheritable, 2, False)  # noqa: FBT003
     finally:
         _try(os.close, wfd)
 
@@ -175,7 +179,7 @@ def capture_all_output(target: TextIO, timeout: float = 10.0):
 
         if t.is_alive():
             # Best-effort: drain what is available, then stop.
-            _try(os.set_blocking, rfd, False)
+            _try(os.set_blocking, rfd, blocking=False)
 
             dec = _make_decoder(encoding)
             while time.monotonic() < deadline:

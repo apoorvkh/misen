@@ -1,3 +1,5 @@
+"""Experiment definition and CLI helpers."""
+
 from __future__ import annotations
 
 import sys
@@ -6,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import make_dataclass
 from functools import cache
 from pathlib import Path
-from typing import Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 import tyro
 from msgspec import Struct
@@ -31,7 +33,7 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
         """Return the mapping of task names to Task objects."""
         ...
 
-    def __init_subclass__(cls, **kwargs) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         """Cache the tasks method for subclasses."""
         super().__init_subclass__(**kwargs)
         # @cache downstream implementations of `tasks()`
@@ -46,7 +48,9 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
         return self.tasks()[key].result(workspace=workspace)
 
     def run(
-        self, workspace: Workspace | Literal["auto"] = "auto", executor: Executor | Literal["auto"] = "auto"
+        self,
+        workspace: Workspace | Literal["auto"] = "auto",
+        executor: Executor | Literal["auto"] = "auto",
     ) -> None:
         """Submit all tasks in the experiment to an executor."""
         workspace = resolve_auto(workspace=workspace)
@@ -71,24 +75,18 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
         )
 
         if args.executor_type != "auto":
-            _fields_without_defaults.append(("executor", Executor._resolve_type(args.executor_type)))
+            _fields_without_defaults.append(("executor", Executor.resolve_type(args.executor_type)))
         if args.workspace_type != "auto":
-            _fields_without_defaults.append(("workspace", Workspace._resolve_type(args.workspace_type)))
+            _fields_without_defaults.append(("workspace", Workspace.resolve_type(args.workspace_type)))
         _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))
 
         args = tyro.cli(make_dataclass("", _fields_without_defaults + _fields_with_defaults))
 
         settings = Settings(file=args.settings_file)
 
-        if args.executor_type == "auto":
-            executor = Executor.auto(settings=settings)
-        else:
-            executor = args.executor
+        executor = Executor.auto(settings=settings) if args.executor_type == "auto" else args.executor
 
-        if args.workspace_type == "auto":
-            workspace = Workspace.auto(settings=settings)
-        else:
-            workspace = args.workspace
+        workspace = Workspace.auto(settings=settings) if args.workspace_type == "auto" else args.workspace
 
         match args.command:
             case "run":

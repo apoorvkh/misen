@@ -384,7 +384,7 @@ class Task(Generic[R]):
 
 def task(
     *,
-    id: str | None = None,  # TODO: command to fill these in when None  # TODO: shadow
+    id: str | None = None,  # TODO: command to fill these in when None  # TODO: shadow  # noqa: A002
     cache: bool = False,
     exclude: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
