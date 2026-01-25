@@ -21,18 +21,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-slurm = ["submitit>=1.5.0", "setuptools"]
+slurm = ["uv"]
 
 [dependency-groups]
-dev = [
-  "pytest==8.3.3",
-  "ruff==0.14.11",
-  "ty==0.0.11",
-]
-docs = [
-  "mkdocstrings-python>=2.0.1",
-  "zensical>=0.0.17",
-]
+dev = ["pytest==8.3.3", "ruff==0.14.11", "ty==0.0.11"]
+docs = ["mkdocstrings-python==2.0.1", "zensical==0.0.17"]
 
 [build-system]
 requires = ["uv_build"]
