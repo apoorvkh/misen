@@ -14,6 +14,8 @@ import cloudpickle
 from misen.executor import Executor, Job, WorkUnit
 
 if TYPE_CHECKING:
+    from multiprocessing.process import BaseProcess
+
     from misen.task import TaskResources
     from misen.workspace import Workspace
 
@@ -68,7 +70,7 @@ class LocalJob(Job):
         self.resources = resources
         self.dependencies = dependencies
         self.payload = payload
-        self._process: multiprocessing.Process | None = None
+        self._process: BaseProcess | None = None
         self._state: Literal["pending", "running", "done", "failed", "unknown"] = "pending"
         self._lock = threading.Lock()
 
@@ -90,7 +92,7 @@ class LocalJob(Job):
                 self._state = "failed"
             return self._state
 
-    def set_process(self, process: multiprocessing.Process) -> None:
+    def set_process(self, process: BaseProcess) -> None:
         """Set the underlying process and mark running."""
         with self._lock:
             self._process = process

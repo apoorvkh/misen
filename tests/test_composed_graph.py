@@ -47,8 +47,10 @@ def generate_numbers(n: int) -> list[float]:
 
 
 class MyExperiment(Experiment):
+    n: int = 5
+
     def tasks(self):
-        gen_task = Task(generate_numbers, n=5)
+        gen_task = Task(generate_numbers, n=self.n)
         sum_task = Task(sum_list, numbers=gen_task.T)
         mean_task = Task(mean, numbers=gen_task.T)
         var_task = Task(variance, numbers=gen_task.T)

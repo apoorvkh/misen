@@ -8,10 +8,11 @@ from collections.abc import Mapping
 from dataclasses import make_dataclass
 from functools import cache
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar, cast
 
 import tyro
 from msgspec import Struct
+from typing_extensions import Self, reveal_type
 
 from .executor import Executor, ExecutorType
 from .task import Task
@@ -70,17 +71,19 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
 
         args, _ = tyro.cli(
             make_dataclass("", _fields_without_defaults + _fields_with_defaults),
-            args=[arg for arg in sys.argv if arg != "--help"],
+            add_help=False,
             return_unknown_args=True,
         )
+        args = cast("Any", args)  # TODO ?
 
         if args.executor_type != "auto":
             _fields_without_defaults.append(("executor", Executor.resolve_type(args.executor_type)))
         if args.workspace_type != "auto":
             _fields_without_defaults.append(("workspace", Workspace.resolve_type(args.workspace_type)))
-        _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))
+        _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))  # ty:ignore[invalid-type-form]  # TODO
 
         args = tyro.cli(make_dataclass("", _fields_without_defaults + _fields_with_defaults))
+        args = cast("Any", args)  # TODO ?
 
         settings = Settings(file=args.settings_file)
 

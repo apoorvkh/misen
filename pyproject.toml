@@ -48,18 +48,15 @@ ignore = [
   "FIX",  # tmp
   "TD",  # tmp
   "COM812",  # conflicts with formatter
-  "PLC0415",
-  "PLR0913",
-  "C901",
-  "ANN401",
-  "SIM117"
+  "PLC0415",  # allow function-level imports
+  "ANN401",  # allow Any type
+  "SIM117",  # allow nested with blocks
+  "C901",  # allow complexity
+  "PLR0913",  # too many arguments
 ]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
-
-[tool.uv]
-default-groups = "all"
 
 [tool.uv.sources]
 misen-hash = { workspace = true }
