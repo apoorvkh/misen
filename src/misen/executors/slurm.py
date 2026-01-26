@@ -6,9 +6,11 @@ import functools
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import cloudpickle
+import uv
 
 from misen.executor import Executor, Job, WorkUnit
 from misen.utils.hashes import short_hash
@@ -65,14 +67,12 @@ class SlurmJob(Job):
 class SlurmExecutor(Executor[SlurmJob]):
     """Executor implementation that submits work to SLURM."""
 
-    def _dispatch(self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace) -> SlurmJob:
+    def _dispatch(
+        self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, wheel_path: Path
+    ) -> SlurmJob:
         """Dispatch a work unit to SLURM via sbatch."""
         job_dir = (workspace.get_temp_dir() / "slurm").resolve()
         job_dir.mkdir(parents=True, exist_ok=True)
-
-        payload_path = job_dir / f"misen-{short_hash(work_unit)}.pkl"  # TODO: more unique file name
-        payload = cloudpickle.dumps(functools.partial(work_unit.execute, workspace=workspace))
-        payload_path.write_bytes(payload)
 
         sbatch_cmd: list[str] = [SBATCH, "--parsable"]
 
@@ -90,17 +90,14 @@ class SlurmExecutor(Executor[SlurmJob]):
             dep_ids = ":".join(job.job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        wrap = shlex.join(
-            [
-                "python",
-                "-c",
-                (
-                    "import cloudpickle; from pathlib import Path; "
-                    f"cloudpickle.loads(Path({str(payload_path)!r}).read_bytes())()"
-                ),
-            ]
+        execution_code = self._get_execution_code(
+            uv_bin=Path(uv.find_uv_bin()),
+            wheel_path=wheel_path,
+            payload_path=job_dir / f"misen-{short_hash(work_unit)}.pkl",  # TODO: more unique file name,
+            work_unit=work_unit,
+            workspace=workspace,
         )
-        sbatch_cmd.extend(["--wrap", wrap])
+        sbatch_cmd.extend(["--wrap", execution_code])
 
         try:
             result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603

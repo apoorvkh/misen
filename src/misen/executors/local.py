@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-import functools
 import multiprocessing
 import os
+import shlex
+import subprocess
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import cloudpickle
+import uv
 
 from misen.executor import Executor, Job, WorkUnit
+from misen.utils.hashes import short_hash
 
 if TYPE_CHECKING:
-    from multiprocessing.process import BaseProcess
-
     from misen.task import TaskResources
     from misen.workspace import Workspace
 
@@ -49,50 +50,46 @@ class _ResourceBudget:
         )
 
 
-def _run_pickled(payload: bytes) -> None:
-    """Run a pickled callable payload in a worker process."""
-    func = cloudpickle.loads(payload)
-    func()
-
-
 class LocalJob(Job):
-    """Job implementation backed by a multiprocessing.Process."""
+    """Job implementation backed by a subprocess.Popen process."""
 
     def __init__(
-        self,
-        work_unit: WorkUnit,
-        resources: TaskResources,
-        dependencies: set[LocalJob],
-        payload: bytes,
+        self, work_unit: WorkUnit, resources: TaskResources, dependencies: set[LocalJob], execution_code: str
     ) -> None:
         """Initialize a local job for a work unit."""
         super().__init__(work_unit=work_unit)
         self.resources = resources
         self.dependencies = dependencies
-        self.payload = payload
-        self._process: BaseProcess | None = None
+        self.execution_code = execution_code
+
+        self._process: subprocess.Popen[bytes] | None = None
         self._state: Literal["pending", "running", "done", "failed", "unknown"] = "pending"
         self._lock = threading.Lock()
 
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
         """Return the current process state."""
         with self._lock:
+            # terminal states are sticky
             if self._state in {"done", "failed"}:
                 return self._state
 
-            if self._process is None:
+            p = self._process
+            if p is None:
                 return "pending"
 
-            if self._process.is_alive():
+            # Popen: running iff poll() is None
+            rc = p.poll()
+            if rc is None:
                 return "running"
 
-            if self._process.exitcode == 0:
+            # finished: classify
+            if rc == 0:
                 self._state = "done"
-            elif self._process.exitcode is not None:
+            else:
                 self._state = "failed"
             return self._state
 
-    def set_process(self, process: BaseProcess) -> None:
+    def set_process(self, process: subprocess.Popen[bytes]) -> None:
         """Set the underlying process and mark running."""
         with self._lock:
             self._process = process
@@ -102,6 +99,27 @@ class LocalJob(Job):
         """Mark the job as failed."""
         with self._lock:
             self._state = "failed"
+
+    # Optional but usually useful with Popen-backed jobs:
+
+    def returncode(self) -> int | None:
+        with self._lock:
+            p = self._process
+        if p is None:
+            return None
+        return p.returncode  # may be None while running
+
+    def terminate(self) -> None:
+        with self._lock:
+            p = self._process
+        if p is not None and p.poll() is None:
+            p.terminate()
+
+    def kill(self) -> None:
+        with self._lock:
+            p = self._process
+        if p is not None and p.poll() is None:
+            p.kill()
 
 
 class _LocalScheduler:
@@ -159,13 +177,15 @@ class _LocalScheduler:
                 continue
             if not self._available_budget.fits(job.resources):
                 continue
-            process = self._context.Process(target=_run_pickled, args=(job.payload,))
-            process.start()
-            job.set_process(process)
+
+            p = subprocess.Popen(shlex.split(job.execution_code), close_fds=True, start_new_session=True)  # noqa: S603
+
+            job.set_process(p)
             self._available_budget = self._available_budget.subtract(job.resources)
             self._pending.remove(job)
             self._running.add(job)
             started_any = True
+
         return started_any
 
 
@@ -185,7 +205,9 @@ class LocalExecutor(Executor[LocalJob]):
         )
         self._scheduler = _LocalScheduler(self._resource_budget)
 
-    def _dispatch(self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace) -> LocalJob:
+    def _dispatch(
+        self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace, wheel_paths: list[Path]
+    ) -> LocalJob:
         """Dispatch a work unit to the local scheduler."""
         resources = work_unit.resources
         if not self._resource_budget.fits(resources):
@@ -196,8 +218,19 @@ class LocalExecutor(Executor[LocalJob]):
                 f"gpus={self._resource_budget.gpus}."
             )
             raise ValueError(msg)
-        payload = cloudpickle.dumps(functools.partial(work_unit.execute, workspace=workspace))
-        job = LocalJob(work_unit=work_unit, resources=resources, dependencies=dependencies, payload=payload)
+
+        payload_dir = (workspace.get_temp_dir() / "payloads").resolve()
+        payload_dir.mkdir(parents=True, exist_ok=True)
+        execution_code = self._get_execution_code(
+            uv_bin=Path(uv.find_uv_bin()),
+            wheel_paths=wheel_paths,
+            payload_path=payload_dir / f"misen-{short_hash(work_unit)}.pkl",
+            work_unit=work_unit,
+            workspace=workspace,
+        )
+        job = LocalJob(
+            work_unit=work_unit, resources=resources, dependencies=dependencies, execution_code=execution_code
+        )
         self._scheduler.submit(job)
         return job
 
