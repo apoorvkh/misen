@@ -50,7 +50,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
         Returns:
             A dependency graph of backend-specific Job handles corresponding to WorkUnits.
         """
-        wheel_paths = _build_wheels()
+        wheel_paths = _build_wheels(workspace=workspace)
 
         work_graph: DependencyGraph[WorkUnit] = self._build_work_graph(tasks=tasks, workspace=workspace)
 
@@ -291,14 +291,15 @@ class CompletedJob(Job):
         return "done"
 
 
-def _build_wheels() -> list[Path]:
+def _build_wheels(workspace: Workspace) -> list[Path]:
     """Build a wheel file, capturing a frozen snapshot of the current package."""
-    tmpdir = Path(tempfile.mkdtemp())
+    wheel_dir = (workspace.get_temp_dir() / "wheels").resolve()
+    wheel_dir.mkdir(parents=True, exist_ok=True)
     uv_bin = uv.find_uv_bin()
 
     try:
         subprocess.run(  # noqa: S603
-            [uv_bin, "build", "--all-packages", "--wheel", "--out-dir", tmpdir],
+            [uv_bin, "build", "--all-packages", "--wheel", "--out-dir", wheel_dir],
             check=True,
             capture_output=True,
             text=True,
@@ -306,7 +307,7 @@ def _build_wheels() -> list[Path]:
     except subprocess.CalledProcessError as e:
         msg = f"Package build failed: {(e.stderr or e.stdout or '').strip()}"
 
-    wheels = list(tmpdir.glob("*.whl"))
+    wheels = list(wheel_dir.glob("*.whl"))
     if len(wheels) == 0:
         msg = "No wheel files found. Was one built?"
         raise RuntimeError(msg)

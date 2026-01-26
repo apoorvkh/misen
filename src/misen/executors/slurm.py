@@ -68,7 +68,7 @@ class SlurmExecutor(Executor[SlurmJob]):
     """Executor implementation that submits work to SLURM."""
 
     def _dispatch(
-        self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, wheel_path: Path
+        self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, wheel_paths: list[Path]
     ) -> SlurmJob:
         """Dispatch a work unit to SLURM via sbatch."""
         job_dir = (workspace.get_temp_dir() / "slurm").resolve()
@@ -92,7 +92,7 @@ class SlurmExecutor(Executor[SlurmJob]):
 
         execution_code = self._get_execution_code(
             uv_bin=Path(uv.find_uv_bin()),
-            wheel_path=wheel_path,
+            wheel_paths=wheel_paths,
             payload_path=job_dir / f"misen-{short_hash(work_unit)}.pkl",  # TODO: more unique file name,
             work_unit=work_unit,
             workspace=workspace,
