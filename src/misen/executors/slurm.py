@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import functools
+import os
 import shlex
 import shutil
 import subprocess
+import tempfile
+import time
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import cloudpickle
 import uv
 
 from misen.executor import Executor, Job, WorkUnit
@@ -67,9 +69,23 @@ class SlurmJob(Job):
 class SlurmExecutor(Executor[SlurmJob]):
     """Executor implementation that submits work to SLURM."""
 
-    def _dispatch(
-        self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, wheel_paths: list[Path]
-    ) -> SlurmJob:
+    @classmethod
+    @cache
+    def install_to_venv(cls, temp_dir: Path) -> Path:
+        uv_bin = uv.find_uv_bin()
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        venv_dir = Path(tempfile.mkdtemp(dir=temp_dir))
+        env = os.environ.copy() | {"UV_PROJECT_ENVIRONMENT": str(venv_dir)}
+        try:
+            subprocess.run(  # noqa: S603
+                [uv_bin, "sync", "--frozen", "--no-editable"], check=True, capture_output=True, text=True, env=env
+            )
+        except subprocess.CalledProcessError as e:
+            msg = f"Virtual environment creation failed: {(e.stderr or e.stdout or '').strip()}"
+            raise RuntimeError(msg) from None
+        return venv_dir
+
+    def _dispatch(self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace) -> SlurmJob:
         """Dispatch a work unit to SLURM via sbatch."""
         job_dir = (workspace.get_temp_dir() / "slurm").resolve()
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -90,12 +106,22 @@ class SlurmExecutor(Executor[SlurmJob]):
             dep_ids = ":".join(job.job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        execution_code = self._get_execution_code(
-            uv_bin=Path(uv.find_uv_bin()),
-            wheel_paths=wheel_paths,
-            payload_path=job_dir / f"misen-{short_hash(work_unit)}.pkl",  # TODO: more unique file name,
-            work_unit=work_unit,
-            workspace=workspace,
+        venv_dir = self.install_to_venv(temp_dir=workspace.get_temp_dir() / "venvs")
+        payload_path = job_dir / f"misen-{short_hash(work_unit)}.pkl"  # TODO: more unique file name
+        payload_code = self._get_payload_code(work_unit=work_unit, workspace=workspace, payload_path=payload_path)
+        execution_code = shlex.join(
+            [
+                f"VIRTUAL_ENV={venv_dir}",
+                f"UV_PROJECT_ENVIRONMENT={venv_dir}",
+                uv.find_uv_bin(),
+                "run",
+                "--no-project",
+                "--python",
+                f"{venv_dir}/bin/python",
+                "python",
+                "-c",
+                payload_code,
+            ]
         )
         sbatch_cmd.extend(["--wrap", execution_code])
 

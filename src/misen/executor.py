@@ -13,18 +13,12 @@ Overview:
 from __future__ import annotations
 
 import functools
-import shlex
-import subprocess
-import tempfile
 import time
 from abc import ABC, abstractmethod
-from itertools import chain
 from operator import is_
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast, get_args
 
 import cloudpickle
-import uv
 from typing_extensions import assert_never
 
 from .task import Task, TaskResources
@@ -32,6 +26,8 @@ from .utils.hashes import short_hash
 from .utils.settings import FromSettingsABC
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .utils.graph import DependencyGraph
     from .workspace import Workspace
 
@@ -50,8 +46,6 @@ class Executor(FromSettingsABC, Generic[JobT]):
         Returns:
             A dependency graph of backend-specific Job handles corresponding to WorkUnits.
         """
-        wheel_paths = _build_wheels(workspace=workspace)
-
         work_graph: DependencyGraph[WorkUnit] = self._build_work_graph(tasks=tasks, workspace=workspace)
 
         # dispatch work units and collect job handles
@@ -63,9 +57,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
                 jobs[w] = CompletedJob(work_unit=w)
             else:
                 dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
-                jobs[w] = self._dispatch(
-                    work_unit=w, dependencies=dependencies, workspace=workspace, wheel_paths=wheel_paths
-                )
+                jobs[w] = self._dispatch(work_unit=w, dependencies=dependencies, workspace=workspace)
 
         # return job graph corresponding to work graph
 
@@ -76,16 +68,13 @@ class Executor(FromSettingsABC, Generic[JobT]):
         return job_graph
 
     @abstractmethod
-    def _dispatch(
-        self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace, wheel_paths: list[Path]
-    ) -> JobT:
+    def _dispatch(self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace) -> JobT:
         """Dispatch a WorkUnit to the backend. Will run `work_unit.execute(workspace)` after dependencies are completed.
 
         Args:
             work_unit: The WorkUnit to dispatch.
             dependencies: Job handles corresponding to prerequisite (incomplete) WorkUnits.
             workspace: Workspace providing Task artifact caching and retrieval.
-            wheel_paths: Paths to wheels built for project's packages.
 
         Returns:
             A Job handle that can be queried for execution state.
@@ -115,17 +104,13 @@ class Executor(FromSettingsABC, Generic[JobT]):
         return work_graph
 
     @staticmethod
-    def _get_execution_code(
-        uv_bin: Path, wheel_paths: list[Path], payload_path: Path, work_unit: WorkUnit, workspace: Workspace
-    ) -> str:
+    def _get_payload_code(work_unit: WorkUnit, workspace: Workspace, payload_path: Path) -> str:
         execution_payload = cloudpickle.dumps(functools.partial(work_unit.execute, workspace=workspace))
         payload_path.write_bytes(execution_payload)
-        code = (
+        return (
             "import cloudpickle; from pathlib import Path; "
             f"cloudpickle.loads(Path({str(payload_path)!r}).read_bytes())()"
         )
-        wheels: list[str] = list(chain.from_iterable(("--with", str(w)) for w in wheel_paths))
-        return shlex.join([str(uv_bin), "run", *wheels, "python", "-c", code])
 
     # Below: FromSettingsABC implementation. Permits initializing an Executor class from TOML settings or CLI.
 
@@ -289,27 +274,3 @@ class CompletedJob(Job):
     def state(self) -> Literal["done"]:
         """Return the completed state."""
         return "done"
-
-
-def _build_wheels(workspace: Workspace) -> list[Path]:
-    """Build a wheel file, capturing a frozen snapshot of the current package."""
-    wheel_dir = (workspace.get_temp_dir() / "wheels").resolve()
-    wheel_dir.mkdir(parents=True, exist_ok=True)
-    uv_bin = uv.find_uv_bin()
-
-    try:
-        subprocess.run(  # noqa: S603
-            [uv_bin, "build", "--all-packages", "--wheel", "--out-dir", wheel_dir],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        msg = f"Package build failed: {(e.stderr or e.stdout or '').strip()}"
-
-    wheels = list(wheel_dir.glob("*.whl"))
-    if len(wheels) == 0:
-        msg = "No wheel files found. Was one built?"
-        raise RuntimeError(msg)
-
-    return wheels
