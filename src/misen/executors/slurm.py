@@ -71,11 +71,11 @@ class SlurmExecutor(Executor[SlurmJob]):
 
     @classmethod
     @cache
-    def snapshot_to_venv(cls, temp_dir: Path) -> Path:
+    def snapshot_to_venv(cls, parent_dir: Path) -> Path:
         """Install a frozen snapshot of current package and dependencies (locked if possible) into an virtual env."""
         uv_bin = uv.find_uv_bin()
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        venv_dir = Path(tempfile.mkdtemp(dir=temp_dir))
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        venv_dir = Path(tempfile.mkdtemp(dir=parent_dir))
         env = os.environ.copy() | {"UV_PROJECT_ENVIRONMENT": str(venv_dir)}
         try:
             subprocess.run(  # noqa: S603
@@ -107,7 +107,7 @@ class SlurmExecutor(Executor[SlurmJob]):
             dep_ids = ":".join(job.job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        venv_dir = self.snapshot_to_venv(temp_dir=workspace.get_temp_dir() / "venvs")
+        venv_dir = self.snapshot_to_venv(parent_dir=workspace.get_temp_dir() / "venvs")
         payload_path = job_dir / f"{uuid.uuid4().hex}.pkl"
         payload_code = self._get_payload_code(work_unit=work_unit, workspace=workspace, payload_path=payload_path)
         execution_code = shlex.join(
