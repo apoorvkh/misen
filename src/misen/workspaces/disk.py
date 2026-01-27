@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from collections.abc import Generator, Iterator, MutableMapping
@@ -152,6 +153,12 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         result_dir_path = self._result_dir_path(key)
         if not result_dir_path.exists():
             shutil.move(value, result_dir_path)
+            # force write directory
+            fd = os.open(result_dir_path.parent, os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def __delitem__(self, key: ResultHash) -> None:
         """Delete a result directory.

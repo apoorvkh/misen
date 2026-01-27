@@ -7,7 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-import time
+import uuid
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -71,7 +71,8 @@ class SlurmExecutor(Executor[SlurmJob]):
 
     @classmethod
     @cache
-    def install_to_venv(cls, temp_dir: Path) -> Path:
+    def snapshot_to_venv(cls, temp_dir: Path) -> Path:
+        """Install a frozen snapshot of current package and dependencies (locked if possible) into an virtual env."""
         uv_bin = uv.find_uv_bin()
         temp_dir.mkdir(parents=True, exist_ok=True)
         venv_dir = Path(tempfile.mkdtemp(dir=temp_dir))
@@ -106,13 +107,12 @@ class SlurmExecutor(Executor[SlurmJob]):
             dep_ids = ":".join(job.job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        venv_dir = self.install_to_venv(temp_dir=workspace.get_temp_dir() / "venvs")
-        payload_path = job_dir / f"misen-{short_hash(work_unit)}.pkl"  # TODO: more unique file name
+        venv_dir = self.snapshot_to_venv(temp_dir=workspace.get_temp_dir() / "venvs")
+        payload_path = job_dir / f"{uuid.uuid4().hex}.pkl"
         payload_code = self._get_payload_code(work_unit=work_unit, workspace=workspace, payload_path=payload_path)
         execution_code = shlex.join(
             [
                 f"VIRTUAL_ENV={venv_dir}",
-                f"UV_PROJECT_ENVIRONMENT={venv_dir}",
                 uv.find_uv_bin(),
                 "run",
                 "--no-project",
