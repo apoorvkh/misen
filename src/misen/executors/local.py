@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-import functools
 import multiprocessing
 import os
+import subprocess
+import tempfile
 import threading
+import uuid
 from dataclasses import dataclass
+from functools import cache
+from itertools import chain
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import cloudpickle
+import uv
 
-from misen.executor import Executor, Job, WorkUnit
+from misen.executor import Executor, Job
+from misen.utils.snapshot import snapshot_env_files, snapshot_venv
 
 if TYPE_CHECKING:
     from multiprocessing.process import BaseProcess
 
     from misen.task import TaskResources
+    from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
 
@@ -49,10 +56,13 @@ class _ResourceBudget:
         )
 
 
-def _run_pickled(payload: bytes) -> None:
-    """Run a pickled callable payload in a worker process."""
-    func = cloudpickle.loads(payload)
-    func()
+def _run_subprocess(argv: list[str], *, env: dict[str, str]) -> None:
+    """Run a command in a worker process, mapping return code onto process exit code."""
+    try:
+        completed = subprocess.run(argv, check=False, env=env)  # noqa: S603
+    except FileNotFoundError:
+        raise SystemExit(127) from None
+    raise SystemExit(completed.returncode)
 
 
 class LocalJob(Job):
@@ -63,13 +73,15 @@ class LocalJob(Job):
         work_unit: WorkUnit,
         resources: TaskResources,
         dependencies: set[LocalJob],
-        payload: bytes,
+        argv: list[str],
+        env: dict[str, str],
     ) -> None:
         """Initialize a local job for a work unit."""
         super().__init__(work_unit=work_unit)
         self.resources = resources
         self.dependencies = dependencies
-        self.payload = payload
+        self.argv = argv
+        self.env = env
         self._process: BaseProcess | None = None
         self._state: Literal["pending", "running", "done", "failed", "unknown"] = "pending"
         self._lock = threading.Lock()
@@ -159,9 +171,11 @@ class _LocalScheduler:
                 continue
             if not self._available_budget.fits(job.resources):
                 continue
-            process = self._context.Process(target=_run_pickled, args=(job.payload,))
+
+            process = self._context.Process(target=_run_subprocess, args=(job.argv,), kwargs={"env": job.env})
             process.start()
             job.set_process(process)
+
             self._available_budget = self._available_budget.subtract(job.resources)
             self._pending.remove(job)
             self._running.add(job)
@@ -185,6 +199,16 @@ class LocalExecutor(Executor[LocalJob]):
         )
         self._scheduler = _LocalScheduler(self._resource_budget)
 
+    @classmethod
+    @cache
+    def _snapshot_venv(cls, venv_dir: Path) -> Path:
+        return snapshot_venv(venv_dir)
+
+    @classmethod
+    @cache
+    def _snapshot_env_files(cls, env_dir: Path) -> list[Path]:
+        return snapshot_env_files(env_dir)
+
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace) -> LocalJob:
         """Dispatch a work unit to the local scheduler."""
         resources = work_unit.resources
@@ -196,8 +220,43 @@ class LocalExecutor(Executor[LocalJob]):
                 f"gpus={self._resource_budget.gpus}."
             )
             raise ValueError(msg)
-        payload = cloudpickle.dumps(functools.partial(work_unit.execute, workspace=workspace))
-        job = LocalJob(work_unit=work_unit, resources=resources, dependencies=dependencies, payload=payload)
+
+        # 1) Build (or reuse) a uv-synced snapshot environment under the workspace temp dir.
+        env_root = workspace.get_temp_dir() / "envs"
+        env_root.mkdir(parents=True, exist_ok=True)
+        env_dir = Path(tempfile.mkdtemp(dir=env_root))
+
+        venv_dir = self._snapshot_venv(venv_dir=(env_dir / ".venv"))
+        env_files = self._snapshot_env_files(env_dir=env_dir)
+
+        # 2) Use the shared Executor helper to write the pickled payload file and produce python -c code.
+        job_dir = (workspace.get_temp_dir() / "local").resolve()
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        payload_path = job_dir / f"{uuid.uuid4().hex}.pkl"
+        payload_path.write_bytes(work_unit.as_payload(workspace=workspace))
+
+        # 3) Run the payload inside the snapshot env via `uv run --no-project --python <venv>/bin/python ...`.
+        argv: list[str] = [
+            uv.find_uv_bin(),
+            "run",
+            "--no-project",
+            *chain.from_iterable(("--env-file", str(f)) for f in env_files),
+            "-m",
+            "misen.utils.execute",
+            "--payload",
+            str(payload_path),
+        ]
+
+        env = os.environ.copy() | {"VIRTUAL_ENV": str(venv_dir)}
+
+        job = LocalJob(
+            work_unit=work_unit,
+            resources=resources,
+            dependencies=dependencies,
+            argv=argv,
+            env=env,
+        )
         self._scheduler.submit(job)
         return job
 

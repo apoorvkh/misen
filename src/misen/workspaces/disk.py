@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from collections.abc import Generator, Iterator, MutableMapping
@@ -151,7 +152,9 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         """Store a result directory, if missing."""
         result_dir_path = self._result_dir_path(key)
         if not result_dir_path.exists():
+            result_dir_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(value, result_dir_path)
+            self._fsync_dir(result_dir_path.parent)
 
     def __delitem__(self, key: ResultHash) -> None:
         """Delete a result directory.
@@ -163,9 +166,13 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         if not result_dir_path.exists():
             raise KeyError(key)
         # atomic deletion
-        trash_dir = tempfile.mkdtemp(dir=result_dir_path.parent, prefix=f"{result_dir_path.name}.", suffix=".trash")
+        trash_dir = Path(
+            tempfile.mkdtemp(dir=result_dir_path.parent, prefix=f"{result_dir_path.name}.", suffix=".trash")
+        )
         shutil.move(result_dir_path, trash_dir)
+        self._fsync_dir(result_dir_path.parent)
         shutil.rmtree(trash_dir)
+        self._fsync_dir(trash_dir.parent)
 
     def __iter__(self) -> Iterator[ResultHash]:
         """Iterate over stored result hashes."""
@@ -176,6 +183,14 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
     def __len__(self) -> int:
         """Return the number of results stored."""
         return sum(1 for _ in self)
+
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        fd = os.open(path, os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 # TODO: get clock time from NFS server

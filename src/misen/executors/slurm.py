@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-import functools
+import os
 import shlex
 import shutil
 import subprocess
+import tempfile
+import uuid
+from functools import cache
+from itertools import chain
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import cloudpickle
+import uv
 
 from misen.executor import Executor, Job, WorkUnit
 from misen.utils.hashes import short_hash
+from misen.utils.snapshot import snapshot_env_files, snapshot_venv
 
 if TYPE_CHECKING:
     from misen.workspace import Workspace
@@ -65,14 +71,20 @@ class SlurmJob(Job):
 class SlurmExecutor(Executor[SlurmJob]):
     """Executor implementation that submits work to SLURM."""
 
+    @classmethod
+    @cache
+    def _snapshot_venv(cls, venv_dir: Path) -> Path:
+        return snapshot_venv(venv_dir)
+
+    @classmethod
+    @cache
+    def _snapshot_env_files(cls, env_dir: Path) -> list[Path]:
+        return snapshot_env_files(env_dir)
+
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace) -> SlurmJob:
         """Dispatch a work unit to SLURM via sbatch."""
         job_dir = (workspace.get_temp_dir() / "slurm").resolve()
         job_dir.mkdir(parents=True, exist_ok=True)
-
-        payload_path = job_dir / f"misen-{short_hash(work_unit)}.pkl"  # TODO: more unique file name
-        payload = cloudpickle.dumps(functools.partial(work_unit.execute, workspace=workspace))
-        payload_path.write_bytes(payload)
 
         sbatch_cmd: list[str] = [SBATCH, "--parsable"]
 
@@ -90,20 +102,33 @@ class SlurmExecutor(Executor[SlurmJob]):
             dep_ids = ":".join(job.job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        wrap = shlex.join(
-            [
-                "python",
-                "-c",
-                (
-                    "import cloudpickle; from pathlib import Path; "
-                    f"cloudpickle.loads(Path({str(payload_path)!r}).read_bytes())()"
-                ),
-            ]
-        )
-        sbatch_cmd.extend(["--wrap", wrap])
+        env_root = workspace.get_temp_dir() / "envs"
+        env_root.mkdir(parents=True, exist_ok=True)
+        env_dir = Path(tempfile.mkdtemp(dir=env_root))
+
+        venv_dir = self._snapshot_venv(venv_dir=(env_dir / ".venv"))
+        env_files = self._snapshot_env_files(directory=env_dir)
+
+        payload_path = job_dir / f"{uuid.uuid4().hex}.pkl"
+        payload_path.write_bytes(work_unit.as_payload(workspace=workspace))
+
+        execution_code = [
+            uv.find_uv_bin(),
+            "run",
+            "--no-project",
+            *chain.from_iterable(("--env-file", str(f)) for f in env_files),
+            "-m",
+            "misen.utils.execute",
+            "--payload",
+            str(payload_path),
+        ]
+
+        sbatch_cmd.extend(["--wrap", shlex.join(execution_code)])
+
+        env = os.environ.copy() | {"VIRTUAL_ENV": str(venv_dir)}
 
         try:
-            result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603
+            result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True, env=env)  # noqa: S603
         except subprocess.CalledProcessError as e:
             msg = f"sbatch failed: {(e.stderr or e.stdout or '').strip()}"
             raise RuntimeError(msg) from e

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from abc import abstractmethod
 from collections.abc import Mapping
 from dataclasses import make_dataclass
@@ -12,7 +11,6 @@ from typing import Any, Generic, Literal, TypeVar, cast
 
 import tyro
 from msgspec import Struct
-from typing_extensions import Self, reveal_type
 
 from .executor import Executor, ExecutorType
 from .task import Task
