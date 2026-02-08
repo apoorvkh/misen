@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING, Any, Literal, TextIO, TypeAlias, TypeVar, cast
 
 from typing_extensions import assert_never
 
-from .task import Task
-from .utils.settings import FromSettingsABC
+from misen.task import Task
+from misen.utils.settings import FromSettingsABC
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
-    from .utils.locks import LockLike
+    from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
+    from misen.utils.locks import LockLike
 
 __all__ = ["Workspace"]
 
@@ -38,7 +38,7 @@ class Workspace(FromSettingsABC):
     @staticmethod
     def _default() -> Workspace:
         """Return the default workspace implementation."""
-        from .workspaces.disk import DiskWorkspace
+        from misen.workspaces.disk import DiskWorkspace
 
         return DiskWorkspace()
 
@@ -49,7 +49,7 @@ class Workspace(FromSettingsABC):
             type_name = cast("WorkspaceType", type_name)
             match type_name:
                 case "disk":
-                    from .workspaces.disk import DiskWorkspace
+                    from misen.workspaces.disk import DiskWorkspace
 
                     return DiskWorkspace
                 case _:

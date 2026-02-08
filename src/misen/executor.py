@@ -14,18 +14,17 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from operator import is_
 from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast, get_args
 
 from typing_extensions import assert_never
 
-from .task import Task
-from .utils.settings import FromSettingsABC
-from .utils.work_unit import WorkUnit
+from misen.utils.settings import FromSettingsABC
+from misen.utils.work_unit import WorkUnit, build_work_graph
 
 if TYPE_CHECKING:
-    from .utils.graph import DependencyGraph
-    from .workspace import Workspace
+    from misen.task import Task
+    from misen.utils.graph import DependencyGraph
+    from misen.workspace import Workspace
 
 __all__ = ["Executor", "Job"]
 
@@ -42,7 +41,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
         Returns:
             A dependency graph of backend-specific Job handles corresponding to WorkUnits.
         """
-        work_graph: DependencyGraph[WorkUnit] = _build_work_graph(tasks=tasks, workspace=workspace)
+        work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks, workspace=workspace)
 
         # dispatch work units and collect job handles
 
@@ -86,7 +85,7 @@ class Executor(FromSettingsABC, Generic[JobT]):
     @staticmethod
     def _default() -> Executor:
         """Return the default executor implementation."""
-        from .executors.local import LocalExecutor
+        from misen.executors.local import LocalExecutor
 
         return LocalExecutor()
 
@@ -97,11 +96,11 @@ class Executor(FromSettingsABC, Generic[JobT]):
             type_name = cast("ExecutorType", type_name)
             match type_name:
                 case "local":
-                    from .executors.local import LocalExecutor
+                    from misen.executors.local import LocalExecutor
 
                     return LocalExecutor
                 case "slurm":
-                    from .executors.slurm import SlurmExecutor
+                    from misen.executors.slurm import SlurmExecutor
 
                     return SlurmExecutor
                 case _:
@@ -145,23 +144,3 @@ class CompletedJob(Job):
     def state(self) -> Literal["done"]:
         """Return the completed state."""
         return "done"
-
-
-def _build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
-    """Given a set of tasks, transform their Task DAG into a DAG of WorkUnits."""
-    # Task dependency graph: an edge from A to B means A depends on B
-    union = Task((lambda *_: None), *tasks)
-    task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
-    task_graph.remove_node_by_value(union, cmp=is_, first=True)
-
-    # Retain only root and cachable tasks (and the induced graph minor)
-    anchor_graph = task_graph.copy()
-    anchors = [i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache]
-    anchor_graph.coarsen_to_anchors(anchors=anchors)
-
-    # replace nodes with WorkUnit instances
-    work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
-    for i in work_graph.evaluation_order():
-        work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
-
-    return work_graph

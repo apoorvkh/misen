@@ -3,7 +3,7 @@ from typing import Any
 import dill
 from xxhash import xxh3_64_intdigest
 
-from . import PrimitiveHandler
+from misen_hash import PrimitiveHandler
 
 __all__ = ["DillHandler"]
 

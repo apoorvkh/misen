@@ -1,17 +1,20 @@
+"""Work unit definition as a cache-bounded DAG of Tasks."""
+
 from __future__ import annotations
 
 import functools
+from operator import is_
 from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
-from .hashes import short_hash
+from misen.task import Task
+from misen.utils.hashes import short_hash
 
 if TYPE_CHECKING:
-    from misen.task import Task, TaskResources
+    from misen.task import TaskResources
+    from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
-
-    from .graph import DependencyGraph
 
 
 class WorkUnit:
@@ -113,3 +116,23 @@ class WorkUnit:
     def as_payload(self, workspace: Workspace) -> bytes:
         """Return a serialized payload that can be executed to run the work unit."""
         return cloudpickle.dumps(functools.partial(self.execute, workspace=workspace))
+
+
+def build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
+    """Given a set of tasks, transform their Task DAG into a DAG of WorkUnits."""
+    # Task dependency graph: an edge from A to B means A depends on B
+    union = Task((lambda *_: None), *tasks)
+    task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
+    task_graph.remove_node_by_value(union, cmp=is_, first=True)
+
+    # Retain only root and cachable tasks (and the induced graph minor)
+    anchor_graph = task_graph.copy()
+    anchors = [i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache]
+    anchor_graph.coarsen_to_anchors(anchors=anchors)
+
+    # replace nodes with WorkUnit instances
+    work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
+    for i in work_graph.evaluation_order():
+        work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
+
+    return work_graph

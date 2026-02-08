@@ -1,8 +1,8 @@
 import importlib.util
 from typing import Any, cast
 
-from . import PrimitiveHandler
-from .utils import hash_msgspec
+from misen_hash import PrimitiveHandler
+from misen_hash.utils import hash_msgspec
 
 _torch_available = importlib.util.find_spec("torch") is not None
 _numpy_available = importlib.util.find_spec("numpy") is not None

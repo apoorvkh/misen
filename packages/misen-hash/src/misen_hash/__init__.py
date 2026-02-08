@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Callable, cast
 
-from .utils import hash_msgspec
+from misen_hash.utils import hash_msgspec
 
 __all__ = ["canonical_hash", "PrimitiveHandler", "CollectionHandler"]
 
@@ -48,9 +48,9 @@ class CollectionHandler(Handler):
 
 ## Handlers by object type
 
-from ._builtins import builtin_handlers, builtin_handlers_by_type  # noqa: E402
-from ._dill import DillHandler  # noqa: E402
-from ._torch import TorchModuleHandler, TorchTensorHandler  # noqa: E402
+from misen_hash._builtins import builtin_handlers, builtin_handlers_by_type  # noqa: E402
+from misen_hash._dill import DillHandler  # noqa: E402
+from misen_hash._torch import TorchModuleHandler, TorchTensorHandler  # noqa: E402
 
 _handlers_type_cache: dict[type[Any], Handler] = {**builtin_handlers_by_type}
 

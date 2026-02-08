@@ -1,11 +1,11 @@
 """Public package exports for misen."""
 
-from .executor import Executor
-from .experiment import Experiment
-from .task import Task, task
-from .utils.sentinels import WORK_DIR
-from .utils.settings import Settings
-from .workspace import Workspace
+from misen.executor import Executor
+from misen.experiment import Experiment
+from misen.task import Task, task
+from misen.utils.sentinels import WORK_DIR
+from misen.utils.settings import Settings
+from misen.workspace import Workspace
 
 __all__ = [
     "WORK_DIR",

@@ -7,8 +7,8 @@ import uuid
 from collections import OrderedDict
 from typing import Any
 
-from . import CollectionHandler, Handler, PrimitiveHandler
-from .utils import hash_msgspec
+from misen_hash import CollectionHandler, Handler, PrimitiveHandler
+from misen_hash.utils import hash_msgspec
 
 __all__ = ["builtin_handlers", "builtin_handlers_by_type"]
 

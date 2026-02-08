@@ -27,20 +27,20 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cas
 from msgspec import Struct
 from typing_extensions import assert_never
 
-from .utils.auto import resolve_auto
-from .utils.graph import DependencyGraph
-from .utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
-from .utils.log_capture import capture_all_output
-from .utils.object_io import DefaultSerializer, Serializer
-from .utils.sentinels import WORK_DIR
+from misen.utils.auto import resolve_auto
+from misen.utils.graph import DependencyGraph
+from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
+from misen.utils.log_capture import capture_all_output
+from misen.utils.object_io import DefaultSerializer, Serializer
+from misen.utils.sentinels import WORK_DIR
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from .executor import Executor, Job
-    from .utils.locks import LockLike
-    from .workspace import Workspace
+    from misen.executor import Executor, Job
+    from misen.utils.locks import LockLike
+    from misen.workspace import Workspace
 
 __all__ = ["Task", "resources", "task"]
 

@@ -12,11 +12,11 @@ from typing import Any, Generic, Literal, TypeVar, cast
 import tyro
 from msgspec import Struct
 
-from .executor import Executor, ExecutorType
-from .task import Task
-from .utils.auto import resolve_auto
-from .utils.settings import DEFAULT_SETTINGS_FILE, Settings
-from .workspace import Workspace, WorkspaceType
+from misen.executor import Executor, ExecutorType
+from misen.task import Task
+from misen.utils.auto import resolve_auto
+from misen.utils.settings import DEFAULT_SETTINGS_FILE, Settings
+from misen.workspace import Workspace, WorkspaceType
 
 __all__ = ["Experiment"]
 
