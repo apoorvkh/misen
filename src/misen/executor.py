@@ -24,15 +24,17 @@ from misen.utils.work_unit import WorkUnit, build_work_graph
 if TYPE_CHECKING:
     from misen.task import Task
     from misen.utils.graph import DependencyGraph
+    from misen.utils.snapshot import Snapshot
     from misen.workspace import Workspace
 
 __all__ = ["Executor", "Job"]
 
 ExecutorType: TypeAlias = Literal["local", "slurm"]
 JobT = TypeVar("JobT", bound="Job")
+SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
 
 
-class Executor(FromSettingsABC, Generic[JobT]):
+class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
     """Abstract interface for implementing an Executor for a specific backend."""
 
     def submit(self, tasks: set[Task], workspace: Workspace) -> DependencyGraph[CompletedJob | JobT]:
@@ -46,13 +48,17 @@ class Executor(FromSettingsABC, Generic[JobT]):
         # dispatch work units and collect job handles
 
         jobs: dict[WorkUnit, CompletedJob | JobT] = {}
+        snapshot: SnapshotT | None = None
 
         for w in work_graph:  # dependency order
             if w.root.done(workspace=workspace):
                 jobs[w] = CompletedJob(work_unit=w)
             else:
+                # lazily snapshot only when at least one work unit actually needs dispatch
+                if snapshot is None:
+                    snapshot = self._make_snapshot(workspace=workspace)
                 dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
-                jobs[w] = self._dispatch(work_unit=w, dependencies=dependencies, workspace=workspace)
+                jobs[w] = self._dispatch(work_unit=w, dependencies=dependencies, workspace=workspace, snapshot=snapshot)
 
         # return job graph corresponding to work graph
 
@@ -63,13 +69,20 @@ class Executor(FromSettingsABC, Generic[JobT]):
         return job_graph
 
     @abstractmethod
-    def _dispatch(self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace) -> JobT:
+    def _make_snapshot(self, workspace: Workspace) -> SnapshotT:
+        """Create (or reuse) an execution snapshot for this submit call."""
+
+    @abstractmethod
+    def _dispatch(
+        self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace, snapshot: SnapshotT
+    ) -> JobT:
         """Dispatch a WorkUnit to the backend. Will run `work_unit.execute(workspace)` after dependencies are completed.
 
         Args:
             work_unit: The WorkUnit to dispatch.
             dependencies: Job handles corresponding to prerequisite (incomplete) WorkUnits.
             workspace: Workspace providing Task artifact caching and retrieval.
+            snapshot: Executor-specific environment snapshot.
 
         Returns:
             A Job handle that can be queried for execution state.

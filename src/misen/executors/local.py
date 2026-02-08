@@ -5,22 +5,17 @@ from __future__ import annotations
 import multiprocessing
 import os
 import subprocess
-import tempfile
 import threading
-import uuid
 from dataclasses import dataclass
 from functools import cache
-from itertools import chain
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-import uv
-
 from misen.executor import Executor, Job
-from misen.utils.snapshot import snapshot_env_files, snapshot_venv
+from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
     from multiprocessing.process import BaseProcess
+    from pathlib import Path
 
     from misen.task import TaskResources
     from misen.utils.work_unit import WorkUnit
@@ -183,7 +178,7 @@ class _LocalScheduler:
         return started_any
 
 
-class LocalExecutor(Executor[LocalJob]):
+class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
     """Executor implementation that runs tasks locally."""
 
     max_cpus: int | None = None
@@ -201,15 +196,18 @@ class LocalExecutor(Executor[LocalJob]):
 
     @classmethod
     @cache
-    def _snapshot_venv(cls, venv_dir: Path) -> Path:
-        return snapshot_venv(venv_dir)
+    def _cached_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
+        """Return a cached local snapshot instance for this executor class."""
+        return LocalSnapshot(snapshots_dir=snapshots_dir)
 
-    @classmethod
-    @cache
-    def _snapshot_env_files(cls, env_dir: Path) -> list[Path]:
-        return snapshot_env_files(env_dir)
+    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
+        """Create or reuse the local executor snapshot."""
+        snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
+        return LocalExecutor._cached_snapshot(snapshots_dir=snapshots_dir)
 
-    def _dispatch(self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace) -> LocalJob:
+    def _dispatch(
+        self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace, snapshot: LocalSnapshot
+    ) -> LocalJob:
         """Dispatch a work unit to the local scheduler."""
         resources = work_unit.resources
         if not self._resource_budget.fits(resources):
@@ -221,41 +219,15 @@ class LocalExecutor(Executor[LocalJob]):
             )
             raise ValueError(msg)
 
-        # 1) Build (or reuse) a uv-synced snapshot environment under the workspace temp dir.
-        env_root = workspace.get_temp_dir() / "envs"
-        env_root.mkdir(parents=True, exist_ok=True)
-        env_dir = Path(tempfile.mkdtemp(dir=env_root))
-
-        venv_dir = self._snapshot_venv(venv_dir=(env_dir / ".venv"))
-        env_files = self._snapshot_env_files(env_dir=env_dir)
-
-        # 2) Use the shared Executor helper to write the pickled payload file and produce python -c code.
-        job_dir = (workspace.get_temp_dir() / "local").resolve()
-        job_dir.mkdir(parents=True, exist_ok=True)
-
-        payload_path = job_dir / f"{uuid.uuid4().hex}.pkl"
-        payload_path.write_bytes(work_unit.as_payload(workspace=workspace))
-
-        # 3) Run the payload inside the snapshot env via `uv run --no-project --python <venv>/bin/python ...`.
-        argv: list[str] = [
-            uv.find_uv_bin(),
-            "run",
-            "--no-project",
-            *chain.from_iterable(("--env-file", str(f)) for f in env_files),
-            "-m",
-            "misen.utils.execute",
-            "--payload",
-            str(payload_path),
-        ]
-
-        env = os.environ.copy() | {"VIRTUAL_ENV": str(venv_dir)}
-
         job = LocalJob(
             work_unit=work_unit,
             resources=resources,
             dependencies=dependencies,
-            argv=argv,
-            env=env,
+            argv=snapshot.command(
+                work_unit=work_unit,
+                workspace=workspace,
+            ),
+            env=os.environ.copy() | snapshot.command_env(),
         )
         self._scheduler.submit(job)
         return job
