@@ -219,15 +219,13 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             )
             raise ValueError(msg)
 
+        argv, env_overrides = snapshot.prepare(work_unit=work_unit, workspace=workspace)
         job = LocalJob(
             work_unit=work_unit,
             resources=resources,
             dependencies=dependencies,
-            argv=snapshot.command(
-                work_unit=work_unit,
-                workspace=workspace,
-            ),
-            env=os.environ.copy() | snapshot.command_env(),
+            argv=argv,
+            env=os.environ.copy() | dict(env_overrides),
         )
         self._scheduler.submit(job)
         return job

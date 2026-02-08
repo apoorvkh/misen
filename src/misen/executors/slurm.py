@@ -100,9 +100,10 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             dep_ids = ":".join(job.job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        env_overrides = [f"{k}={v}" for k, v in snapshot.command_env().items()]
+        argv, env_overrides = snapshot.prepare(work_unit=work_unit, workspace=workspace)
+        env_overrides = [f"{k}={v}" for k, v in env_overrides.items()]
         sbatch_cmd.extend(["--export", ",".join(["ALL", *env_overrides])])
-        sbatch_cmd.extend(["--wrap", shlex.join(snapshot.command(work_unit=work_unit, workspace=workspace))])
+        sbatch_cmd.extend(["--wrap", shlex.join(argv)])
 
         try:
             result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603

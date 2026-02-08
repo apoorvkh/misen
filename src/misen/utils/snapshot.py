@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 import uv
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -25,12 +27,8 @@ class Snapshot(ABC):
     __slots__ = ()
 
     @abstractmethod
-    def command(self, work_unit: WorkUnit, workspace: Workspace) -> list[str]:
-        """Build the command used to execute a work unit."""
-
-    @abstractmethod
-    def command_env(self) -> dict[str, str]:
-        """Build environment variable overrides used for execution."""
+    def prepare(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[list[str], Mapping[str, str]]:
+        """Prepare execution command and environment overrides for a work unit."""
 
 
 class LocalSnapshot(Snapshot):
@@ -46,13 +44,13 @@ class LocalSnapshot(Snapshot):
         self.venv_dir = self._snapshot_venv(self.snapshot_dir / ".venv")
         self.env_files = self._snapshot_env_files(self.snapshot_dir)
 
-    def command(self, work_unit: WorkUnit, workspace: Workspace) -> list[str]:
-        """Build a uv command to execute a serialized work-unit payload."""
+    def prepare(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[list[str], Mapping[str, str]]:
+        """Prepare a uv command and env overrides to execute a serialized work-unit payload."""
         payload_dir = self.snapshot_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         payload_path = payload_dir / f"{uuid.uuid4().hex}.pkl"
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace))
-        return [
+        argv: list[str] = [
             self.uv_bin,
             "run",
             "--no-project",
@@ -62,10 +60,8 @@ class LocalSnapshot(Snapshot):
             "--payload",
             str(payload_path),
         ]
-
-    def command_env(self) -> dict[str, str]:
-        """Build process environment overrides for execution."""
-        return {"VIRTUAL_ENV": str(self.venv_dir)}
+        env_overrides: dict[str, str] = {"VIRTUAL_ENV": str(self.venv_dir)}
+        return argv, env_overrides
 
     def _snapshot_venv(self, venv_dir: Path) -> Path:
         """Install a frozen snapshot of current package and dependencies into a virtual env."""
