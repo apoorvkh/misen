@@ -10,6 +10,7 @@ import tempfile
 import uuid
 from functools import cache
 from itertools import chain
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import uv
@@ -19,8 +20,6 @@ from misen.utils.hashes import short_hash
 from misen.utils.snapshot import snapshot_env_files, snapshot_venv
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from misen.workspace import Workspace
 
 
