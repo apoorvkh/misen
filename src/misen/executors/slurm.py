@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 import uuid
 from functools import cache
+from itertools import chain
 from typing import TYPE_CHECKING, Literal
 
 import uv
 
 from misen.executor import Executor, Job, WorkUnit
 from misen.utils.hashes import short_hash
-from misen.utils.snapshot import snapshot_to_venv
+from misen.utils.snapshot import snapshot_env_files, snapshot_venv
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,8 +74,13 @@ class SlurmExecutor(Executor[SlurmJob]):
 
     @classmethod
     @cache
-    def _snapshot_to_venv(cls, parent_dir: Path) -> Path:
-        return snapshot_to_venv(parent_dir)
+    def _snapshot_venv(cls, venv_dir: Path) -> Path:
+        return snapshot_venv(venv_dir)
+
+    @classmethod
+    @cache
+    def _snapshot_env_files(cls, env_dir: Path) -> list[Path]:
+        return snapshot_env_files(env_dir)
 
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace) -> SlurmJob:
         """Dispatch a work unit to SLURM via sbatch."""
@@ -95,27 +103,33 @@ class SlurmExecutor(Executor[SlurmJob]):
             dep_ids = ":".join(job.job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        venv_dir = self._snapshot_to_venv(parent_dir=workspace.get_temp_dir() / "venvs")
+        env_root = workspace.get_temp_dir() / "envs"
+        env_root.mkdir(parents=True, exist_ok=True)
+        env_dir = Path(tempfile.mkdtemp(dir=env_root))
+
+        venv_dir = self._snapshot_venv(venv_dir=(env_dir / ".venv"))
+        env_files = self._snapshot_env_files(directory=env_dir)
+
         payload_path = job_dir / f"{uuid.uuid4().hex}.pkl"
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace))
 
-        execution_code = shlex.join(
-            [
-                f"VIRTUAL_ENV={venv_dir}",
-                uv.find_uv_bin(),
-                "run",
-                "--no-project",
-                "-m",
-                "misen.utils.execute",
-                "--payload",
-                str(payload_path),
-            ]
-        )
+        execution_code = [
+            uv.find_uv_bin(),
+            "run",
+            "--no-project",
+            *chain.from_iterable(("--env-file", str(f)) for f in env_files),
+            "-m",
+            "misen.utils.execute",
+            "--payload",
+            str(payload_path),
+        ]
 
-        sbatch_cmd.extend(["--wrap", execution_code])
+        sbatch_cmd.extend(["--wrap", shlex.join(execution_code)])
+
+        env = os.environ.copy() | {"VIRTUAL_ENV": str(venv_dir)}
 
         try:
-            result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603
+            result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True, env=env)  # noqa: S603
         except subprocess.CalledProcessError as e:
             msg = f"sbatch failed: {(e.stderr or e.stdout or '').strip()}"
             raise RuntimeError(msg) from e

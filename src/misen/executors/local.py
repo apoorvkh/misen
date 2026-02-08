@@ -5,17 +5,19 @@ from __future__ import annotations
 import multiprocessing
 import os
 import subprocess
+import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
 from functools import cache
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import uv
 
 from misen.executor import Executor, Job
-from misen.utils.snapshot import snapshot_to_venv
+from misen.utils.snapshot import snapshot_env_files, snapshot_venv
 
 if TYPE_CHECKING:
     from multiprocessing.process import BaseProcess
@@ -199,8 +201,13 @@ class LocalExecutor(Executor[LocalJob]):
 
     @classmethod
     @cache
-    def _snapshot_to_venv(cls, parent_dir: Path) -> Path:
-        return snapshot_to_venv(parent_dir)
+    def _snapshot_venv(cls, venv_dir: Path) -> Path:
+        return snapshot_venv(venv_dir)
+
+    @classmethod
+    @cache
+    def _snapshot_env_files(cls, env_dir: Path) -> list[Path]:
+        return snapshot_env_files(env_dir)
 
     def _dispatch(self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace) -> LocalJob:
         """Dispatch a work unit to the local scheduler."""
@@ -215,7 +222,12 @@ class LocalExecutor(Executor[LocalJob]):
             raise ValueError(msg)
 
         # 1) Build (or reuse) a uv-synced snapshot environment under the workspace temp dir.
-        venv_dir = self._snapshot_to_venv(parent_dir=workspace.get_temp_dir() / "venvs")
+        env_root = workspace.get_temp_dir() / "envs"
+        env_root.mkdir(parents=True, exist_ok=True)
+        env_dir = Path(tempfile.mkdtemp(dir=env_root))
+
+        venv_dir = self._snapshot_venv(venv_dir=(env_dir / ".venv"))
+        env_files = self._snapshot_env_files(env_dir=env_dir)
 
         # 2) Use the shared Executor helper to write the pickled payload file and produce python -c code.
         job_dir = (workspace.get_temp_dir() / "local").resolve()
@@ -225,20 +237,17 @@ class LocalExecutor(Executor[LocalJob]):
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace))
 
         # 3) Run the payload inside the snapshot env via `uv run --no-project --python <venv>/bin/python ...`.
-        uv_bin = uv.find_uv_bin()
         argv: list[str] = [
-            uv_bin,
+            uv.find_uv_bin(),
             "run",
             "--no-project",
-            "--python",
-            str(Path(venv_dir) / "bin" / "python"),
+            *chain.from_iterable(("--env-file", str(f)) for f in env_files),
             "-m",
             "misen.utils.execute",
             "--payload",
             str(payload_path),
         ]
 
-        # Mirror your SLURM behavior: no "activation", but set VIRTUAL_ENV.
         env = os.environ.copy() | {"VIRTUAL_ENV": str(venv_dir)}
 
         job = LocalJob(
