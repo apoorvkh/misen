@@ -73,6 +73,9 @@ class Task(Generic[R]):
         self.func: Callable[P, R] = func
         self.args: P.args = args
         self.kwargs: P.kwargs = kwargs
+        if not self.properties.cache and any(v is WORK_DIR for v in itertools.chain(self.args, self.kwargs.values())):
+            msg = "WORK_DIR sentinel can only be used when Task.properties.cache == True."
+            raise ValueError(msg)
 
     def __repr__(self) -> str:
         """Return a short debug representation for the task."""
@@ -289,7 +292,6 @@ class Task(Generic[R]):
 
     def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
         """Returns work directory from Workspace."""
-        # TODO: non-unique only for cacheable tasks?
         workspace = resolve_auto(workspace=workspace)
         return workspace.get_work_dir(task=self)
 

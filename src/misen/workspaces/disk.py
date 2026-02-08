@@ -231,6 +231,7 @@ class DiskWorkspace(Workspace):
 
     def get_work_dir(self, task: Task) -> Path:
         """Return the working directory for a task."""
+        super().get_work_dir(task=task)
         key_hex = task.resolved_hash(workspace=self).hex()
         d = Path(self.directory) / "work" / key_hex[:2] / f"{key_hex}"
         d.mkdir(parents=True, exist_ok=True)

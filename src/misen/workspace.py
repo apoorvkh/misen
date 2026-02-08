@@ -142,8 +142,10 @@ class Workspace(FromSettingsABC):
 
     @abstractmethod
     def get_work_dir(self, task: Task) -> Path:
-        """Return a directory where the task can store working files. E.g. to cache intermediate results."""
-        ...
+        """Return a working directory for cacheable tasks. E.g. to cache intermediate results during task runtime."""
+        if not task.properties.cache:
+            msg = f"{task} cannot use workspace work_dir unless Task.properties.cache == True."
+            raise RuntimeError(msg)
 
     ## TODO: non-unique (maybe use hostname, pid, ?)
     @abstractmethod

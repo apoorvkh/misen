@@ -4,7 +4,7 @@ import os
 import sys
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
-from functools import cached_property
+from functools import cache, cached_property
 from importlib import import_module
 from pathlib import Path
 from typing import Any, ClassVar
@@ -37,6 +37,15 @@ class Settings(Struct, dict=True):
             return tomllib.loads(self.file.read_bytes().decode())
         except FileNotFoundError:
             return {}
+
+    def __hash__(self) -> int:
+        """Hash based on settings file identity and file stat."""
+        settings_file = self.file.expanduser().resolve()
+        try:
+            stat = settings_file.stat()
+            return hash((str(settings_file), stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            return hash(None)
 
 
 class FromSettingsMeta(msgspec.StructMeta, ABCMeta):
@@ -91,7 +100,11 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
         """
         if settings is None:
             settings = Settings()
+        return cls._auto(settings=settings)
 
+    @classmethod
+    @cache
+    def _auto(cls, settings: Settings) -> Self:
         key = cls._settings_key()
 
         if f"{key}_type" not in settings.toml_data:
