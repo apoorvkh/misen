@@ -189,7 +189,7 @@ class _LocalScheduler:
             )
             try:
                 process.start()
-            except Exception:
+            except (OSError, RuntimeError):
                 job.mark_failed()
                 self._pending.remove(job)
                 started_any = True
@@ -245,7 +245,7 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             raise ValueError(msg)
 
         job_id, argv, env_overrides = snapshot.prepare_job(work_unit=work_unit, workspace=workspace)
-        log_path = workspace.get_job_log_path(job_id=job_id)
+        log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         job = LocalJob(
             work_unit=work_unit,
             resources=resources,

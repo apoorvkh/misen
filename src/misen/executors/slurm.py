@@ -101,7 +101,7 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
 
         job_id, argv, env_overrides = snapshot.prepare_job(work_unit=work_unit, workspace=workspace)
 
-        job_log_path = workspace.get_job_log_path(job_id=job_id)
+        job_log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         sbatch_cmd.extend(["--output", str(job_log_path)])
 
         env_prefix = ["env", *[f"{k}={v}" for k, v in env_overrides.items()]]
