@@ -9,7 +9,6 @@ from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 from misen.executor import Executor, Job, WorkUnit
-from misen.utils.hashes import short_hash
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
@@ -80,10 +79,11 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, snapshot: LocalSnapshot
     ) -> SlurmJob:
         """Dispatch a work unit to SLURM via sbatch."""
-        sbatch_cmd: list[str] = [SBATCH, "--parsable"]
-
+        work_unit_repr = work_unit.root.task_hash().short_b32()
         resources = work_unit.resources
-        sbatch_cmd.extend(["--job-name", f"misen-{short_hash(work_unit)}"])
+
+        sbatch_cmd: list[str] = [SBATCH, "--parsable"]
+        sbatch_cmd.extend(["--job-name", f"misen-{work_unit_repr}"])
         sbatch_cmd.extend(["--ntasks-per-node", "1"])
         sbatch_cmd.extend(["--nodes", str(resources.nodes)])
         sbatch_cmd.extend(["--cpus-per-task", str(resources.cpus)])
@@ -91,16 +91,23 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         sbatch_cmd.extend(["--gpus-per-node", str(resources.gpus)])
         sbatch_cmd.extend(["--time", str(resources.time or 1)])
 
+        # TODO: make these configurable
+        sbatch_cmd.extend(["--account", "default"])
+        sbatch_cmd.extend(["--partition", "batch"])
+
         if dependencies:
             dep_ids = ":".join(job.slurm_job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
         job_id, argv, env_overrides = snapshot.prepare_job(work_unit=work_unit, workspace=workspace)
-        job_log_path = workspace.get_job_log_path(job_id=job_id)
-        env_overrides_list = [f"{k}={v}" for k, v in env_overrides.items()]
-        sbatch_cmd.extend(["--export", ",".join(["ALL", *env_overrides_list])])
-        sbatch_cmd.extend(["--wrap", shlex.join(argv)])
+
+        job_log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         sbatch_cmd.extend(["--output", str(job_log_path)])
+
+        env_prefix = ["env", *[f"{k}={v}" for k, v in env_overrides.items()]]
+        sbatch_cmd.extend(["--export", "ALL"])
+        sbatch_cmd.extend(["--wrap", shlex.join([*env_prefix, *argv])])
+
         try:
             result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603
         except subprocess.CalledProcessError as e:

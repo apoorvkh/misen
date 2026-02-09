@@ -5,7 +5,7 @@ import base64
 from misen_hash import canonical_hash
 from typing_extensions import Self
 
-__all__ = ["Hash", "ResolvedTaskHash", "ResultHash", "TaskHash", "short_hash"]
+__all__ = ["Hash", "ResolvedTaskHash", "ResultHash", "TaskHash"]
 
 
 class Hash(int):
@@ -37,6 +37,10 @@ class Hash(int):
         """Unpadded RFC 4648 base32 of this 64-bit hash. Always 13 chars."""
         return base64.b32encode(self.encode()).decode("ascii").rstrip("=")
 
+    def short_b32(self) -> str:
+        """First 4 chars of base32. Much higher collision probability."""
+        return self.b32()[:4]
+
 
 class TaskHash(Hash):
     """Hash identifying a task by dependency structure."""
@@ -48,8 +52,3 @@ class ResolvedTaskHash(Hash):
 
 class ResultHash(Hash):
     """Hash identifying a task result payload."""
-
-
-def short_hash(obj: object) -> str:
-    """Return a short hexadecimal hash for display."""
-    return f"{hash(obj) & 0xFFFF:04x}"

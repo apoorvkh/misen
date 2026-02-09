@@ -274,9 +274,3 @@ class DiskWorkspace(Workspace):
         timestamp = time_ns() if timestamp == "current" else timestamp
 
         return (log_dir / f"{key_str}_{job_id}_{timestamp}.log").open(mode, buffering=1)
-
-    def get_job_log_path(self, job_id: str) -> Path:
-        """Return a job log path in the workspace temp directory."""
-        log_dir = self.get_temp_dir() / "job_logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        return log_dir / f"{job_id}.log"

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
     from misen.utils.locks import LockLike
+    from misen.utils.work_unit import WorkUnit
 
 __all__ = ["Workspace"]
 
@@ -165,10 +166,21 @@ class Workspace(FromSettingsABC):
         """
         ...
 
-    @abstractmethod
-    def get_job_log_path(self, job_id: str) -> Path:
-        """Return the path to an executor job log file."""
-        ...
+    def get_job_log(self, job_id: str, work_unit: WorkUnit) -> Path:
+        """Return a path for a job's logs."""
+        log_dir = self.get_temp_dir() / "job_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        work_unit_prefix = work_unit.root.task_hash().b32()
+        return log_dir / f"{work_unit_prefix}_{job_id}.log"
+
+    def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
+        """Return an iterator over job log paths corresonding to given WorkUnit."""
+        log_dir = self.get_temp_dir() / "job_logs"
+        if work_unit is None:
+            return log_dir.iterdir()
+
+        work_unit_prefix = work_unit.root.task_hash().b32()
+        return (log_dir / f"{work_unit_prefix}_*.log").iterdir()
 
 
 class ResultMap(MutableMapping[Task[Any], Any]):
