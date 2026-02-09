@@ -5,9 +5,7 @@ from __future__ import annotations
 import multiprocessing
 import os
 import subprocess
-import sys
 import threading
-from contextlib import suppress
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Literal
@@ -53,51 +51,26 @@ class _ResourceBudget:
         )
 
 
-def _run_subprocess(argv: list[str], *, env: dict[str, str], log_path: Path) -> None:
-    """Run a command in a worker process, teeing output to stdio and the job log."""
-    try:
-        process = subprocess.Popen(  # noqa: S603
-            argv,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except FileNotFoundError:
-        raise SystemExit(127) from None
-    except Exception:  # noqa: BLE001
-        raise SystemExit(1) from None
-
-    log_file = None
-    with suppress(OSError):
-        log_file = log_path.open("a", buffering=1, encoding="utf-8", errors="replace")
-
-    assert process.stdout is not None  # noqa: S101
-    for line in process.stdout:
+def _run_subprocess(argv: list[str], env: dict[str, str], log_path: Path) -> None:
+    """Run a command in a worker process, writing output directly to the job log."""
+    with log_path.open("a", buffering=1, encoding="utf-8", errors="replace") as log_file:
         try:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-        except Exception:  # noqa: BLE001
-            pass
-        if log_file is not None:
-            try:
-                log_file.write(line)
-            except Exception:  # noqa: BLE001
-                pass
-
-    returncode = process.wait()
-    if log_file is not None:
-        with suppress(Exception):
-            log_file.flush()
-        with suppress(Exception):
-            log_file.close()
-    raise SystemExit(returncode)
+            completed = subprocess.run(  # noqa: S603
+                argv,
+                env=env,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise SystemExit(127) from None
+    raise SystemExit(completed.returncode)
 
 
 class LocalJob(Job):
     """Job implementation backed by a multiprocessing.Process."""
+
+    __slots__ = ("_lock", "_process", "_state", "argv", "dependencies", "env", "resources")
 
     def __init__(
         self,
@@ -107,10 +80,10 @@ class LocalJob(Job):
         argv: list[str],
         env: dict[str, str],
         job_id: str,
-        job_log_path: Path,
+        log_path: Path,
     ) -> None:
         """Initialize a local job for a work unit."""
-        super().__init__(work_unit=work_unit, job_id=job_id, log_path=job_log_path)
+        super().__init__(work_unit=work_unit, job_id=job_id, log_path=log_path)
         self.resources = resources
         self.dependencies = dependencies
         self.argv = argv
@@ -205,16 +178,14 @@ class _LocalScheduler:
             if not self._available_budget.fits(job.resources):
                 continue
 
-            if job.log_path is None or job.job_id is None:
+            if job.job_id is None:
                 job.mark_failed()
                 self._pending.remove(job)
                 started_any = True
                 continue
-
             process = self._context.Process(
                 target=_run_subprocess,
-                args=(job.argv,),
-                kwargs={"env": job.env, "log_path": job.log_path},
+                args=(job.argv, job.env, job.log_path),
             )
             try:
                 process.start()
@@ -274,7 +245,7 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             raise ValueError(msg)
 
         job_id, argv, env_overrides = snapshot.prepare_job(work_unit=work_unit, workspace=workspace)
-        job_log_path = workspace.get_job_log_path(job_id=job_id)
+        log_path = workspace.get_job_log_path(job_id=job_id)
         job = LocalJob(
             work_unit=work_unit,
             resources=resources,
@@ -282,7 +253,7 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             argv=argv,
             env=os.environ.copy() | dict(env_overrides),
             job_id=job_id,
-            job_log_path=job_log_path,
+            log_path=log_path,
         )
         self._scheduler.submit(job)
         return job

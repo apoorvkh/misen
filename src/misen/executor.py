@@ -132,7 +132,7 @@ class Job(ABC):
     log_path: Path | None
     work_unit: WorkUnit
 
-    def __init__(self, work_unit: WorkUnit, *, job_id: str | None = None, log_path: Path | None = None) -> None:
+    def __init__(self, work_unit: WorkUnit, job_id: str | None = None, log_path: Path | None = None) -> None:
         """Initialize the job wrapper for a work unit."""
         self.work_unit = work_unit
         self.job_id = job_id
