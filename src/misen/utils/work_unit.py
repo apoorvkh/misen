@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 import cloudpickle
 
 from misen.task import Task
+from misen.utils.nested_args import map_nested_leaves
 
 if TYPE_CHECKING:
     from misen.task import TaskResources
@@ -88,10 +89,13 @@ class WorkUnit:
         task_results: dict[Task, Any] = {}
 
         def resolve_arg(arg: Any) -> Any:
-            """Resolve a task argument from cached runtime results."""
-            if isinstance(arg, Task) and not arg.properties.cache:
-                return task_results[arg]
-            return arg
+            """Resolve non-cacheable Task dependencies from cached runtime results."""
+            def resolve_leaf(leaf: Any) -> Any:
+                if isinstance(leaf, Task) and not leaf.properties.cache:
+                    return task_results[leaf]
+                return leaf
+
+            return map_nested_leaves(arg, resolve_leaf)
 
         ordered_tasks: list[Task] = list(self.graph)
         for i, task in enumerate(ordered_tasks):

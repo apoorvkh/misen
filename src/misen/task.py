@@ -37,6 +37,7 @@ from misen.utils.functions import (
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
+from misen.utils.nested_args import iter_nested_leaves, map_nested_leaves
 from misen.utils.object_io import DefaultSerializer, Serializer
 from misen.utils.sentinels import WORK_DIR
 
@@ -60,12 +61,23 @@ class Task(Generic[R]):
 
     Attributes:
         func: The underlying callable.
-        args / kwargs: Arguments to pass to `func`. Any value that is itself a `Task` is considered a dependency.
+        args / kwargs:
+            Arguments to pass to `func`. Any value that is a `Task`, or contains one in nested structures,
+            is considered a dependency.
         properties: TaskProperties metadata (typically attached to `func` via `@task(...)`).
         resources: TaskResources metadata (typically attached to `func` via `@resources(...)`).
     """
 
-    __slots__ = ("_cached_signature", "_cached_task_hash", "args", "func", "kwargs", "properties", "resources")
+    __slots__ = (
+        "_cached_signature",
+        "_cached_task_hash",
+        "args",
+        "dependencies",
+        "func",
+        "kwargs",
+        "properties",
+        "resources",
+    )
 
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> None:
         """Initialize a Task with a function and arguments."""
@@ -92,7 +104,18 @@ class Task(Generic[R]):
         self.args: P.args = args
         self.kwargs: P.kwargs = kwargs
 
-        if not self.properties.cache and any(v is WORK_DIR for v in itertools.chain(self.args, self.kwargs.values())):
+        dependencies: set[Task] = set()
+        has_work_dir = False
+        for value in itertools.chain(self.args, self.kwargs.values()):
+            for leaf in iter_nested_leaves(value):
+                if isinstance(leaf, Task):
+                    dependencies.add(leaf)
+                elif leaf is WORK_DIR:
+                    has_work_dir = True
+
+        self.dependencies = frozenset(dependencies)
+
+        if not self.properties.cache and has_work_dir:
             msg = "WORK_DIR sentinel can only be used when Task.properties.cache == True."
             raise ValueError(msg)
 
@@ -107,12 +130,6 @@ class Task(Generic[R]):
     def T(self) -> R:  # noqa: N802
         """Cast Task to its result type. Useful for type checking compliance when passing Tasks as dependencies."""
         return cast("R", self)
-
-    @property
-    def dependencies(self) -> set[Task]:
-        """Immediate Task dependencies discovered from args/kwargs."""
-        # TODO: nested structures?
-        return {t for t in itertools.chain(self.args, self.kwargs.values()) if isinstance(t, Task)}
 
     def is_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
         """Check if Task's result is cached in the Workspace."""
@@ -271,14 +288,13 @@ class Task(Generic[R]):
             )
             for t in self.dependencies
         }
+        wd = workspace.get_work_dir(task=self) if self.properties.cache else None
 
-        def resolve_argument(dep: Task | Any) -> Any:
-            """Resolve a single argument value for execution."""
-            if isinstance(dep, Task):
-                return dep_results[dep]
-            if dep is WORK_DIR:
-                return workspace.get_work_dir(task=self)
-            return dep
+        def resolve_argument(dep: Any) -> Any:
+            """Resolve Task / WORK_DIR leaves recursively for execution."""
+            return map_nested_leaves(
+                dep, lambda leaf: dep_results[leaf] if isinstance(leaf, Task) else wd if leaf is WORK_DIR else leaf
+            )
 
         # Runtime lock: should not run cached Tasks if already being computed; fails immediately if so.
 
@@ -393,23 +409,33 @@ class Task(Generic[R]):
         bound_arguments = cast("Signature", self._cached_signature).bind(*self.args, **self.kwargs)
         bound_arguments.apply_defaults()
 
-        # Get hash & version for each argument
-        def resolve(key: str, value: Any) -> tuple[TaskHash | ResultHash, int]:
-            """Return the hash and version tuple for an argument."""
-            h = (
-                (value.result_hash(workspace=workspace) if hash_task_by_result else value.task_hash())
-                if isinstance(value, Task)
-                else ResultHash.from_object(value)
-            )
-            version = self.properties.versions.get((key, h), 0)
-            return h, version
+        def leaf_repr(value: Any) -> TaskHash | ResultHash | Any:
+            """Return canonical representation for a leaf value used in argument hashing."""
+            if isinstance(value, Task):
+                return value.result_hash(workspace=workspace) if hash_task_by_result else value.task_hash()
+            return value
 
-        return {
-            k: resolve(k, v)
-            for k, v in bound_arguments.arguments.items()
-            if k not in self.properties.exclude
-            and (k not in self.properties.defaults or self.properties.defaults[k] != v)
-        }
+        def argument_hash(value: Any) -> TaskHash | ResultHash:
+            """Return hash identifier for an argument value."""
+            if isinstance(value, Task):
+                return cast("TaskHash | ResultHash", leaf_repr(value))
+            return ResultHash.from_object(map_nested_leaves(value, leaf_repr))
+
+        def include_argument(key: str, value: Any) -> bool:
+            """Return True if this argument should contribute to task hashing."""
+            return key not in self.properties.exclude and (
+                key not in self.properties.defaults or self.properties.defaults[key] != value
+            )
+
+        hashed_arguments: dict[str, tuple[TaskHash | ResultHash, int]] = {}
+        for key, value in bound_arguments.arguments.items():
+            if not include_argument(key, value):
+                continue
+            arg_hash = argument_hash(value)
+            version = self.properties.versions.get((key, arg_hash), 0)  # ty:ignore[no-matching-overload]
+            hashed_arguments[key] = (arg_hash, version)
+
+        return hashed_arguments
 
 
 def task(
