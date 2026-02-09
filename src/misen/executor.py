@@ -141,7 +141,6 @@ class Job(ABC):
     @abstractmethod
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
         """Return the current job state."""
-        ...
 
     def wait(self, poll_s: float = 0.5) -> None:
         """Block until the job reaches a terminal state."""

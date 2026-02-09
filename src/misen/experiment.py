@@ -30,7 +30,6 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
     @abstractmethod
     def tasks(self) -> TasksT:
         """Return the mapping of task names to Task objects."""
-        ...
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Cache the tasks method for subclasses."""

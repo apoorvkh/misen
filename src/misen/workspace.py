@@ -134,12 +134,10 @@ class Workspace(FromSettingsABC):
     @abstractmethod
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
         """Return a lock for task or result namespaces."""
-        ...
 
     @abstractmethod
     def get_temp_dir(self) -> Path:
         """Return a temporary directory for workspace operations."""
-        ...
 
     @abstractmethod
     def get_work_dir(self, task: Task) -> Path:
@@ -164,7 +162,6 @@ class Workspace(FromSettingsABC):
             timestamp: Timestamp to select a log file, or "latest".
             job_id: Optional job identifier to group task logs from the same executor job.
         """
-        ...
 
     def get_job_log(self, job_id: str, work_unit: WorkUnit) -> Path:
         """Return a path for a job's logs."""

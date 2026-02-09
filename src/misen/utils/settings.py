@@ -68,13 +68,11 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
     @abstractmethod
     def _default() -> Self:
         """Return the default instance when no settings are provided."""
-        ...
 
     @staticmethod
     @abstractmethod
     def _settings_key() -> str:
         """Return the TOML settings key for this type."""
-        ...
 
     @classmethod
     @abstractmethod

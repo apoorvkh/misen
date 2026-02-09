@@ -23,13 +23,11 @@ class Serializer(ABC, Generic[T]):
     @abstractmethod
     def save(obj: T, directory: Path) -> None:
         """Serialize an object into the given directory."""
-        ...
 
     @staticmethod
     @abstractmethod
     def load(directory: Path) -> T:
         """Deserialize an object from the given directory."""
-        ...
 
 
 # TODO: add cases for other formats
