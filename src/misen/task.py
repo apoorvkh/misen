@@ -28,7 +28,7 @@ from typing_extensions import assert_never
 
 from misen.utils.auto import resolve_auto
 from misen.utils.graph import DependencyGraph
-from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash, short_hash
+from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
 from misen.utils.object_io import DefaultSerializer, Serializer
 from misen.utils.sentinels import WORK_DIR
@@ -80,7 +80,7 @@ class Task(Generic[R]):
         """Return a short debug representation for the task."""
         return (
             f"Task({self.func.__module__}.{self.func.__qualname__}, "
-            f"hash={short_hash(self)}){' [C]' if self.properties.cache else ''}"
+            f"hash={self.task_hash().short_b32()}){' [C]' if self.properties.cache else ''}"
         )
 
     @property

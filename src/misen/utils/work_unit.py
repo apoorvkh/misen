@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, cast
 import cloudpickle
 
 from misen.task import Task
-from misen.utils.hashes import short_hash
 
 if TYPE_CHECKING:
     from misen.task import TaskResources
@@ -80,7 +79,7 @@ class WorkUnit:
 
     def __repr__(self) -> str:
         """Return a short debug representation for the work unit."""
-        return f"WorkUnit(hash={short_hash(self)})"
+        return f"WorkUnit(hash={self.root.task_hash().short_b32()})"
 
     def execute(self, workspace: Workspace, job_id: str) -> None:
         """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
