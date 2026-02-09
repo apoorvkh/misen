@@ -43,6 +43,7 @@ from misen.utils.sentinels import WORK_DIR
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
+    from types import FunctionType
 
     from misen.executor import Executor, Job
     from misen.utils.locks import LockLike
@@ -81,15 +82,16 @@ class Task(Generic[R]):
                     "__task_properties__. Use @task(...)."
                 )
                 raise ValueError(msg)
-            self.properties = func.__task_properties__  # ty:ignore[unresolved-attribute]
+            self.properties: TaskProperties = func.__task_properties__
         else:
             self.properties = TaskProperties(external_callable_id(func))
 
         self.resources: TaskResources = getattr(func, "__task_resources__", TaskResources())
 
-        self.func: Callable[P, R] = func
+        self.func: FunctionType = func
         self.args: P.args = args
         self.kwargs: P.kwargs = kwargs
+
         if not self.properties.cache and any(v is WORK_DIR for v in itertools.chain(self.args, self.kwargs.values())):
             msg = "WORK_DIR sentinel can only be used when Task.properties.cache == True."
             raise ValueError(msg)
@@ -307,9 +309,12 @@ class Task(Generic[R]):
             # Cache result in Workspace
 
             if self.properties.cache:
-                workspace.results[self] = result
-                # TODO: if this fails, delete ResultHash?
-                # Consider cases for cacheable Tasks, where ResultHash is stored, but Result is not
+                try:
+                    workspace.results[self] = result
+                except Exception:
+                    del workspace.results[self]
+                    workspace.clear_result_hash(task=self)
+                    raise
 
         return result
 

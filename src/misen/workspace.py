@@ -126,6 +126,12 @@ class Workspace(FromSettingsABC):
         resolved_hash = task.resolved_hash(workspace=self)
         self._result_hash_cache[resolved_hash] = result_hash
 
+    def clear_result_hash(self, task: Task) -> None:
+        """Remove the result hash for a task."""
+        del self._result_hashes[task.task_hash()]
+        resolved_hash = task.resolved_hash(workspace=self)
+        del self._result_hash_cache[resolved_hash]
+
     @property
     def results(self) -> ResultMap:
         """Return the result map interface for cached task results."""
