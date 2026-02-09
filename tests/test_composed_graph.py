@@ -1,9 +1,15 @@
+import os
+import sys
+import time
+
 from misen import Experiment, Task, task
 
 
 @task(id="add", cache=False)
 def add(a: float, b: float) -> float:
     print(f"Running add with {a}, {b}")
+    print(f"{os.environ['MY_ENV_VAR']}")
+    print(sys.executable)
     return a + b
 
 
@@ -84,3 +90,4 @@ class MyExperiment(Experiment):
 
 if __name__ == "__main__":
     MyExperiment.cli()
+    time.sleep(5)

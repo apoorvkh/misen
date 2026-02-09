@@ -27,6 +27,13 @@ from msgspec import Struct
 from typing_extensions import assert_never
 
 from misen.utils.auto import resolve_auto
+from misen.utils.functions import (
+    external_callable_id,
+    is_function_object,
+    is_lambda_function,
+    is_local_project_function,
+    lambda_task_id,
+)
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
@@ -61,12 +68,23 @@ class Task(Generic[R]):
 
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> None:
         """Initialize a Task with a function and arguments."""
-        # Metadata is attached by decorators; fall back to defaults if absent.
-        self.properties: TaskProperties = getattr(
-            func,
-            "__task_properties__",
-            TaskProperties(f"{func.__module__}.{func.__qualname__}"),  # ty:ignore[unresolved-attribute]
-        )  # TODO: handling of builtins, imports from other packages
+        if not is_function_object(func):
+            msg = "Task func must be a Python function object."
+            raise TypeError(msg)
+
+        if is_lambda_function(func):
+            self.properties = TaskProperties(lambda_task_id(func))
+        elif is_local_project_function(func):
+            if not hasattr(func, "__task_properties__"):
+                msg = (
+                    f"Local function {func.__module__}.{func.__qualname__} must define "
+                    "__task_properties__. Use @task(...)."
+                )
+                raise ValueError(msg)
+            self.properties = func.__task_properties__  # ty:ignore[unresolved-attribute]
+        else:
+            self.properties = TaskProperties(external_callable_id(func))
+
         self.resources: TaskResources = getattr(func, "__task_resources__", TaskResources())
 
         self.func: Callable[P, R] = func
