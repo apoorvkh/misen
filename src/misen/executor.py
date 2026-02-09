@@ -22,6 +22,8 @@ from misen.utils.settings import FromSettingsABC
 from misen.utils.work_unit import WorkUnit, build_work_graph
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from misen.task import Task
     from misen.utils.graph import DependencyGraph
     from misen.utils.snapshot import Snapshot
@@ -124,13 +126,17 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
 class Job(ABC):
     """Abstract job handle returned by an executor."""
 
-    __slots__ = ("work_unit",)
+    __slots__ = ("job_id", "log_path", "work_unit")
 
+    job_id: str | None
+    log_path: Path | None
     work_unit: WorkUnit
 
-    def __init__(self, work_unit: WorkUnit) -> None:
+    def __init__(self, work_unit: WorkUnit, *, job_id: str | None = None, log_path: Path | None = None) -> None:
         """Initialize the job wrapper for a work unit."""
         self.work_unit = work_unit
+        self.job_id = job_id
+        self.log_path = log_path
 
     @abstractmethod
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
@@ -152,7 +158,7 @@ class CompletedJob(Job):
 
     def __init__(self, work_unit: WorkUnit) -> None:
         """Initialize a completed job wrapper."""
-        super().__init__(work_unit=work_unit)
+        super().__init__(work_unit=work_unit, job_id=None, log_path=None)
 
     def state(self) -> Literal["done"]:
         """Return the completed state."""

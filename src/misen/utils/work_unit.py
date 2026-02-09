@@ -82,7 +82,7 @@ class WorkUnit:
         """Return a short debug representation for the work unit."""
         return f"WorkUnit(hash={short_hash(self)})"
 
-    def execute(self, workspace: Workspace) -> None:
+    def execute(self, workspace: Workspace, job_id: str) -> None:
         """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
         from misen.task import Task
 
@@ -111,11 +111,12 @@ class WorkUnit:
                 workspace=workspace,
                 compute_if_uncached=True,
                 compute_uncached_deps=False,
+                _job_id=job_id,
             )
 
-    def as_payload(self, workspace: Workspace) -> bytes:
+    def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
         """Return a serialized payload that can be executed to run the work unit."""
-        return cloudpickle.dumps(functools.partial(self.execute, workspace=workspace))
+        return cloudpickle.dumps(functools.partial(self.execute, workspace=workspace, job_id=job_id))
 
 
 def build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:

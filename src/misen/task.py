@@ -21,7 +21,6 @@ import itertools
 from contextlib import nullcontext
 from functools import cache
 from inspect import Signature, signature
-from time import time_ns
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
 from msgspec import Struct
@@ -205,6 +204,7 @@ class Task(Generic[R]):
         workspace: Workspace | Literal["auto"] = "auto",
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
+        _job_id: str | None = None,
     ) -> R:
         """Compute (or retrieve) this Task's result.
 
@@ -213,10 +213,11 @@ class Task(Generic[R]):
         Flags control which dependencies are computed:
           - compute_if_uncached: Compute if cacheable but not cached. Otherwise, this condition raises RuntimeError.
           - compute_uncached_deps: If True, (recursively) compute all uncached, cacheable dependencies.
+          - job_id: Optional identifier to associate this runtime (and nested runtimes) with an executor job.
 
         Side effects:
             - Locking: cacheable Tasks acquire a runtime lock from the Workspace. Fails fast if lock is already held.
-            - Logs: all runtime stdout/stderr/logging captured and written to the Workspace.
+            - Logs: runtime stdout/stderr/logging are captured and mirrored to both stdio and the Workspace task log.
             - ResultHash: To index result object from Workspace. Task -> ResultHash mapping is stored upon completion.
             - Result: For cacheable Tasks, the computed result is stored in Workspace.
 
@@ -242,7 +243,12 @@ class Task(Generic[R]):
 
         # Get (or recursively compute) results of dependencies
         dep_results: dict[Task, Any] = {
-            t: t.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
+            t: t.result(
+                workspace=workspace,
+                compute_if_uncached=True,
+                compute_uncached_deps=True,
+                _job_id=_job_id,
+            )
             for t in self.dependencies
         }
 
@@ -259,12 +265,11 @@ class Task(Generic[R]):
         with (
             self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
         ):
-            # Redirect all logging/stdout/stderr to Workspace
-            # Compute function using resolved arguments
-            with capture_all_output(workspace.open_log(task=self, mode="a", timestamp=time_ns())):
-                args = (resolve_argument(v) for v in self.args)
-                kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
-                result = self.func(*args, **kwargs)
+            with workspace.open_task_log(task=self, mode="a", job_id=_job_id, timestamp="current") as task_log:
+                with capture_all_output(task_log, tee_to_stdout=True):
+                    args = (resolve_argument(v) for v in self.args)
+                    kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
+                    result = self.func(*args, **kwargs)
 
             # Store `Task -> hash(result)` mapping in Workspace
             # Indicator of Task completion
@@ -300,7 +305,7 @@ class Task(Generic[R]):
         if not self.are_deps_cached(workspace=workspace):  # necessary to compute resolved_hash
             msg = f"Dependencies of {self} must be run before acquiring runtime lock"
             raise RuntimeError(msg)
-        return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).hex())
+        return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).b32())
 
     def __hash__(self) -> int:
         """Hash for using Task as a Pythonic key, based on `task_hash()`."""

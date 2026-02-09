@@ -45,9 +45,9 @@ def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
     return codecs.getincrementaldecoder(enc)(errors="replace")
 
 
-def _wrap_fd(fd: int, enc: str) -> TextIO:
+def _wrap_fd(fd: int, enc: str, *, closefd: bool = False) -> TextIO:
     """Wrap a file descriptor in a text writer."""
-    raw = io.FileIO(fd, mode="w", closefd=False)
+    raw = io.FileIO(fd, mode="w", closefd=closefd)
     buf = io.BufferedWriter(raw)
     return io.TextIOWrapper(
         buf,
@@ -64,7 +64,12 @@ def _join_until(th: threading.Thread, deadline: float) -> None:
 
 
 @contextlib.contextmanager
-def capture_all_output(target: TextIO, timeout: float = 10.0) -> Iterator[None]:  # noqa: PLR0912, PLR0915
+def capture_all_output(  # noqa: PLR0912, PLR0915
+    target: TextIO,
+    timeout: float = 10.0,
+    *,
+    tee_to_stdout: bool = False,
+) -> Iterator[None]:
     """Capture everything written to OS fds 1/2 (stdout/stderr), including C/C++ writes, and tee into `target`.
 
     Exit behavior:
@@ -106,6 +111,7 @@ def capture_all_output(target: TextIO, timeout: float = 10.0) -> Iterator[None]:
 
     saved_fd1 = os.dup(1)
     saved_fd2 = os.dup(2)
+    tee_stdout: TextIO | None = _wrap_fd(os.dup(saved_fd1), encoding, closefd=True) if tee_to_stdout else None
 
     rfd, wfd = os.pipe()
     os.set_inheritable(wfd, False)  # noqa: FBT003
@@ -122,10 +128,18 @@ def capture_all_output(target: TextIO, timeout: float = 10.0) -> Iterator[None]:
                     break
                 if not chunk:
                     break
-                _write(dec.decode(chunk), lock=lock, target=target)
-            _write(dec.decode(b"", final=True), lock=lock, target=target)
+                text = dec.decode(chunk)
+                _write(text, lock=lock, target=target)
+                if tee_stdout is not None:
+                    _write(text, lock=lock, target=tee_stdout)
+            tail = dec.decode(b"", final=True)
+            _write(tail, lock=lock, target=target)
+            if tee_stdout is not None:
+                _write(tail, lock=lock, target=tee_stdout)
         except (OSError, ValueError) as exc:
             _try(target.write, f"[misen] log capture reader stopped early: {exc}\n")
+            if tee_stdout is not None:
+                _try(tee_stdout.write, f"[misen] log capture reader stopped early: {exc}\n")
         finally:
             _try(os.close, rfd)
 
@@ -191,12 +205,21 @@ def capture_all_output(target: TextIO, timeout: float = 10.0) -> Iterator[None]:
                     break
                 if not chunk:
                     break
-                _write(dec.decode(chunk), lock=lock, target=target)
+                text = dec.decode(chunk)
+                _write(text, lock=lock, target=target)
+                if tee_stdout is not None:
+                    _write(text, lock=lock, target=tee_stdout)
 
-            _try(_write, dec.decode(b"", final=True), lock, target)
+            tail = dec.decode(b"", final=True)
+            _try(_write, tail, lock, target)
+            if tee_stdout is not None:
+                _try(_write, tail, lock, tee_stdout)
 
             # Force reader to exit; since it's daemon, we still won't hang regardless.
             _try(os.close, rfd)
             t.join(timeout=0.2)
 
         _try(target.flush)
+        if tee_stdout is not None:
+            _try(tee_stdout.flush)
+            _try(tee_stdout.close)

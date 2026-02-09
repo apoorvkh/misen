@@ -1,5 +1,7 @@
 """Hash utilities for tasks and results."""
 
+import base64
+
 from misen_hash import canonical_hash
 from typing_extensions import Self
 
@@ -11,21 +13,29 @@ class Hash(int):
 
     @classmethod
     def from_object(cls, obj: object) -> Self:
-        """Create a hash from an arbitrary object."""
+        """Create an 8-byte hash from an arbitrary object."""
+        # canonical_hash uses xxh3_64_intdigest -> returns int in [0, 2**64)
         return cls(canonical_hash(obj))
 
     def encode(self) -> bytes:
-        """Encode the hash as big-endian bytes."""
-        return self.to_bytes(8, "big", signed=False)
+        """Encode the hash as big-endian bytes (8 bytes)."""
+        v = int(self)
+        if not (0 <= v < (1 << 64)):
+            msg = f"Hash out of uint64 range: {v}"
+            raise ValueError(msg)
+        return v.to_bytes(8, "big", signed=False)
 
     @classmethod
     def decode(cls, b: bytes) -> Self:
-        """Decode a hash from big-endian bytes."""
-        return cls.from_bytes(b, "big", signed=False)
+        """Decode a hash from big-endian bytes (expects 8 bytes)."""
+        if len(b) != 8:  # noqa: PLR2004
+            msg = f"{cls}.decode expects 8 bytes, got {len(b)}"
+            raise ValueError(msg)
+        return cls(int.from_bytes(b, "big", signed=False))
 
-    def hex(self) -> str:
-        """Return the hash as a fixed-width hexadecimal string."""
-        return format(self, "016x")
+    def b32(self) -> str:
+        """Unpadded RFC 4648 base32 of this 64-bit hash. Always 13 chars."""
+        return base64.b32encode(self.encode()).decode("ascii").rstrip("=")
 
 
 class TaskHash(Hash):

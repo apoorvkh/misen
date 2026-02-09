@@ -21,16 +21,16 @@ if TYPE_CHECKING:
 class SlurmJob(Job):
     """Job implementation backed by SLURM commands."""
 
-    __slots__ = ("job_id",)
+    __slots__ = ("slurm_job_id",)
 
-    def __init__(self, work_unit: WorkUnit, job_id: str) -> None:
+    def __init__(self, work_unit: WorkUnit, job_id: str, slurm_job_id: str, log_path: Path) -> None:
         """Initialize a SLURM job wrapper."""
-        super().__init__(work_unit=work_unit)
-        self.job_id = job_id
+        super().__init__(work_unit=work_unit, job_id=job_id, log_path=log_path)
+        self.slurm_job_id = slurm_job_id
 
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
         """Return the job state based on SLURM CLI output."""
-        state = _query_slurm_state(self.job_id)
+        state = _query_slurm_state(self.slurm_job_id)
 
         if state is None:
             return "unknown"
@@ -59,7 +59,6 @@ class SlurmJob(Job):
                 return "failed"
             case "COMPLETED":
                 return "done"
-
         return "unknown"
 
 
@@ -81,9 +80,6 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, snapshot: LocalSnapshot
     ) -> SlurmJob:
         """Dispatch a work unit to SLURM via sbatch."""
-        job_dir = (workspace.get_temp_dir() / "slurm").resolve()
-        job_dir.mkdir(parents=True, exist_ok=True)
-
         sbatch_cmd: list[str] = [SBATCH, "--parsable"]
 
         resources = work_unit.resources
@@ -94,17 +90,17 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         sbatch_cmd.extend(["--mem", f"{resources.memory}G"])
         sbatch_cmd.extend(["--gpus-per-node", str(resources.gpus)])
         sbatch_cmd.extend(["--time", str(resources.time or 1)])
-        sbatch_cmd.extend(["--output", str(job_dir / "%j.out")])  # TODO: workspace provided?
 
         if dependencies:
-            dep_ids = ":".join(job.job_id for job in dependencies)
+            dep_ids = ":".join(job.slurm_job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        argv, env_overrides = snapshot.prepare(work_unit=work_unit, workspace=workspace)
-        env_overrides = [f"{k}={v}" for k, v in env_overrides.items()]
-        sbatch_cmd.extend(["--export", ",".join(["ALL", *env_overrides])])
+        job_id, argv, env_overrides = snapshot.prepare_job(work_unit=work_unit, workspace=workspace)
+        job_log_path = workspace.get_job_log_path(job_id=job_id)
+        env_overrides_list = [f"{k}={v}" for k, v in env_overrides.items()]
+        sbatch_cmd.extend(["--export", ",".join(["ALL", *env_overrides_list])])
         sbatch_cmd.extend(["--wrap", shlex.join(argv)])
-
+        sbatch_cmd.extend(["--output", str(job_log_path)])
         try:
             result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603
         except subprocess.CalledProcessError as e:
@@ -112,12 +108,11 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             raise RuntimeError(msg) from e
 
         out = result.stdout.strip()
-        job_id = out.split(";", 1)[0].split(None, 1)[0]
-        if not job_id.isdigit():
+        slurm_job_id = out.split(";", 1)[0].split(None, 1)[0]
+        if not slurm_job_id.isdigit():
             msg = f"Unexpected sbatch output: {out!r}"
             raise RuntimeError(msg)
-
-        return SlurmJob(work_unit=work_unit, job_id=job_id)
+        return SlurmJob(work_unit=work_unit, job_id=job_id, slurm_job_id=slurm_job_id, log_path=job_log_path)
 
 
 def _query_slurm_state(job_id: str) -> str | None:

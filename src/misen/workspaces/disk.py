@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
 from collections.abc import Generator, Iterator, MutableMapping
 from pathlib import Path
+from time import time_ns
 from typing import TYPE_CHECKING, Generic, Literal, TextIO, TypeVar, cast
 
 import lmdb
@@ -131,7 +133,8 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
 
     def _result_dir_path(self, key: ResultHash) -> Path:
         """Return the directory path for a result hash."""
-        return self.directory / key.hex()[:2] / key.hex()
+        _key = key.b32()
+        return self.directory / _key[:2] / _key
 
     def __contains__(self, key: object) -> bool:
         """Return True if the result directory exists."""
@@ -203,18 +206,19 @@ class DiskWorkspace(Workspace):
 
     def __post_init__(self) -> None:
         """Create directories and initialize caches."""
-        directory = Path(self.directory)
-        directory.mkdir(exist_ok=True)
+        self._directory = Path(self.directory)
+        self._directory.mkdir(exist_ok=True)
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
-        (directory / "work").mkdir(parents=True, exist_ok=True)
-        (directory / "logs").mkdir(parents=True, exist_ok=True)
+        (self._directory / "work").mkdir(parents=True, exist_ok=True)
+        (self._directory / "task_logs").mkdir(parents=True, exist_ok=True)
+        (self.get_temp_dir() / "job_logs").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
 
         super().__post_init__(
-            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](directory / "resolved_hash_cache.mdb"),
-            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](directory / "result_hash_cache.mdb"),
-            result_store=DiskResultStore(directory / "results"),
+            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self._directory / "resolved_hash_cache.mdb"),
+            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self._directory / "result_hash_cache.mdb"),
+            result_store=DiskResultStore(self._directory / "results"),
         )
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
@@ -227,24 +231,52 @@ class DiskWorkspace(Workspace):
 
     def get_temp_dir(self) -> Path:
         """Return the workspace temporary directory path."""
-        return Path(self.directory) / "tmp"
+        return Path(self._directory) / "tmp"
 
     def get_work_dir(self, task: Task) -> Path:
         """Return the working directory for a task."""
         super().get_work_dir(task=task)
-        key_hex = task.resolved_hash(workspace=self).hex()
-        d = Path(self.directory) / "work" / key_hex[:2] / f"{key_hex}"
+        key_str = task.resolved_hash(workspace=self).b32()
+        d = Path(self._directory) / "work" / key_str[:2] / f"{key_str}"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def get_log_dir(self, task: Task) -> Path:
-        """Return the log directory for a task."""
-        key_hex = task.resolved_hash(workspace=self).hex()
-        d = Path(self.directory) / "logs" / key_hex[:2] / f"{key_hex}"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    def open_log(self, task: Task, mode: Literal["a", "r"], timestamp: int | Literal["latest"] = "latest") -> TextIO:
+    def open_task_log(
+        self,
+        task: Task,
+        mode: Literal["a", "r"],
+        job_id: str | None = None,
+        timestamp: int | Literal["current", "latest"] = "latest",
+    ) -> TextIO:
         """Open a task log file in the workspace."""
-        path = self.get_log_dir(task) / f"{timestamp}.log"
-        return path.open(mode, buffering=1)
+        key_str = task.resolved_hash(workspace=self).b32()
+        log_dir = Path(self._directory) / "task_logs" / key_str[:2]
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        if timestamp == "latest":
+            file_pattern = f"{key_str}_{job_id}_*.log" if job_id is not None else f"{key_str}_*_*.log"
+
+            def pairs() -> Iterator[tuple[int, str]]:
+                for p in log_dir.glob(file_pattern):
+                    with contextlib.suppress(ValueError):
+                        _, j, t = p.stem.rsplit("_", 2)
+                        yield int(t), j
+
+            timestamp, job_id = max(pairs(), default=(-1, None))
+
+            if timestamp == -1:
+                if mode == "r":
+                    msg = f"No logs found for {key_str} (job_id={job_id!r}) in {log_dir}"
+                    raise FileNotFoundError(msg)
+                timestamp = "current"
+
+        job_id = job_id or "0"
+        timestamp = time_ns() if timestamp == "current" else timestamp
+
+        return (log_dir / f"{key_str}_{job_id}_{timestamp}.log").open(mode, buffering=1)
+
+    def get_job_log_path(self, job_id: str) -> Path:
+        """Return a job log path in the workspace temp directory."""
+        log_dir = self.get_temp_dir() / "job_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / f"{job_id}.log"

@@ -147,13 +147,13 @@ class Workspace(FromSettingsABC):
             msg = f"{task} cannot use workspace work_dir unless Task.properties.cache == True."
             raise RuntimeError(msg)
 
-    ## TODO: non-unique (maybe use hostname, pid, ?)
     @abstractmethod
-    def open_log(
+    def open_task_log(
         self,
         task: Task,
         mode: Literal["a", "r"],
-        timestamp: int | Literal["latest"] = "latest",
+        job_id: str | None = None,
+        timestamp: int | Literal["current", "latest"] = "latest",
     ) -> TextIO:
         """Open a log file for the given task.
 
@@ -161,7 +161,13 @@ class Workspace(FromSettingsABC):
             task: Task associated with the log file.
             mode: File open mode, usually "a" or "r".
             timestamp: Timestamp to select a log file, or "latest".
+            job_id: Optional job identifier to group task logs from the same executor job.
         """
+        ...
+
+    @abstractmethod
+    def get_job_log_path(self, job_id: str) -> Path:
+        """Return the path to an executor job log file."""
         ...
 
 
@@ -192,9 +198,9 @@ class ResultMap(MutableMapping[Task[Any], Any]):
     def __setitem__(self, key: Task[R], value: R, /) -> None:
         """Persist a result for the given task."""
         result_hash = key.result_hash(workspace=self.workspace)
-        with self.workspace.lock(namespace="result", key=result_hash.hex()).context(blocking=True, timeout=None):
+        with self.workspace.lock(namespace="result", key=result_hash.b32()).context(blocking=True, timeout=None):
             if result_hash not in self.result_store:
-                tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.hex()
+                tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 key.properties.serializer.save(value, tmp_dir)
                 self.result_store[result_hash] = tmp_dir

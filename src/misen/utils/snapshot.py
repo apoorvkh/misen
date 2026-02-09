@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
+import secrets
 import shutil
 import subprocess
-import uuid
 from abc import ABC, abstractmethod
 from itertools import chain
 from pathlib import Path
@@ -27,7 +28,7 @@ class Snapshot(ABC):
     __slots__ = ()
 
     @abstractmethod
-    def prepare(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[list[str], Mapping[str, str]]:
+    def prepare_job(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[str, list[str], Mapping[str, str]]:
         """Prepare execution command and environment overrides for a work unit."""
 
 
@@ -39,17 +40,18 @@ class LocalSnapshot(Snapshot):
     def __init__(self, snapshots_dir: Path) -> None:
         """Create a fresh snapshot directory and materialize environment state."""
         self.uv_bin = uv.find_uv_bin()
-        self.snapshot_dir = snapshots_dir / f"{uuid.uuid4().hex}"
+        self.snapshot_dir = snapshots_dir / f"{_token_base32(6)}"
         self.snapshot_dir.mkdir(parents=True)
         self.venv_dir = self._snapshot_venv(self.snapshot_dir / ".venv")
         self.env_files = self._snapshot_env_files(self.snapshot_dir)
 
-    def prepare(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[list[str], Mapping[str, str]]:
+    def prepare_job(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[str, list[str], Mapping[str, str]]:
         """Prepare a uv command and env overrides to execute a serialized work-unit payload."""
+        job_id = _token_base32(6)
         payload_dir = self.snapshot_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
-        payload_path = payload_dir / f"{uuid.uuid4().hex}.pkl"
-        payload_path.write_bytes(work_unit.as_payload(workspace=workspace))
+        payload_path = payload_dir / f"{_token_base32(6)}.pkl"
+        payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
         argv: list[str] = [
             self.uv_bin,
             "run",
@@ -61,7 +63,7 @@ class LocalSnapshot(Snapshot):
             str(payload_path),
         ]
         env_overrides: dict[str, str] = {"VIRTUAL_ENV": str(self.venv_dir)}
-        return argv, env_overrides
+        return job_id, argv, env_overrides
 
     def _snapshot_venv(self, venv_dir: Path) -> Path:
         """Install a frozen snapshot of current package and dependencies into a virtual env."""
@@ -100,3 +102,7 @@ class LocalSnapshot(Snapshot):
                     with contextlib.suppress(OSError):
                         dst.chmod(0o600)
         return env_files
+
+
+def _token_base32(nbytes: int) -> str:
+    return base64.b32encode(secrets.token_bytes(nbytes)).decode("ascii").rstrip("=")
