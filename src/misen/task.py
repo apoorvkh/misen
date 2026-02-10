@@ -1,8 +1,7 @@
 """This module provides utilities to create a Task from a Python function and arguments.
 
 1. `Task` is used to wrap a Python function and its arguments.
-2. `@task` controls how Tasks are identified and how results are stored (corresponding to the decorated function).
-3. `@resources` specifies the hardware resources needed to compute a function.
+2. `@task` controls how Tasks are identified, cached, and resource-parameterized.
 
 Tasks may form a dependency graph (a DAG; see `Task.dependency_graph()`), containing edges from Tasks to dependencies.
 
@@ -50,7 +49,7 @@ if TYPE_CHECKING:
     from misen.utils.locks import LockLike
     from misen.workspace import Workspace
 
-__all__ = ["Task", "resources", "task"]
+__all__ = ["Resources", "Task", "task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -65,7 +64,7 @@ class Task(Generic[R]):
             Arguments to pass to `func`. Any value that is a `Task`, or contains one in nested structures,
             is considered a dependency.
         properties: TaskProperties metadata (typically attached to `func` via `@task(...)`).
-        resources: TaskResources metadata (typically attached to `func` via `@resources(...)`).
+        resources: TaskResources metadata resolved from `@task(resources=...)`.
     """
 
     __slots__ = (
@@ -98,11 +97,11 @@ class Task(Generic[R]):
         else:
             self.properties = TaskProperties(external_callable_id(func))
 
-        self.resources: TaskResources = getattr(func, "__task_resources__", TaskResources())
-
         self.func: FunctionType = func
         self.args: P.args = args
         self.kwargs: P.kwargs = kwargs
+
+        self.resources = self.properties.resources(*self.args, **self.kwargs)
 
         dependencies: set[Task] = set()
         has_work_dir = False
@@ -440,12 +439,13 @@ class Task(Generic[R]):
 
 def task(
     *,
-    id: str | None = None,  # TODO: command to fill these in when None  # TODO: shadow  # noqa: A002
+    id: str | None = None,  # noqa: A002
     cache: bool = False,
     exclude: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
     versions: dict[str, dict[Any, int]] | None = None,
     index_by: Literal["task", "result"] = "result",
+    resources: Callable[..., Resources] | Resources | None = None,
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator to control how a Task is identified and cached.
@@ -467,6 +467,10 @@ def task(
             Determines how result is indexed (i.e. how ResultHash is computed) in Workspace:
             - "task": index by resolved task hash
             - "result": index by the result object
+        resources:
+            Optional resource resolver for each Task instance.
+            - If a callable: called with the task arguments during `Task(...)` construction.
+            - If TaskResources: used directly for every `Task(...)`.
         serializer:
             Serializer type for saving/loading results.
 
@@ -476,6 +480,11 @@ def task(
     if id is None:
         msg = "id must be provided."
         raise ValueError(msg)
+
+    if resources is None:
+        resources = Resources()
+    if isinstance(resources, Resources):
+        resources = lambda r=resources, **_: r  # noqa: E731
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         """Attach task properties to the decorated function."""
@@ -490,54 +499,24 @@ def task(
                 for value, vs in vv.items()
             },
             index_by=index_by,
+            resources=resources,
             serializer=serializer,
         )
+
         return func
 
     return decorator
 
 
-# TODO: resources as a function of arguments
+class Resources(Struct, frozen=True):
+    """Resource requirements for executing a Task."""
 
-
-def resources(
-    *,
-    time: int | None = None,
-    nodes: int = 1,
-    memory: int = 8,
-    cpus: int = 1,
-    gpus: int = 0,
-    gpu_memory: int | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Decorator to attach resource requirements to a callable.
-
-    Metadata used by Executors (e.g. SLURM submission) for scheduling concurrent Jobs.
-
-    Args:
-        time: Walltime (minutes)
-        nodes: Number of nodes
-        memory: Memory in GB
-        cpus: Number of logical cores
-        gpus: GPU count
-        gpu_memory: Memory (GB) per GPU
-
-    Returns:
-        A decorator that mutates `func` by setting `func.__task_resources__`.
-    """
-
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        """Attach resource requirements to the decorated function."""
-        func.__task_resources__ = TaskResources(  # ty:ignore[unresolved-attribute]
-            time=time,
-            nodes=nodes,
-            memory=memory,
-            cpus=cpus,
-            gpus=gpus,
-            gpu_memory=gpu_memory,
-        )
-        return func
-
-    return decorator
+    time: int | None = None
+    nodes: int = 1
+    memory: int = 8
+    cpus: int = 1
+    gpus: int = 0
+    gpu_memory: int | None = None
 
 
 class TaskProperties(Struct, frozen=True):
@@ -549,15 +528,5 @@ class TaskProperties(Struct, frozen=True):
     defaults: dict[str, Any] = {}
     versions: dict[tuple[str, ResultHash], int] = {}
     index_by: Literal["task", "result"] = "result"
+    resources: Callable[..., Resources] = lambda **_: Resources()
     serializer: type[Serializer] = DefaultSerializer
-
-
-class TaskResources(Struct):
-    """Resource requirements for executing a Task. Executor-facing metadata."""
-
-    time: int | None = None
-    nodes: int = 1
-    memory: int = 8
-    cpus: int = 1
-    gpus: int = 0
-    gpu_memory: int | None = None
