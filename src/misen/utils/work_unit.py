@@ -12,7 +12,7 @@ from misen.task import Task
 from misen.utils.nested_args import map_nested_leaves
 
 if TYPE_CHECKING:
-    from misen.task import TaskResources
+    from misen.task import Resources
     from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
 
@@ -32,7 +32,7 @@ class WorkUnit:
 
     root: Task
     graph: DependencyGraph[Task]
-    resources: TaskResources
+    resources: Resources
     dependencies: set[WorkUnit]
 
     def __init__(self, root: Task, dependencies: set[WorkUnit]) -> None:
@@ -50,10 +50,10 @@ class WorkUnit:
         self.graph = root.dependency_graph(exclude_cacheable=True)
 
         # Union of resources for all tasks in graph
-        from misen.task import TaskResources
+        from misen.task import Resources
 
-        _resource_list: list[TaskResources] = [task.resources for task in self.graph.nodes()]
-        self.resources = TaskResources(
+        _resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
+        self.resources = Resources(
             time=(
                 None
                 if any(r.time is None for r in _resource_list)

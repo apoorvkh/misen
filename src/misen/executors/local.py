@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from multiprocessing.process import BaseProcess
     from pathlib import Path
 
-    from misen.task import TaskResources
+    from misen.task import Resources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -30,11 +30,11 @@ class _ResourceBudget:
     memory: int
     gpus: int
 
-    def fits(self, resources: TaskResources) -> bool:
+    def fits(self, resources: Resources) -> bool:
         """Return True if the resources fit within the budget."""
         return resources.cpus <= self.cpus and resources.memory <= self.memory and resources.gpus <= self.gpus
 
-    def subtract(self, resources: TaskResources) -> _ResourceBudget:
+    def subtract(self, resources: Resources) -> _ResourceBudget:
         """Return a new budget with the resources subtracted."""
         return _ResourceBudget(
             cpus=self.cpus - resources.cpus,
@@ -42,7 +42,7 @@ class _ResourceBudget:
             gpus=self.gpus - resources.gpus,
         )
 
-    def add(self, resources: TaskResources) -> _ResourceBudget:
+    def add(self, resources: Resources) -> _ResourceBudget:
         """Return a new budget with the resources added."""
         return _ResourceBudget(
             cpus=self.cpus + resources.cpus,
@@ -75,7 +75,7 @@ class LocalJob(Job):
     def __init__(
         self,
         work_unit: WorkUnit,
-        resources: TaskResources,
+        resources: Resources,
         dependencies: set[LocalJob],
         argv: list[str],
         env: dict[str, str],
