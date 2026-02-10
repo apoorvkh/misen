@@ -21,6 +21,7 @@ import itertools
 from contextlib import nullcontext
 from functools import cache
 from inspect import Signature, signature
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
 from msgspec import Struct
@@ -69,8 +70,9 @@ class Task(Generic[R]):
     """
 
     __slots__ = (
-        "_cached_signature",
-        "_cached_task_hash",
+        "_frozen",
+        "_signature",
+        "_task_hash",
         "args",
         "dependencies",
         "func",
@@ -86,7 +88,7 @@ class Task(Generic[R]):
             raise TypeError(msg)
 
         if is_lambda_function(func):
-            self.properties = TaskProperties(lambda_task_id(func))
+            properties = TaskProperties(lambda_task_id(func))
         elif is_local_project_function(func):
             if not hasattr(func, "__task_properties__"):
                 msg = (
@@ -94,15 +96,16 @@ class Task(Generic[R]):
                     "__task_properties__. Use @task(...)."
                 )
                 raise ValueError(msg)
-            self.properties: TaskProperties = func.__task_properties__
+            properties: TaskProperties = func.__task_properties__
         else:
-            self.properties = TaskProperties(external_callable_id(func))
-
-        self.resources: TaskResources = getattr(func, "__task_resources__", TaskResources())
+            properties = TaskProperties(external_callable_id(func))
 
         self.func: FunctionType = func
         self.args: P.args = args
-        self.kwargs: P.kwargs = kwargs
+        self.kwargs: P.kwargs = MappingProxyType(kwargs)
+        self.properties: TaskProperties = properties
+        self.resources: TaskResources = getattr(func, "__task_resources__", TaskResources())
+        self._signature: Signature = signature(func)
 
         dependencies: set[Task] = set()
         has_work_dir = False
@@ -118,6 +121,28 @@ class Task(Generic[R]):
         if not self.properties.cache and has_work_dir:
             msg = "WORK_DIR sentinel can only be used when Task.properties.cache == True."
             raise ValueError(msg)
+
+        self.task_hash()
+        self._frozen = True
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent mutation after initialization."""
+        if getattr(self, "_frozen", False):
+            msg = f"Task is immutable. Tried to set attribute '{name}' as {value}."
+            raise AttributeError(msg)
+        object.__setattr__(self, name, value)
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Return pickle state compatibile with immutability flag."""
+        state = {name: getattr(self, name) for name in self.__slots__}
+        state["_frozen"] = False
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore pickle state while preserving immutability semantics."""
+        for name in self.__slots__:
+            setattr(self, name, state[name])
+        self._frozen = True
 
     def __repr__(self) -> str:
         """Return a short debug representation for the task."""
@@ -358,11 +383,9 @@ class Task(Generic[R]):
 
     def task_hash(self) -> TaskHash:
         """Identifier for Task, based on dependency structure."""
-        # Cached as an object attribute
-        # Task hash should not change, assuming Task object is not mutated (TODO)
-        if not hasattr(self, "_cached_task_hash"):
-            self._cached_task_hash = TaskHash.from_object((self.properties.id, self._hashed_arguments()))
-        return self._cached_task_hash
+        if not hasattr(self, "_task_hash"):
+            self._task_hash = TaskHash.from_object((self.properties.id, self._hashed_arguments()))
+        return self._task_hash
 
     def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """Identifier for Task, based on resolved arguments. Requires dependencies to be computed first."""
@@ -404,9 +427,7 @@ class Task(Generic[R]):
             Note: hash "version" of a specific (argument, value) pair can be set from `properties.versions`.
         """
         # Signature of function is used for creating {argument_name : value} map
-        if not hasattr(self, "_cached_signature"):
-            self._cached_signature = signature(self.func)
-        bound_arguments = cast("Signature", self._cached_signature).bind(*self.args, **self.kwargs)
+        bound_arguments = self._signature.bind(*self.args, **self.kwargs)
         bound_arguments.apply_defaults()
 
         def leaf_repr(value: Any) -> TaskHash | ResultHash | Any:
