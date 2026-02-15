@@ -1,4 +1,9 @@
-"""Settings utilities for configuring executors and workspaces."""
+"""Settings and singleton utilities for configurable components.
+
+This module supports ``"auto"`` construction of executor/workspace instances
+from ``misen.toml`` and memoizes struct instances by constructor kwargs for
+lightweight singleton behavior.
+"""
 
 import os
 import sys
@@ -32,14 +37,18 @@ class Settings(Struct, dict=True):
 
     @cached_property
     def toml_data(self) -> dict[str, Any]:
-        """Return parsed TOML settings data."""
+        """Return parsed TOML settings data.
+
+        Returns:
+            Parsed TOML dictionary, or empty dict if file does not exist.
+        """
         try:
             return tomllib.loads(self.file.read_bytes().decode())
         except FileNotFoundError:
             return {}
 
     def __hash__(self) -> int:
-        """Hash based on settings file identity and file stat."""
+        """Return hash based on settings file identity and stat metadata."""
         settings_file = self.file.expanduser().resolve()
         try:
             stat = settings_file.stat()
@@ -49,12 +58,12 @@ class Settings(Struct, dict=True):
 
 
 class FromSettingsMeta(msgspec.StructMeta, ABCMeta):
-    """Metaclass implementing a parameterized singleton."""
+    """Metaclass implementing a parameterized singleton cache."""
 
     _instances: ClassVar[dict[bytes, Any]] = {}
 
     def __call__(cls, **kwargs: Any) -> Any:
-        """Return a memoized instance for the given kwargs."""
+        """Return memoized instance for given constructor kwargs."""
         key = msgspec.json.encode((str(cls.__module__), str(cls.__qualname__), kwargs))
         if key not in FromSettingsMeta._instances:
             FromSettingsMeta._instances[key] = super().__call__(**kwargs)
@@ -67,23 +76,30 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
     @staticmethod
     @abstractmethod
     def _default() -> Self:
-        """Return the default instance when no settings are provided."""
+        """Return default instance when settings do not specify a type."""
 
     @staticmethod
     @abstractmethod
     def _settings_key() -> str:
-        """Return the TOML settings key for this type."""
+        """Return TOML key prefix for this type."""
 
     @classmethod
     @abstractmethod
     def _resolve_type(cls, type_name: str) -> type[Self]:
-        """Resolve a type name into a concrete subclass."""
+        """Resolve type name into concrete subclass.
+
+        Args:
+            type_name: ``"module:Class"`` string.
+
+        Returns:
+            Concrete subclass type.
+        """
         module, class_name = type_name.split(":", maxsplit=1)
         return getattr(import_module(module), class_name)
 
     @classmethod
     def resolve_type(cls, type_name: str) -> type[Self]:
-        """Resolve a type name into a concrete subclass (public wrapper)."""
+        """Resolve type name into concrete subclass (public wrapper)."""
         return cls._resolve_type(type_name)
 
     @classmethod
@@ -103,6 +119,14 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
     @classmethod
     @cache
     def _auto(cls, settings: Settings) -> Self:
+        """Internal cached auto-construction helper.
+
+        Args:
+            settings: Settings object.
+
+        Returns:
+            Resolved component instance.
+        """
         key = cls._settings_key()
 
         if f"{key}_type" not in settings.toml_data:
@@ -121,5 +145,5 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
 
 
 def _reconstruct_struct(cls: type[msgspec.Struct], serialized: bytes) -> msgspec.Struct:
-    """Reconstruct a msgspec Struct from msgpack bytes."""
+    """Reconstruct msgspec struct from msgpack bytes."""
     return msgspec.msgpack.decode(serialized, type=cls)

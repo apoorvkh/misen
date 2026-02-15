@@ -1,4 +1,8 @@
-"""Helpers for resolving auto-configured components."""
+"""Helpers for resolving ``"auto"`` workspace/executor inputs.
+
+This keeps public APIs ergonomic while centralizing the settings/default
+resolution behavior in one place.
+"""
 
 from __future__ import annotations
 
@@ -20,10 +24,14 @@ def resolve_auto(
     workspace: Workspace | Literal["auto"] | None = None,
     executor: Executor | Literal["auto"] | None = None,
 ) -> Workspace | Executor:
-    """Automatically instantiate workspace or executor from settings file or default construction.
+    """Resolve workspace or executor argument, honoring ``"auto"``.
+
+    Args:
+        workspace: Workspace instance or ``"auto"``.
+        executor: Executor instance or ``"auto"``.
 
     Returns:
-        The resolved Workspace or Executor instance.
+        Resolved workspace or executor instance.
 
     Raises:
         ValueError: If neither workspace nor executor is provided.

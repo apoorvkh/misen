@@ -1,4 +1,4 @@
-"""Runtime representation of resources assigned by an executor or scheduler."""
+"""Runtime representation of scheduler-assigned execution resources."""
 
 from __future__ import annotations
 
@@ -28,7 +28,11 @@ class AssignedResources(TypedDict):
 
 
 def get_assigned_resources_slurm() -> AssignedResources:
-    """Resolve assigned resources for SLURM jobs."""
+    """Resolve assigned resources from SLURM environment variables.
+
+    Returns:
+        Assigned resources dictionary with host, CPU, and GPU metadata.
+    """
     nodelist_keys = ("SLURM_STEP_NODELIST", "SLURM_JOB_NODELIST", "SLURM_NODELIST")
     cpu_count_keys = ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "SLURM_JOB_CPUS_PER_NODE")
     gpu_count_keys = ("SLURM_GPUS_PER_TASK", "SLURM_GPUS_ON_NODE", "SLURM_JOB_GPUS")
@@ -66,6 +70,7 @@ def get_assigned_resources_slurm() -> AssignedResources:
 
 
 def _first_nonempty(env: Mapping[str, str], keys: tuple[str, ...]) -> str | None:
+    """Return first non-empty environment value among keys."""
     for key in keys:
         if value := env.get(key):
             return value
@@ -73,11 +78,20 @@ def _first_nonempty(env: Mapping[str, str], keys: tuple[str, ...]) -> str | None
 
 
 def _first_int(value: str | None) -> int | None:
+    """Extract first integer token from string."""
     match = re.search(r"\d+", value or "")
     return None if match is None else int(match.group(0))
 
 
 def _parse_numeric_indices(value: str | None) -> tuple[int, ...]:
+    """Parse comma/space-delimited index tokens and ranges.
+
+    Args:
+        value: String like ``"0,2-4"``.
+
+    Returns:
+        Deduplicated ordered index tuple.
+    """
     if not value:
         return ()
 
@@ -102,6 +116,7 @@ def _parse_numeric_indices(value: str | None) -> tuple[int, ...]:
 
 
 def _count_uuid_tokens(value: str) -> int:
+    """Count GPU UUID-like tokens in a device-list string."""
     return sum(1 for token in re.split(r"[,\s]+", value.strip()) if token.upper().startswith(("GPU-", "MIG-")))
 
 
@@ -139,6 +154,7 @@ def _expand_slurm_nodelist(nodelist: str | None) -> tuple[str, ...]:
 
 
 def _split_top_level_csv(value: str) -> list[str]:
+    """Split CSV string while respecting bracket nesting."""
     parts: list[str] = []
     depth = 0
     start = 0

@@ -1,4 +1,15 @@
-"""Disk-backed workspace implementation."""
+"""Disk-backed workspace implementation.
+
+This backend persists:
+
+- task/resolved/result hash indices in LMDB
+- result payload directories on disk
+- lock files for cross-process coordination (NFS-compatible)
+- task/job logs for runtime observability
+
+The design prioritizes deterministic paths, write-once result materialization,
+and lock-based safety for concurrent producers.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +37,11 @@ VT = TypeVar("VT", bound=Hash)
 
 
 class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
-    """Mapping backed by a single LMDB database."""
+    """Typed key/value mapping backed by a single LMDB database.
+
+    Keys and values must be :class:`misen.utils.hashes.Hash` subclasses that
+    support ``encode``/``decode``.
+    """
 
     _key_type: type[KT]
     _value_type: type[VT]
@@ -36,7 +51,14 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     __slots__ = ("_key_type", "_value_type", "env", "lock")
 
     def __class_getitem__(cls, item: tuple[type[KT], type[VT]]) -> type[Self]:
-        """Parameterize the mapping with key/value hash types."""
+        """Parameterize mapping with concrete key/value hash types.
+
+        Args:
+            item: ``(KeyHashType, ValueHashType)`` tuple.
+
+        Returns:
+            Specialized ``LMDBMapping`` subclass.
+        """
         key_t, val_t = item
         return cast(
             "type[Self]",
@@ -64,17 +86,24 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         )
 
     def __len__(self) -> int:
-        """Return the number of entries in the database."""
+        """Return number of entries in the database."""
         return self.env.stat()["entries"]
 
     def __iter__(self) -> Generator[KT]:
-        """Iterate over keys in the database."""
+        """Iterate over typed keys in the database."""
         with self.env.begin() as txn:
             for k, _ in txn.cursor():
                 yield self._key_type.decode(k)
 
     def __contains__(self, key: object) -> bool:
-        """Return True if the key is present."""
+        """Return whether key exists.
+
+        Args:
+            key: Candidate key.
+
+        Returns:
+            ``True`` if key is of expected type and present.
+        """
         if not isinstance(key, self._key_type):
             return False
         with self.env.begin() as txn:
@@ -93,7 +122,12 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             return self._value_type.decode(v)
 
     def __setitem__(self, key: KT, value: VT) -> None:
-        """Store a key/value pair."""
+        """Store key/value pair atomically.
+
+        Args:
+            key: Hash key.
+            value: Hash value.
+        """
         _key, _value = key.encode(), value.encode()
         with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
@@ -121,23 +155,27 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
 
 
 class DiskResultStore(MutableMapping[ResultHash, Path]):
-    """Mapping of result hashes to directories on disk."""
+    """Mapping of result hashes to payload directories on disk."""
 
     __slots__ = ("directory",)
 
     directory: Path
 
     def __init__(self, directory: Path) -> None:
-        """Initialize the result store in the given directory."""
+        """Initialize result store rooted at ``directory``.
+
+        Args:
+            directory: Root directory for sharded result payloads.
+        """
         self.directory = directory
 
     def _result_dir_path(self, key: ResultHash) -> Path:
-        """Return the directory path for a result hash."""
+        """Return canonical sharded directory for a result hash."""
         _key = key.b32()
         return self.directory / _key[:2] / _key
 
     def __contains__(self, key: object) -> bool:
-        """Return True if the result directory exists."""
+        """Return whether result payload exists on disk."""
         return isinstance(key, ResultHash) and self._result_dir_path(key).exists()
 
     def __getitem__(self, key: ResultHash) -> Path:
@@ -152,7 +190,12 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         return result_dir_path
 
     def __setitem__(self, key: ResultHash, value: Path) -> None:
-        """Store a result directory, if missing."""
+        """Persist result directory if key is not already present.
+
+        Args:
+            key: Result hash.
+            value: Temporary directory containing serialized payload.
+        """
         result_dir_path = self._result_dir_path(key)
         if not result_dir_path.exists():
             result_dir_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,11 +227,16 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
                 yield ResultHash(stem, base=16)
 
     def __len__(self) -> int:
-        """Return the number of results stored."""
+        """Return number of stored results."""
         return sum(1 for _ in self)
 
     @staticmethod
     def _fsync_dir(path: Path) -> None:
+        """Fsync a directory descriptor.
+
+        Args:
+            path: Directory path.
+        """
         fd = os.open(path, os.O_DIRECTORY)
         try:
             os.fsync(fd)
@@ -200,12 +248,12 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
 
 
 class DiskWorkspace(Workspace):
-    """Workspace implementation backed by directories on disk."""
+    """Workspace implementation backed by local/NFS-accessible directories."""
 
     directory: str = ".misen"
 
     def __post_init__(self) -> None:
-        """Create directories and initialize caches."""
+        """Create directory layout and initialize persistent caches."""
         self._directory = Path(self.directory)
         self._directory.mkdir(exist_ok=True)
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
@@ -222,7 +270,15 @@ class DiskWorkspace(Workspace):
         )
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
-        """Return an NFS-backed lock for task or result namespaces."""
+        """Return NFS-backed lock for task/result namespaces.
+
+        Args:
+            namespace: Lock namespace.
+            key: Lock key.
+
+        Returns:
+            Lock-like object.
+        """
         return NFSLock(
             lockfile=(self.get_temp_dir() / f"{namespace}_locks" / f"{key}.lock"),
             lifetime=30,
@@ -230,11 +286,18 @@ class DiskWorkspace(Workspace):
         )
 
     def get_temp_dir(self) -> Path:
-        """Return the workspace temporary directory path."""
+        """Return workspace temporary directory path."""
         return Path(self._directory) / "tmp"
 
     def get_work_dir(self, task: Task) -> Path:
-        """Return the working directory for a task."""
+        """Return stable working directory for a task.
+
+        Args:
+            task: Task requesting a work directory.
+
+        Returns:
+            Per-task directory path keyed by resolved hash.
+        """
         super().get_work_dir(task=task)
         key_str = task.resolved_hash(workspace=self).b32()
         d = Path(self._directory) / "work" / key_str[:2] / f"{key_str}"
@@ -248,7 +311,20 @@ class DiskWorkspace(Workspace):
         job_id: str | None = None,
         timestamp: int | Literal["current", "latest"] = "latest",
     ) -> TextIO:
-        """Open a task log file in the workspace."""
+        """Open a task log file in the workspace.
+
+        Args:
+            task: Task whose logs to open.
+            mode: File mode (``"a"`` or ``"r"``).
+            job_id: Optional job identifier to filter/select log stream.
+            timestamp: Timestamp selection strategy or explicit timestamp.
+
+        Returns:
+            Open text file object.
+
+        Raises:
+            FileNotFoundError: If ``mode="r"`` and no matching logs exist.
+        """
         key_str = task.resolved_hash(workspace=self).b32()
         log_dir = Path(self._directory) / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)

@@ -1,13 +1,15 @@
-"""Executor interface for submitting a Task's DAG to an execution backend (e.g. a local process or SLURM).
+"""Executor abstraction and job lifecycle model.
 
-Convention: Graph edge A -> B indicates that A depends on B.
+Design overview:
 
-Overview:
-  1. The Task DAG is decomposed into WorkUnits (connected subgraphs), anchored at DAG roots and cacheable Tasks.
-     Each WorkUnit contains the reachable subgraph of non-cacheable Tasks (truncated at downstream cacheable Tasks).
-  2. WorkUnits are submitted to the backend for execution in dependency order.
-     WorkUnits should assume their dependencies' roots are already cached (and can simply be retrieved) at runtime.
-  3. Jobs are yielded and can be used to monitor the execution status of each WorkUnit.
+1. ``Task`` graphs are decomposed into cache-bounded :class:`misen.utils.work_unit.WorkUnit`
+   nodes. This keeps scheduling granularity aligned with caching boundaries.
+2. Executors submit work units in dependency order, but may run independent
+   units concurrently according to backend policy (local scheduler, SLURM, etc.).
+3. Backends expose lightweight :class:`Job` handles for polling and waiting.
+
+This module intentionally does not encode backend-specific logic. Concrete
+behavior lives in :mod:`misen.executors.local` and :mod:`misen.executors.slurm`.
 """
 
 from __future__ import annotations
@@ -37,13 +39,26 @@ SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
 
 
 class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
-    """Abstract interface for implementing an Executor for a specific backend."""
+    """Abstract execution backend interface.
+
+    Subclasses provide snapshot creation and dispatch behavior; shared submission
+    logic here handles dependency-aware graph traversal and completed-work short
+    circuiting.
+    """
 
     def submit(self, tasks: set[Task], workspace: Workspace) -> DependencyGraph[CompletedJob | JobT]:
-        """Submit a set of tasks for execution. Tasks will be run by backend respecting dependency order.
+        """Submit tasks for execution on this backend.
+
+        The method first converts task DAGs into a work-unit DAG. Work units
+        already marked done in the workspace are represented as
+        :class:`CompletedJob` placeholders and skipped.
+
+        Args:
+            tasks: Root tasks requested by the caller.
+            workspace: Workspace used for cache inspection and artifact access.
 
         Returns:
-            A dependency graph of backend-specific Job handles corresponding to WorkUnits.
+            Dependency graph of job handles keyed to work-unit topology.
         """
         work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
 
@@ -72,16 +87,23 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
 
     @abstractmethod
     def _make_snapshot(self, workspace: Workspace) -> SnapshotT:
-        """Create (or reuse) an execution snapshot for this submit call."""
+        """Create or reuse an execution snapshot for a submit call.
+
+        Args:
+            workspace: Workspace used to materialize snapshot artifacts.
+
+        Returns:
+            Backend-specific snapshot object.
+        """
 
     @abstractmethod
     def _dispatch(
         self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace, snapshot: SnapshotT
     ) -> JobT:
-        """Dispatch a WorkUnit to the backend. Will run `work_unit.execute(workspace)` after dependencies are completed.
+        """Dispatch a work unit once dependency jobs are satisfied.
 
         Args:
-            work_unit: The WorkUnit to dispatch.
+            work_unit: Work unit to execute.
             dependencies: Job handles corresponding to prerequisite (incomplete) WorkUnits.
             workspace: Workspace providing Task artifact caching and retrieval.
             snapshot: Executor-specific environment snapshot.
@@ -94,19 +116,26 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
 
     @staticmethod
     def _settings_key() -> str:
-        """Return the TOML settings key for executor configuration."""
+        """Return TOML key used for executor auto-configuration."""
         return "executor"
 
     @staticmethod
     def _default() -> Executor:
-        """Return the default executor implementation."""
+        """Return default executor implementation."""
         from misen.executors.local import LocalExecutor
 
         return LocalExecutor()
 
     @classmethod
     def _resolve_type(cls, type_name: str | ExecutorType) -> type[Executor]:
-        """Resolve an executor type name to a class."""
+        """Resolve an executor type string to a concrete class.
+
+        Args:
+            type_name: Built-in short name or ``module:Class`` string.
+
+        Returns:
+            Resolved executor class.
+        """
         if type_name in get_args(ExecutorType):
             type_name = cast("ExecutorType", type_name)
             match type_name:
@@ -124,7 +153,7 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
 
 
 class Job(ABC):
-    """Abstract job handle returned by an executor."""
+    """Abstract job handle returned by an executor backend."""
 
     __slots__ = ("job_id", "log_path", "work_unit")
 
@@ -133,17 +162,27 @@ class Job(ABC):
     work_unit: WorkUnit
 
     def __init__(self, work_unit: WorkUnit, job_id: str | None = None, log_path: Path | None = None) -> None:
-        """Initialize the job wrapper for a work unit."""
+        """Initialize a job handle.
+
+        Args:
+            work_unit: Work unit associated with this job.
+            job_id: Backend-facing job identifier, if available.
+            log_path: Optional path to job-level logs.
+        """
         self.work_unit = work_unit
         self.job_id = job_id
         self.log_path = log_path
 
     @abstractmethod
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
-        """Return the current job state."""
+        """Return the current backend job state."""
 
     def wait(self, poll_s: float = 0.5) -> None:
-        """Block until the job reaches a terminal state."""
+        """Block until job reaches a terminal state.
+
+        Args:
+            poll_s: Polling interval in seconds.
+        """
         while True:
             if self.state() in ("done", "failed"):
                 return
@@ -151,14 +190,18 @@ class Job(ABC):
 
 
 class CompletedJob(Job):
-    """Job placeholder for already-completed work units."""
+    """Placeholder job for work units that are already complete in cache."""
 
     __slots__ = ()
 
     def __init__(self, work_unit: WorkUnit) -> None:
-        """Initialize a completed job wrapper."""
+        """Initialize a completed-job wrapper.
+
+        Args:
+            work_unit: Completed work unit.
+        """
         super().__init__(work_unit=work_unit, job_id=None, log_path=None)
 
     def state(self) -> Literal["done"]:
-        """Return the completed state."""
+        """Return terminal ``done`` state."""
         return "done"

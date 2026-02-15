@@ -1,4 +1,4 @@
-"""Capture stdout/stderr output to a target stream."""
+"""Capture process stdout/stderr (including C-level writes) into a stream."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ T = TypeVar("T")
 
 
 def _try(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T | None:
-    """Call a function and swallow any exception."""
+    """Call function and return ``None`` on any exception."""
     try:
         return fn(*args, **kwargs)
     except Exception:  # noqa: BLE001
@@ -27,12 +27,12 @@ def _try(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T | None:
 
 
 def _fflush_all() -> None:
-    """Flush all C stdio buffers."""
+    """Flush all C stdio buffers for current process."""
     ctypes.CDLL(None).fflush(None)
 
 
 def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
-    """Write text to a target stream with locking and flush."""
+    """Write text to target stream under lock and flush."""
     if not text:
         return
     with lock:
@@ -41,12 +41,12 @@ def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
 
 
 def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
-    """Create an incremental decoder for the given encoding."""
+    """Create incremental decoder for the given encoding."""
     return codecs.getincrementaldecoder(enc)(errors="replace")
 
 
 def _wrap_fd(fd: int, enc: str, *, closefd: bool = False) -> TextIO:
-    """Wrap a file descriptor in a text writer."""
+    """Wrap file descriptor in a line-buffered text writer."""
     raw = io.FileIO(fd, mode="w", closefd=closefd)
     buf = io.BufferedWriter(raw)
     return io.TextIOWrapper(
@@ -59,7 +59,7 @@ def _wrap_fd(fd: int, enc: str, *, closefd: bool = False) -> TextIO:
 
 
 def _join_until(th: threading.Thread, deadline: float) -> None:
-    """Join a thread until a deadline."""
+    """Join thread until deadline timestamp."""
     th.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
@@ -70,12 +70,23 @@ def capture_all_output(  # noqa: PLR0912, PLR0915
     *,
     tee_to_stdout: bool = False,
 ) -> Iterator[None]:
-    """Capture everything written to OS fds 1/2 (stdout/stderr), including C/C++ writes, and tee into `target`.
+    """Capture writes to fds 1/2 and tee them into ``target``.
 
     Exit behavior:
       - waits up to `timeout` seconds to drain cleanly
       - if not drained, best-effort drains what's currently available and then stops
         (never hangs, may lose trailing output from stray inheritors).
+
+    Args:
+        target: Destination stream for captured output.
+        timeout: Drain timeout in seconds on context exit.
+        tee_to_stdout: Whether to mirror captured output to original stdout.
+
+    Yields:
+        ``None`` while output redirection is active.
+
+    Raises:
+        ValueError: If ``target`` points to stdout/stderr and would recurse.
     """
     encoding: str = getattr(sys.stdout, "encoding", None) or "utf-8"
 
@@ -118,7 +129,7 @@ def capture_all_output(  # noqa: PLR0912, PLR0915
     os.set_inheritable(rfd, False)  # noqa: FBT003
 
     def reader() -> None:
-        """Read pipe output and write decoded text to the target."""
+        """Read redirected pipe bytes and write decoded text to targets."""
         dec = _make_decoder(encoding)
         try:
             while True:

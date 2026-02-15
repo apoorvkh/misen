@@ -1,4 +1,15 @@
-"""Local subprocess-based executor implementation."""
+"""Local subprocess-based executor implementation.
+
+Concurrency model:
+
+- Submit-time builds a dependency graph of work units.
+- A background scheduler thread launches ready jobs when resources fit.
+- Resource budgeting is explicit (CPUs, memory, GPUs) and prevents oversubscription.
+- Dependency failures propagate to downstream pending jobs.
+
+Execution still uses the generic executor contract (snapshot + dispatch + job
+handles), but this module performs all scheduling in-process.
+"""
 
 from __future__ import annotations
 
@@ -28,16 +39,36 @@ JobState = Literal["pending", "running", "done", "failed", "unknown"]
 
 @dataclass(frozen=True)
 class _ResourceBudget:
-    """Simple resource budget tracker for local execution."""
+    """Available resource budget for local scheduling.
+
+    Values are interpreted as hard scheduler limits for concurrent job
+    placement.
+    """
 
     cpus: int
     memory: int
     gpus: int
 
     def fits(self, resources: Resources) -> bool:
+        """Return whether requested resources fit in current budget.
+
+        Args:
+            resources: Requested work-unit resources.
+
+        Returns:
+            ``True`` if all requested dimensions are within budget.
+        """
         return resources.cpus <= self.cpus and resources.memory <= self.memory and resources.gpus <= self.gpus
 
     def subtract(self, resources: Resources) -> _ResourceBudget:
+        """Return new budget after reserving resources.
+
+        Args:
+            resources: Resources to reserve.
+
+        Returns:
+            Updated budget with resources subtracted.
+        """
         return _ResourceBudget(
             cpus=self.cpus - resources.cpus,
             memory=self.memory - resources.memory,
@@ -45,6 +76,14 @@ class _ResourceBudget:
         )
 
     def add(self, resources: Resources) -> _ResourceBudget:
+        """Return new budget after releasing resources.
+
+        Args:
+            resources: Resources to release.
+
+        Returns:
+            Updated budget with resources added.
+        """
         return _ResourceBudget(
             cpus=self.cpus + resources.cpus,
             memory=self.memory + resources.memory,
@@ -53,7 +92,7 @@ class _ResourceBudget:
 
 
 class LocalJob(Job):
-    """Job implementation backed by a subprocess.Popen."""
+    """Job handle backed by a ``subprocess.Popen`` child process."""
 
     __slots__ = (
         "_lock",
@@ -76,6 +115,15 @@ class LocalJob(Job):
         snapshot: LocalSnapshot,
         workspace: Workspace,
     ) -> None:
+        """Initialize a local job.
+
+        Args:
+            work_unit: Work unit to run.
+            resources: Resource request for this work unit.
+            dependencies: Upstream local jobs that must complete first.
+            snapshot: Snapshot used to prepare execution command/env.
+            workspace: Workspace for logs/artifacts.
+        """
         super().__init__(work_unit=work_unit, job_id=None, log_path=None)
         self.resources = resources
         self.dependencies = dependencies
@@ -91,7 +139,7 @@ class LocalJob(Job):
         self._lock = threading.Lock()
 
     def state(self) -> JobState:
-        """Return the current process state."""
+        """Return current process-backed job state."""
         with self._lock:
             if self._state in {"done", "failed"}:
                 return self._state
@@ -111,13 +159,19 @@ class LocalJob(Job):
             return self._state
 
     def set_process(self, process: subprocess.Popen[bytes], log_fp: FileIO) -> None:
-        """Set the underlying process + log handle and mark running."""
+        """Attach process/log handles and mark job as running.
+
+        Args:
+            process: Spawned child process.
+            log_fp: Open file descriptor receiving combined stdout/stderr.
+        """
         with self._lock:
             self._process = process
             self._log_fp = log_fp
             self._state = "running"
 
     def mark_failed(self) -> None:
+        """Mark pending/running job as failed and close log handles."""
         with self._lock:
             self._close_log_fp_locked()
             self._state = "failed"
@@ -133,9 +187,24 @@ class LocalJob(Job):
 
 
 class _LocalScheduler:
-    """Background scheduler for managing local job execution."""
+    """Background scheduler for local jobs.
+
+    The scheduler owns:
+
+    - pending/running queues
+    - resource allocation state
+    - dependency readiness checks
+
+    It is intentionally isolated from :class:`LocalExecutor` so executor
+    dispatch stays lightweight and thread-safe.
+    """
 
     def __init__(self, total_budget: _ResourceBudget) -> None:
+        """Start scheduler loop with a fixed global resource budget.
+
+        Args:
+            total_budget: Maximum resources available for all concurrent jobs.
+        """
         self._available_budget = total_budget
         self._available_cpu_indices = list(range(total_budget.cpus))
         self._available_gpu_indices = list(range(total_budget.gpus))
@@ -151,6 +220,11 @@ class _LocalScheduler:
         self._thread.start()
 
     def submit(self, job: LocalJob) -> None:
+        """Queue a job for scheduling.
+
+        Args:
+            job: Local job to enqueue.
+        """
         with self._condition:
             self._pending.append(job)
             self._condition.notify_all()
@@ -171,6 +245,11 @@ class _LocalScheduler:
                     self._condition.wait(timeout=0.1)
 
     def _collect_finished_locked(self) -> None:
+        """Reclaim resources from terminal jobs.
+
+        Notes:
+            Caller must hold ``self._condition``.
+        """
         finished = [job for job in self._running if job.state() in {"done", "failed"}]
         if not finished:
             return
@@ -183,6 +262,11 @@ class _LocalScheduler:
         self._condition.notify_all()
 
     def _start_ready_jobs_locked(self) -> bool:
+        """Start pending jobs that are dependency-ready and resource-feasible.
+
+        Returns:
+            ``True`` if at least one pending job changed state.
+        """
         started_any = False
 
         for job in list(self._pending):
@@ -214,6 +298,14 @@ class _LocalScheduler:
         return started_any
 
     def _deps_ready(self, job: LocalJob) -> bool:
+        """Return whether all job dependencies are complete and successful.
+
+        Args:
+            job: Candidate pending job.
+
+        Returns:
+            ``True`` when dependencies are done; ``False`` otherwise.
+        """
         states = {dep.state() for dep in job.dependencies}
         if "failed" in states:
             self._mark_pending_failed(job)
@@ -221,6 +313,13 @@ class _LocalScheduler:
         return not states or states == {"done"}
 
     def _launch_job(self, job: LocalJob, cpu_indices: tuple[int, ...], gpu_indices: tuple[int, ...]) -> None:
+        """Spawn the child process for one job and bind resource metadata.
+
+        Args:
+            job: Job to launch.
+            cpu_indices: Physical CPU indices reserved for this job.
+            gpu_indices: Physical GPU indices reserved for this job.
+        """
         assigned_resources = AssignedResources(
             hostnames=self._hostnames,
             cpu_indices=cpu_indices,
@@ -254,6 +353,14 @@ class _LocalScheduler:
         job.assigned_gpu_indices = gpu_indices
 
     def _reserve_indices(self, resources: Resources) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+        """Reserve CPU/GPU indices for a resource request.
+
+        Args:
+            resources: Requested resources.
+
+        Returns:
+            Tuple of reserved CPU/GPU indices, or ``None`` if unavailable.
+        """
         cpu_indices = self._allocate_indices(self._available_cpu_indices, resources.cpus)
         if cpu_indices is None:
             return None
@@ -264,6 +371,7 @@ class _LocalScheduler:
         return cpu_indices, gpu_indices
 
     def _release_allocations(self, cpu_indices: tuple[int, ...], gpu_indices: tuple[int, ...]) -> None:
+        """Return previously reserved CPU/GPU indices to the free pools."""
         self._release_indices(self._available_cpu_indices, cpu_indices)
         self._release_indices(self._available_gpu_indices, gpu_indices)
 
@@ -273,6 +381,13 @@ class _LocalScheduler:
         cpu_indices: tuple[int, ...] = (),
         gpu_indices: tuple[int, ...] = (),
     ) -> None:
+        """Mark a pending job failed and release any provisional allocations.
+
+        Args:
+            job: Job to fail.
+            cpu_indices: CPU indices to release.
+            gpu_indices: GPU indices to release.
+        """
         self._release_allocations(cpu_indices, gpu_indices)
         job.mark_failed()
         if job in self._pending:
@@ -297,13 +412,14 @@ class _LocalScheduler:
 
 
 class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
-    """Executor implementation that runs tasks locally."""
+    """Executor that runs work units as local subprocesses."""
 
     max_cpus: int | None = None
     max_memory: int | None = None
     max_gpus: int | None = None
 
     def __post_init__(self) -> None:
+        """Initialize scheduler with configured or inferred resource limits."""
         self._resource_budget = _ResourceBudget(
             cpus=self.max_cpus or (os.cpu_count() or 1),
             memory=self.max_memory or _infer_total_memory_gb(),
@@ -314,9 +430,18 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
     @classmethod
     @cache
     def _cached_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
+        """Return cached local snapshot instance for a snapshots directory."""
         return LocalSnapshot(snapshots_dir=snapshots_dir)
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
+        """Create or reuse snapshot for this submit call.
+
+        Args:
+            workspace: Workspace used to locate snapshot directory.
+
+        Returns:
+            Snapshot instance.
+        """
         snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
         return LocalExecutor._cached_snapshot(snapshots_dir=snapshots_dir)
 
@@ -327,6 +452,20 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
         workspace: Workspace,
         snapshot: LocalSnapshot,
     ) -> LocalJob:
+        """Queue a work unit in the local scheduler.
+
+        Args:
+            work_unit: Work unit to execute.
+            dependencies: Upstream jobs that must complete first.
+            workspace: Workspace for logs/artifacts.
+            snapshot: Snapshot used to generate payload command.
+
+        Returns:
+            Job handle representing scheduled work.
+
+        Raises:
+            ValueError: If requested resources exceed configured local limits.
+        """
         resources = work_unit.resources
         if not self._resource_budget.fits(resources):
             msg = (
@@ -349,7 +488,11 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
 
 
 def _infer_total_memory_gb() -> int:
-    """Infer total system memory in gigabytes."""
+    """Infer total physical memory in GiB.
+
+    Returns:
+        Inferred memory, with a conservative fallback of ``1``.
+    """
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
         page_count = os.sysconf("SC_PHYS_PAGES")

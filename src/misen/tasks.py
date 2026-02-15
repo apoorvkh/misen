@@ -1,17 +1,18 @@
-"""This module provides utilities to create a Task from a Python function and arguments.
+"""Task abstraction: lazy DAG nodes with deterministic identity.
 
-1. `Task` is used to wrap a Python function and its arguments.
-2. `@task` controls how Tasks are identified, cached, and resource-parameterized.
+Core design decisions:
 
-Tasks may form a dependency graph (a DAG; see `Task.dependency_graph()`), containing edges from Tasks to dependencies.
+- ``Task`` wraps a Python function plus bound arguments and is itself immutable.
+- Any nested ``Task`` argument is treated as a dependency, producing a DAG.
+- Identity is split into:
+  - ``task_hash``: structural identity (before dependency resolution)
+  - ``resolved_hash``: identity after dependency results are known
+  - ``result_hash``: identity of function result
+- Runtime execution is workspace-driven so caching and locking semantics are
+  consistent across local and distributed executors.
 
-Tasks can be submitted (`Task.submit()`) to the Executor for scheduled execution of the dependency graph.
-
-`Task.result()` will run necessary and specified computations and return the result, retrieving and writing artifacts
-(runtime logs, result, etc.) to the Workspace as needed. We typically prefer to `submit()` before calling `result()`.
-
-Tasks can be identified by: `task_hash()` (by dependency graph) or `resolved_hash()` (by resolved arguments).
-Results are identified by `result_hash()`. Any task which computes the same result should have the same `result_hash()`.
+``Task.result()`` supports eager local execution; ``Task.submit()`` routes to an
+executor for dependency-aware concurrent scheduling.
 """
 
 from __future__ import annotations
@@ -54,12 +55,12 @@ class Task(FrozenMixin, Generic[R]):
     """A Task is a lazy wrapper for a function and its arguments.
 
     Attributes:
-        func: The underlying callable.
-        args / kwargs:
-            Arguments to pass to `func`. Any value that is a `Task`, or contains one in nested structures,
-            is considered a dependency.
-        properties: TaskProperties metadata (typically attached to `func` via `@task(...)`).
-        resources: Resources metadata resolved from `@task(resources=...)`.
+        func: Underlying callable.
+        args: Positional arguments for ``func``.
+        kwargs: Keyword arguments for ``func``.
+        properties: Metadata resolved from :func:`misen.task_properties.task`.
+        resources: Runtime resource request derived from bound arguments.
+        dependencies: Immediate dependent tasks discovered from nested args.
     """
 
     __slots__ = (
@@ -74,7 +75,16 @@ class Task(FrozenMixin, Generic[R]):
     )
 
     def __init__(self, func: Callable[P, R], *args: P.args, **kwargs: P.kwargs) -> None:
-        """Initialize a Task with a function and arguments."""
+        """Initialize a task from a Python function and bound arguments.
+
+        Args:
+            func: Python function object to wrap.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
+
+        Raises:
+            TypeError: If ``func`` is not a Python function object.
+        """
         if not is_function_object(func):
             msg = "Task func must be a Python function object."
             raise TypeError(msg)
@@ -92,7 +102,7 @@ class Task(FrozenMixin, Generic[R]):
         self.freeze()
 
     def __repr__(self) -> str:
-        """Return a short debug representation for the task."""
+        """Return compact debug representation."""
         return (
             f"Task({self.func.__module__}.{self.func.__qualname__}, "
             f"hash={self.task_hash().short_b32()}){' [C]' if self.properties.cache else ''}"
@@ -100,24 +110,56 @@ class Task(FrozenMixin, Generic[R]):
 
     @property
     def T(self) -> R:  # noqa: N802
-        """Cast Task to its result type. Useful for type checking compliance when passing Tasks as dependencies."""
+        """Type-only cast to the task's result type.
+
+        Returns:
+            ``self`` cast to ``R`` for static typing in dependency wiring.
+        """
         return cast("R", self)
 
     def is_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
-        """Check if Task's result is cached in the Workspace."""
+        """Return whether this task has a cached result.
+
+        Args:
+            workspace: Workspace instance or ``"auto"``.
+
+        Returns:
+            ``True`` if this task is cacheable and present in workspace cache.
+        """
         workspace = resolve_auto(workspace=workspace)
         return self.properties.cache and self in workspace.results
 
     def uncached_deps(self, workspace: Workspace | Literal["auto"] = "auto") -> Iterator[Task]:
-        """Yields immediate dependencies that are cacheable but not cached."""
+        """Yield immediate dependencies that are cacheable but currently missing.
+
+        Args:
+            workspace: Workspace instance or ``"auto"``.
+
+        Yields:
+            Immediate dependency tasks that need computation.
+        """
         return filter(lambda t: t.properties.cache and not t.is_cached(workspace=workspace), self.dependencies)
 
     def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
-        """Are all immediate dependencies cached?"""
+        """Return whether all immediate cacheable dependencies are available.
+
+        Args:
+            workspace: Workspace instance or ``"auto"``.
+
+        Returns:
+            ``True`` when no immediate cacheable dependency is missing.
+        """
         return not any(self.uncached_deps(workspace=workspace))  # "if there are not any uncached deps"
 
     def done(self, workspace: Workspace) -> bool:
-        """If Workspace contains a ResultHash for this Task (expected regardless of result caching)."""
+        """Return whether task completion metadata exists in the workspace.
+
+        Args:
+            workspace: Workspace to query.
+
+        Returns:
+            ``True`` if a result hash has been recorded.
+        """
         try:
             workspace.get_result_hash(task=self)
         except RuntimeError:
@@ -125,7 +167,14 @@ class Task(FrozenMixin, Generic[R]):
         return True
 
     def is_running(self, workspace: Workspace) -> bool:
-        """Indicator if this Task is currently running in given Workspace."""
+        """Return whether this task currently holds its runtime lock.
+
+        Args:
+            workspace: Workspace providing task locks.
+
+        Returns:
+            ``True`` when the cacheable task runtime lock is held.
+        """
         # For cacheable Tasks, if runtime lock (managed by Workspace) is unavailable.
         # Non-cacheable Tasks always return False, since they can freely run concurrently.
         # TODO: non-cacheable case?
@@ -146,21 +195,25 @@ class Task(FrozenMixin, Generic[R]):
     ) -> R:
         """Compute (or retrieve) this Task's result.
 
-        Do minimal computation necessary to return the result. Looks up cached results whenever possible.
-
-        Flags control which dependencies are computed:
-          - compute_if_uncached: Compute if cacheable but not cached. Otherwise, this condition raises RuntimeError.
-          - compute_uncached_deps: If True, (recursively) compute all uncached, cacheable dependencies.
-          - job_id: Optional identifier to associate this runtime (and nested runtimes) with an executor job.
-
-        Side effects:
-            - Locking: cacheable Tasks acquire a runtime lock from the Workspace. Fails fast if lock is already held.
-            - Logs: runtime stdout/stderr/logging are captured and mirrored to both stdio and the Workspace task log.
-            - ResultHash: To index result object from Workspace. Task -> ResultHash mapping is stored upon completion.
-            - Result: For cacheable Tasks, the computed result is stored in Workspace.
+        Args:
+            workspace: Workspace instance or ``"auto"``.
+            compute_if_uncached: Whether to compute this task when its cached
+                value is missing.
+            compute_uncached_deps: Whether to recursively compute uncached
+                dependencies.
+            _job_id: Optional executor job identifier for log grouping.
+            _assigned_resources: Optional runtime resources injected by executor.
 
         Returns:
-            Result object of function(*args, **kwargs)
+            Result of ``func(*resolved_args, **resolved_kwargs)``.
+
+        Raises:
+            RuntimeError: If required cache entries are missing and computation
+                flags do not permit executing missing nodes.
+
+        Notes:
+            Cacheable tasks acquire a workspace runtime lock before execution.
+            Logs are captured to task logs and optionally mirrored to stdout.
         """
         workspace = resolve_auto(workspace=workspace)
 
@@ -213,22 +266,38 @@ class Task(FrozenMixin, Generic[R]):
         workspace: Workspace | Literal["auto"] = "auto",
         executor: Executor | Literal["auto"] = "auto",
     ) -> DependencyGraph[Job]:
-        """Submit this Task (and its dependency graph) to an Executor for deferred execution.
+        """Submit this task DAG to an executor for deferred execution.
+
+        Args:
+            workspace: Workspace instance or ``"auto"``.
+            executor: Executor instance or ``"auto"``.
 
         Returns:
-            DependencyGraph of Jobs (for monitoring progress of chunked units of work).
+            Dependency graph of job handles for scheduled work units.
         """
         executor = resolve_auto(executor=executor)
         workspace = resolve_auto(workspace=workspace)
         return executor.submit(tasks={self}, workspace=workspace)
 
     def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
-        """Returns work directory from Workspace."""
+        """Return this task's working directory.
+
+        Args:
+            workspace: Workspace instance or ``"auto"``.
+
+        Returns:
+            Per-task workspace directory.
+        """
         workspace = resolve_auto(workspace=workspace)
         return workspace.get_work_dir(task=self)
 
     def task_hash(self) -> TaskHash:
-        """Identifier for Task, based on dependency structure."""
+        """Return structural hash for this task.
+
+        Returns:
+            Hash derived from task id plus argument structure, where dependency
+            leaves are represented by dependency task hashes.
+        """
         if hasattr(self, "_task_hash"):
             return self._task_hash
         hashed_args = hash_task_arguments(
@@ -240,7 +309,15 @@ class Task(FrozenMixin, Generic[R]):
         return TaskHash.from_object((self.properties.id, hashed_args))
 
     def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
-        """Identifier for Task, based on resolved arguments. Requires dependencies to be computed first."""
+        """Return resolved-input hash for this task.
+
+        Args:
+            workspace: Workspace used to resolve dependency result hashes.
+
+        Returns:
+            Hash derived from task id plus argument values after dependency
+            resolution.
+        """
         resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
 
         if resolved_hash is None:
@@ -260,24 +337,40 @@ class Task(FrozenMixin, Generic[R]):
     def result_hash(self, workspace: Workspace) -> ResultHash:
         """Return the stored ResultHash for this task.
 
+        Args:
+            workspace: Workspace holding task completion metadata.
+
+        Returns:
+            Result hash recorded for this task execution.
+
         Raises:
             RuntimeError: if the task has not been computed / recorded in the workspace.
         """
         return workspace.get_result_hash(self)
 
     def _runtime_lock(self, workspace: Workspace) -> LockLike:
-        """Workspace manages a lock for each Task, expected to be held during runtime."""
+        """Return workspace runtime lock for this task.
+
+        Args:
+            workspace: Workspace lock provider.
+
+        Returns:
+            Lock-like object keyed by resolved hash.
+
+        Raises:
+            RuntimeError: If dependencies are not cached yet.
+        """
         if not self.are_deps_cached(workspace=workspace):  # necessary to compute resolved_hash
             msg = f"Dependencies of {self} must be run before acquiring runtime lock"
             raise RuntimeError(msg)
         return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).b32())
 
     def __hash__(self) -> int:
-        """Hash for using Task as a Pythonic key, based on `task_hash()`."""
+        """Return Python hash based on :meth:`task_hash`."""
         return hash(int(self.task_hash()))
 
     def __eq__(self, other: object) -> bool:
-        """Task equality is based on `task_hash()`."""
+        """Return equality based on :meth:`task_hash`."""
         if not isinstance(other, Task):
             return NotImplemented
         return self.task_hash() == other.task_hash()

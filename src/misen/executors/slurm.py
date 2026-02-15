@@ -1,4 +1,12 @@
-"""SLURM-backed executor implementation."""
+"""SLURM-backed executor implementation.
+
+This backend delegates scheduling and dependency coordination to SLURM itself.
+The misen side is responsible for:
+
+- packaging work-unit payloads via snapshots
+- translating resource requests into ``sbatch`` arguments
+- mapping SLURM state strings to generic job states
+"""
 
 from __future__ import annotations
 
@@ -19,17 +27,28 @@ if TYPE_CHECKING:
 
 
 class SlurmJob(Job):
-    """Job implementation backed by SLURM commands."""
+    """Job handle that maps SLURM command output to misen job states."""
 
     __slots__ = ("slurm_job_id",)
 
     def __init__(self, work_unit: WorkUnit, job_id: str, slurm_job_id: str, log_path: Path) -> None:
-        """Initialize a SLURM job wrapper."""
+        """Initialize SLURM job wrapper.
+
+        Args:
+            work_unit: Work unit associated with this job.
+            job_id: Misen-internal job identifier.
+            slurm_job_id: Job id returned by ``sbatch``.
+            log_path: Path where SLURM writes stdout/stderr.
+        """
         super().__init__(work_unit=work_unit, job_id=job_id, log_path=log_path)
         self.slurm_job_id = slurm_job_id
 
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
-        """Return the job state based on SLURM CLI output."""
+        """Return current state by querying SLURM CLI.
+
+        Returns:
+            Generic job state derived from SLURM job state strings.
+        """
         state = _query_slurm_state(self.slurm_job_id)
 
         if state is None:
@@ -63,23 +82,43 @@ class SlurmJob(Job):
 
 
 class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
-    """Executor implementation that submits work to SLURM."""
+    """Executor that submits work units to SLURM via ``sbatch``."""
 
     @classmethod
     @cache
     def _cached_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
-        """Return a cached local snapshot instance for this executor class."""
+        """Return cached snapshot instance for a snapshot directory."""
         return LocalSnapshot(snapshots_dir=snapshots_dir)
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Create or reuse the SLURM executor snapshot."""
+        """Create or reuse snapshot for SLURM submission.
+
+        Args:
+            workspace: Workspace used to locate snapshots directory.
+
+        Returns:
+            Snapshot instance.
+        """
         snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
         return SlurmExecutor._cached_snapshot(snapshots_dir=snapshots_dir)
 
     def _dispatch(
         self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, snapshot: LocalSnapshot
     ) -> SlurmJob:
-        """Dispatch a work unit to SLURM via sbatch."""
+        """Dispatch one work unit to SLURM.
+
+        Args:
+            work_unit: Work unit to submit.
+            dependencies: Upstream SLURM jobs that must finish successfully.
+            workspace: Workspace for logs/artifacts.
+            snapshot: Snapshot used to build payload command.
+
+        Returns:
+            Submitted SLURM job handle.
+
+        Raises:
+            RuntimeError: If ``sbatch`` fails or returns unexpected output.
+        """
         work_unit_repr = work_unit.root.task_hash().short_b32()
         resources = work_unit.resources
 
@@ -128,7 +167,14 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
 
 
 def _query_slurm_state(job_id: str) -> str | None:
-    """Fetch the SLURM job state using squeue or sacct."""
+    """Fetch SLURM state using ``squeue`` with ``sacct`` fallback.
+
+    Args:
+        job_id: SLURM job id.
+
+    Returns:
+        Raw SLURM state string, or ``None`` if unavailable.
+    """
     squeue = subprocess.run([SQUEUE, "-h", "-j", job_id, "-o", "%T"], check=False, capture_output=True, text=True)  # noqa: S603
     if squeue.returncode == 0:
         output = squeue.stdout.strip()
@@ -144,6 +190,17 @@ def _query_slurm_state(job_id: str) -> str | None:
 
 
 def _resolve_slurm_cmd(name: str) -> str:
+    """Resolve required SLURM CLI command from ``PATH``.
+
+    Args:
+        name: Command name, for example ``"sbatch"``.
+
+    Returns:
+        Absolute command path.
+
+    Raises:
+        FileNotFoundError: If command is not available.
+    """
     path = shutil.which(name)
     if path is None:
         msg = f"Required command {name!r} not found on PATH. Is SLURM installed/loaded on this system?"

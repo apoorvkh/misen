@@ -1,4 +1,14 @@
-"""Public package exports for misen."""
+"""Public API surface for the ``misen`` task-execution framework.
+
+This package is intentionally split into a small set of composable concepts:
+
+- ``Task``: Lazy computation node with deterministic identity.
+- ``Workspace``: Artifact store and lock manager for caching/runtime state.
+- ``Executor``: Backend that schedules and runs cache-bounded units of work.
+- ``Experiment``: Declarative container of named tasks.
+
+Most user code only needs the symbols re-exported here.
+"""
 
 from misen.executor import Executor
 from misen.experiment import Experiment

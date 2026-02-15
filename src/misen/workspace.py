@@ -1,4 +1,14 @@
-"""Workspace interfaces for caching task results."""
+"""Workspace abstraction for caching, locking, and runtime artifacts.
+
+``Workspace`` isolates storage concerns from execution concerns:
+
+- Executors schedule and run work.
+- Tasks describe computation and identity.
+- Workspace persists hashes/results and coordinates cross-process locks.
+
+This separation keeps execution backends modular while preserving one
+consistent cache/locking contract.
+"""
 
 from __future__ import annotations
 
@@ -28,23 +38,34 @@ WorkspaceType: TypeAlias = Literal["disk"]
 
 
 class Workspace(FromSettingsABC):
-    """Base class for workspace storage backends."""
+    """Base class for workspace storage backends.
+
+    Concrete implementations provide persistence (for hashes/results), lock
+    implementations, and task/job log storage.
+    """
 
     @staticmethod
     def _settings_key() -> str:
-        """Return the TOML settings key for workspace configuration."""
+        """Return TOML key used for workspace auto-configuration."""
         return "workspace"
 
     @staticmethod
     def _default() -> Workspace:
-        """Return the default workspace implementation."""
+        """Return default workspace implementation."""
         from misen.workspaces.disk import DiskWorkspace
 
         return DiskWorkspace()
 
     @classmethod
     def _resolve_type(cls, type_name: str | WorkspaceType) -> type[Workspace]:
-        """Resolve a workspace type name to a class."""
+        """Resolve workspace type name to a concrete class.
+
+        Args:
+            type_name: Built-in short name or ``module:Class`` string.
+
+        Returns:
+            Resolved workspace class.
+        """
         if type_name in get_args(WorkspaceType):
             type_name = cast("WorkspaceType", type_name)
             match type_name:
@@ -79,7 +100,14 @@ class Workspace(FromSettingsABC):
         self._result_map = ResultMap(result_store=result_store, workspace=self)
 
     def get_resolved_hash(self, task: Task) -> ResolvedTaskHash | None:
-        """Return the resolved hash for a task if cached."""
+        """Return cached resolved hash for a task, if available.
+
+        Args:
+            task: Task to query.
+
+        Returns:
+            Resolved hash if present, otherwise ``None``.
+        """
         task_hash = task.task_hash()
         # fast (session-only) cache
         resolved_hash = self._resolved_hashes.get(task_hash)
@@ -93,7 +121,12 @@ class Workspace(FromSettingsABC):
         return resolved_hash
 
     def set_resolved_hash(self, task: Task, resolved_hash: ResolvedTaskHash) -> None:
-        """Persist the resolved hash for a task."""
+        """Persist resolved hash for a task.
+
+        Args:
+            task: Task to update.
+            resolved_hash: Resolved task hash value.
+        """
         task_hash = task.task_hash()
         self._resolved_hashes[task_hash] = resolved_hash
         self._resolved_hash_cache[task_hash] = resolved_hash
@@ -120,33 +153,60 @@ class Workspace(FromSettingsABC):
         return result_hash
 
     def set_result_hash(self, task: Task, result_hash: ResultHash) -> None:
-        """Persist the result hash for a task."""
+        """Persist result hash for a task.
+
+        Args:
+            task: Task to update.
+            result_hash: Result hash value.
+        """
         self._result_hashes[task.task_hash()] = result_hash
         resolved_hash = task.resolved_hash(workspace=self)
         self._result_hash_cache[resolved_hash] = result_hash
 
     def clear_result_hash(self, task: Task) -> None:
-        """Remove the result hash for a task."""
+        """Remove persisted result-hash mapping for a task.
+
+        Args:
+            task: Task whose mapping should be removed.
+        """
         del self._result_hashes[task.task_hash()]
         resolved_hash = task.resolved_hash(workspace=self)
         del self._result_hash_cache[resolved_hash]
 
     @property
     def results(self) -> ResultMap:
-        """Return the result map interface for cached task results."""
+        """Return mapping-like interface for cached task results."""
         return self._result_map
 
     @abstractmethod
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
-        """Return a lock for task or result namespaces."""
+        """Return a lock object for task/result namespaces.
+
+        Args:
+            namespace: Lock namespace (task runtime or result materialization).
+            key: Lock key unique within the namespace.
+
+        Returns:
+            Lock-like object with acquire/release/context APIs.
+        """
 
     @abstractmethod
     def get_temp_dir(self) -> Path:
-        """Return a temporary directory for workspace operations."""
+        """Return temporary directory used for workspace operations."""
 
     @abstractmethod
     def get_work_dir(self, task: Task) -> Path:
-        """Return a working directory for cacheable tasks. E.g. to cache intermediate results during task runtime."""
+        """Return a per-task working directory for cacheable tasks.
+
+        Args:
+            task: Task requesting its working directory.
+
+        Returns:
+            Filesystem path for runtime intermediate artifacts.
+
+        Raises:
+            RuntimeError: If the task is non-cacheable.
+        """
         if not task.properties.cache:
             msg = f"{task} cannot use workspace work_dir unless Task.properties.cache == True."
             raise RuntimeError(msg)
@@ -169,14 +229,29 @@ class Workspace(FromSettingsABC):
         """
 
     def get_job_log(self, job_id: str, work_unit: WorkUnit) -> Path:
-        """Return a path for a job's logs."""
+        """Return job-log path for a work unit.
+
+        Args:
+            job_id: Backend job identifier.
+            work_unit: Work unit associated with the job.
+
+        Returns:
+            Path where the backend should write combined job logs.
+        """
         log_dir = self.get_temp_dir() / "job_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         work_unit_prefix = work_unit.root.task_hash().b32()
         return log_dir / f"{work_unit_prefix}_{job_id}.log"
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
-        """Return an iterator over job log paths corresonding to given WorkUnit."""
+        """Return iterator over job-log files.
+
+        Args:
+            work_unit: Optional filter for a specific work unit.
+
+        Returns:
+            Iterator of log-file paths.
+        """
         log_dir = self.get_temp_dir() / "job_logs"
         if work_unit is None:
             return log_dir.iterdir()
@@ -189,12 +264,21 @@ R = TypeVar("R")
 
 
 class ResultMap(MutableMapping[Task[Any], Any]):
-    """Mapping interface for task results stored in a workspace."""
+    """Mapping-like interface over workspace result storage.
+
+    Keys are :class:`misen.tasks.Task` objects and values are deserialized
+    result payloads.
+    """
 
     __slots__ = ("result_store", "workspace")
 
     def __init__(self, result_store: MutableMapping[ResultHash, Path], workspace: Workspace) -> None:
-        """Initialize the result map wrapper."""
+        """Initialize result-map wrapper.
+
+        Args:
+            result_store: Mapping from result hash to payload directory.
+            workspace: Owning workspace.
+        """
         self.result_store = result_store
         self.workspace = workspace
 
@@ -213,7 +297,12 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         return key.properties.serializer.load(directory)
 
     def __setitem__(self, key: Task[R], value: R, /) -> None:
-        """Persist a result for the given task."""
+        """Persist result for the given task.
+
+        Args:
+            key: Task key.
+            value: Computed result value.
+        """
         result_hash = key.result_hash(workspace=self.workspace)
         with self.workspace.lock(namespace="result", key=result_hash.b32()).context(blocking=True, timeout=None):
             if result_hash not in self.result_store:
@@ -238,11 +327,16 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             raise KeyError(msg) from e
 
     def __iter__(self) -> Iterator[Task]:
-        """Iterate over tasks in the mapping."""
+        """Iterate over task keys.
+
+        Notes:
+            This is not implemented because the persistent store is keyed by
+            result hashes rather than by task identity.
+        """
         raise NotImplementedError
 
     def __len__(self) -> int:
-        """Return the number of cached results."""
+        """Return number of cached results."""
         return len(self.result_store)
 
     def __contains__(self, key: object, /) -> bool:

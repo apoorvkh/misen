@@ -1,4 +1,12 @@
-"""Internal helpers for task argument traversal, hashing, and runtime execution."""
+"""Internal task helpers for traversal, hashing, and execution.
+
+This module centralizes the mechanics used by :class:`misen.tasks.Task`:
+
+- walking nested structures to find/map leaves
+- canonical task-argument hashing
+- runtime argument resolution (dependency results + sentinels)
+- output capture and result persistence
+"""
 
 from __future__ import annotations
 
@@ -36,7 +44,14 @@ R = TypeVar("R")
 
 
 def iter_nested_leaves(value: Any) -> Iterator[Any]:
-    """Yield scalar leaves from supported nested containers."""
+    """Yield scalar leaves from supported nested containers.
+
+    Args:
+        value: Arbitrary nested structure.
+
+    Yields:
+        Non-container leaves.
+    """
     if type(value) is dict:
         for key, nested in value.items():
             yield from iter_nested_leaves(key)
@@ -57,7 +72,15 @@ def iter_nested_leaves(value: Any) -> Iterator[Any]:
 
 
 def map_nested_leaves(value: Any, leaf_mapper: Callable[[Any], Any]) -> Any:
-    """Recursively map scalar leaves while preserving common container structure."""
+    """Map scalar leaves recursively while preserving container structure.
+
+    Args:
+        value: Arbitrary nested structure.
+        leaf_mapper: Function applied to non-container leaves.
+
+    Returns:
+        Structure mirroring ``value`` with mapped leaves.
+    """
     if type(value) is dict:
         mapped_items = [
             (
@@ -87,7 +110,24 @@ def hash_task_arguments(
     hash_task_by_result: bool = False,
     workspace: Workspace | Literal["auto"] = "auto",
 ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
-    """Return canonical hashes for bound task arguments."""
+    """Return canonical hashes for bound task arguments.
+
+    Args:
+        signature: Function signature used for canonical binding/defaults.
+        args: Positional arguments.
+        kwargs: Keyword arguments.
+        properties: Task metadata controlling include/exclude/default/version.
+        hash_task_by_result: Whether dependent tasks are represented by
+            ``result_hash`` instead of ``task_hash``.
+        workspace: Workspace used when hashing dependencies by result.
+
+    Returns:
+        Mapping ``argument_name -> (hash_value, version)``.
+
+    Raises:
+        RuntimeError: If sentinel values appear in arguments during hash
+            calculation.
+    """
     from misen.tasks import Task
 
     bound_arguments = signature.bind(*args, **kwargs)
@@ -126,7 +166,15 @@ def hash_task_arguments(
 
 
 def collect_task_dependencies(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> frozenset[Task[Any]]:
-    """Collect task dependencies nested in args/kwargs values."""
+    """Collect task dependencies nested within args/kwargs.
+
+    Args:
+        args: Positional argument tuple.
+        kwargs: Keyword argument mapping.
+
+    Returns:
+        Frozen set of discovered dependent tasks.
+    """
     from misen.tasks import Task
 
     values = itertools.chain(args, kwargs.values())
@@ -141,7 +189,18 @@ def execute_task(
     assigned_resources: AssignedResources | None,
     job_id: str | None,
 ) -> R:
-    """Execute task function under log capture and return result."""
+    """Execute task function under log capture.
+
+    Args:
+        task: Task to execute.
+        workspace: Workspace for logs/artifacts.
+        dependency_results: Precomputed dependency results.
+        assigned_resources: Optional runtime resources for sentinel injection.
+        job_id: Optional job id for task-log grouping.
+
+    Returns:
+        Task result value.
+    """
     argument_resolver = _build_argument_resolver(
         task=task,
         workspace=workspace,
@@ -157,7 +216,13 @@ def execute_task(
 
 
 def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:
-    """Store task result metadata and cached payload when enabled."""
+    """Persist task result metadata and optional cached payload.
+
+    Args:
+        task: Executed task.
+        result: Computed result.
+        workspace: Workspace to update.
+    """
     match task.properties.index_by:
         case "task":
             index = task.resolved_hash(workspace=workspace)
@@ -183,11 +248,23 @@ def _build_argument_resolver(
     dependency_results: dict[Task[Any], Any],
     assigned_resources: AssignedResources | None,
 ) -> Callable[[Any], Any]:
-    """Return a function that resolves task/sentinel leaves before execution."""
+    """Build argument resolver for runtime task execution.
+
+    Args:
+        task: Task being executed.
+        workspace: Workspace providing work-dir and cached dependency access.
+        dependency_results: Immediate dependency result map.
+        assigned_resources: Optional runtime resource assignment.
+
+    Returns:
+        Callable that maps arbitrary nested argument structures into runtime
+        values (dependency outputs, work dirs, assigned resources).
+    """
     from misen.tasks import Task
 
     @cache
     def work_dir() -> Path:
+        """Return cache-backed or temporary work directory for this execution."""
         if task.properties.cache:
             return workspace.get_work_dir(task=task)
 

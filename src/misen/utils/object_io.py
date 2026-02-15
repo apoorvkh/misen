@@ -1,4 +1,4 @@
-"""Serialization helpers for task results."""
+"""Result serialization interfaces used by task caching."""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -22,30 +22,52 @@ class Serializer(ABC, Generic[T]):
     @staticmethod
     @abstractmethod
     def save(obj: T, directory: Path) -> None:
-        """Serialize an object into the given directory."""
+        """Serialize object into directory.
+
+        Args:
+            obj: Object to serialize.
+            directory: Target directory.
+        """
 
     @staticmethod
     @abstractmethod
     def load(directory: Path) -> T:
-        """Deserialize an object from the given directory."""
+        """Deserialize object from directory.
+
+        Args:
+            directory: Source directory.
+
+        Returns:
+            Deserialized object.
+        """
 
 
 # TODO: add cases for other formats
 
 
 class DefaultSerializer(Serializer[Any]):
-    """Serialize objects using dill."""
+    """Serializer that stores values as ``data.dill``."""
 
     __slots__ = ()
 
     @staticmethod
     def save(obj: Any, directory: Path) -> None:
-        """Serialize an object to a dill file in the directory."""
+        """Serialize object to ``data.dill`` in directory."""
         (directory / "data.dill").write_bytes(dill.dumps(obj))
 
     @staticmethod
     def load(directory: Path) -> Any:
-        """Deserialize an object from a dill file in the directory."""
+        """Deserialize object from ``data.dill``.
+
+        Args:
+            directory: Directory containing serialized object.
+
+        Returns:
+            Deserialized object.
+
+        Raises:
+            ValueError: If dill payload cannot be unpickled.
+        """
         try:
             return dill.loads((directory / "data.dill").read_bytes())  # noqa: S301
         except UnpicklingError:

@@ -35,6 +35,10 @@ class FrozenMixin:
     def __setattr__(self, name: str, value: Any) -> None:
         """Set an attribute, enforcing immutability when frozen.
 
+        Args:
+            name: Attribute name.
+            value: Attribute value.
+
         Raises:
             AttributeError: If the object is frozen and a mutation is attempted.
         """
@@ -48,6 +52,9 @@ class FrozenMixin:
 
         The state includes all slot-backed attributes across the MRO (including
         `_frozen`). Slot attributes that have not been set are omitted.
+
+        Returns:
+            Pickle state dictionary.
         """
         return {
             name: getattr(self, name)
@@ -60,8 +67,11 @@ class FrozenMixin:
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickle state while avoiding immutability checks.
 
-        This method sets attributes via `object.__setattr__` to ensure unpickling
-        does not trigger `__setattr__`'s frozen guard.
+        This method sets attributes via ``object.__setattr__`` so unpickling
+        does not trigger the frozen guard in :meth:`__setattr__`.
+
+        Args:
+            state: Pickle state dictionary.
         """
         for name, value in state.items():
             object.__setattr__(self, name, value)

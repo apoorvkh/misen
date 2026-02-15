@@ -1,4 +1,4 @@
-"""Experiment CLI helpers."""
+"""Helpers for generating experiment CLIs with ``tyro``."""
 
 from __future__ import annotations
 
@@ -12,7 +12,11 @@ from misen.utils.settings import DEFAULT_SETTINGS_FILE, Settings
 
 
 def experiment_cli(experiment_cls: type[Any]) -> None:
-    """Parse CLI args and run the requested experiment command."""
+    """Parse CLI args and execute experiment command.
+
+    Args:
+        experiment_cls: Experiment class type to expose on CLI.
+    """
     from misen.executor import Executor, ExecutorType
     from misen.workspace import Workspace, WorkspaceType
 

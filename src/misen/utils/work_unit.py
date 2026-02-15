@@ -1,4 +1,10 @@
-"""Work unit definition as a cache-bounded DAG of Tasks."""
+"""Work-unit decomposition for cache-aware scheduling.
+
+``WorkUnit`` is the bridge between task-level semantics and executor-level
+concurrency. A work unit groups a connected subgraph of non-cacheable tasks and
+cuts edges at cacheable boundaries, so backends can schedule coarse units while
+preserving cache semantics.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +28,7 @@ if TYPE_CHECKING:
 
 
 class WorkUnit:
-    """A WorkUnit is a cache-bounded unit of execution.
+    """Cache-bounded unit of execution derived from a task DAG.
 
     It corresponds to the sub-DAG of non-cacheable tasks reachable from `root`, truncated at downstream cacheable tasks
     (which become separate WorkUnits, i.e. `dependencies`).
@@ -75,15 +81,15 @@ class WorkUnit:
         )
 
     def __hash__(self) -> int:
-        """WorkUnits have a 1:1 correspondence with the `root` Task, so we can defer to hash(`root`)."""
+        """Return hash keyed by root task identity."""
         return hash(self.root)
 
     def __eq__(self, other: object) -> bool:
-        """Return True if the other WorkUnit has the same root task."""
+        """Return equality based on root task identity."""
         return isinstance(other, WorkUnit) and self.root == other.root
 
     def __repr__(self) -> str:
-        """Return a short debug representation for the work unit."""
+        """Return compact debug representation."""
         return f"WorkUnit(hash={self.root.task_hash().short_b32()})"
 
     def execute(
@@ -92,14 +98,21 @@ class WorkUnit:
         job_id: str,
         assigned_resources_getter: Callable[[], AssignedResources | None],
     ) -> None:
-        """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
+        """Execute tasks in dependency order inside this work unit.
+
+        Args:
+            workspace: Workspace used for cache/log/storage operations.
+            job_id: Job identifier propagated into task log naming.
+            assigned_resources_getter: Callable returning runtime-assigned
+                resources for sentinel injection.
+        """
         from misen.tasks import Task
 
         task_results: dict[Task, Any] = {}
         assigned_resources = assigned_resources_getter()
 
         def resolve_arg(arg: Any) -> Any:
-            """Resolve non-cacheable Task dependencies from cached runtime results."""
+            """Resolve non-cacheable task leaves from in-memory runtime results."""
 
             def resolve_leaf(leaf: Any) -> Any:
                 if isinstance(leaf, Task) and not leaf.properties.cache:
@@ -135,7 +148,17 @@ class WorkUnit:
         job_id: str,
         assigned_resources_getter: Callable[[], AssignedResources | None],
     ) -> bytes:
-        """Return a serialized payload that can be executed to run the work unit."""
+        """Serialize executable payload for backend dispatch.
+
+        Args:
+            workspace: Workspace instance captured in payload closure.
+            job_id: Job id captured for logging.
+            assigned_resources_getter: Resource getter captured for runtime
+                sentinel resolution.
+
+        Returns:
+            Cloudpickle payload bytes.
+        """
         return cloudpickle.dumps(
             functools.partial(
                 self.execute,
@@ -147,7 +170,14 @@ class WorkUnit:
 
 
 def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
-    """Given a set of tasks, transform their Task DAG into a DAG of WorkUnits."""
+    """Transform task DAG into work-unit DAG.
+
+    Args:
+        tasks: Root tasks requested for execution.
+
+    Returns:
+        Dependency graph of work units ready for executor submission.
+    """
     # Task dependency graph: an edge from A to B means A depends on B
     union = Task((lambda *_: None), *tasks)
     task_graph: DependencyGraph[Task] = _build_task_dependency_graph(task=union)
@@ -173,7 +203,20 @@ def _build_task_dependency_graph(
     exclude_cached: bool = False,
     workspace: Workspace | None = None,
 ) -> DependencyGraph[Task[Any]]:
-    """Build a dependency graph rooted at the provided task-like object."""
+    """Build dependency graph rooted at a task-like object.
+
+    Args:
+        task: Root task-like node.
+        exclude_cacheable: Whether to skip cacheable dependency nodes.
+        exclude_cached: Whether to skip dependencies already cached in workspace.
+        workspace: Workspace required when ``exclude_cached=True``.
+
+    Returns:
+        Dependency graph with edges ``task -> dependency``.
+
+    Raises:
+        ValueError: If ``exclude_cached=True`` and workspace is not provided.
+    """
     if exclude_cacheable:
 
         @cache

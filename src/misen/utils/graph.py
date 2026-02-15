@@ -1,4 +1,8 @@
-"""Dependency graph utilities."""
+"""Dependency graph utilities built on top of ``rustworkx``.
+
+Edge convention used across misen: ``A -> B`` means "A depends on B".
+Evaluation order is therefore reverse topological order.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ T = TypeVar("T")
 
 
 class DependencyGraph(Generic[T]):
-    """Directed acyclic graph wrapper with dependency semantics."""
+    """Directed-acyclic graph wrapper with dependency semantics."""
 
     __slots__ = ("_g",)
 
@@ -84,16 +88,24 @@ class DependencyGraph(Generic[T]):
     ## Custom functions
 
     def evaluation_order(self) -> list[int]:
-        """Return node indices in dependency evaluation order."""
+        """Return node indices in dependency evaluation order.
+
+        Returns:
+            Node indices ordered so dependencies appear before dependents.
+        """
         return list(rx.topological_sort(self._g))[::-1]
 
     def __iter__(self) -> Iterator[T]:
-        """Yield node values in evaluation order."""
+        """Yield node values in dependency evaluation order."""
         for i in self.evaluation_order():
             yield self._g[i]
 
     def coarsen_to_anchors(self, anchors: list[int]) -> None:
-        """Remove non-anchor nodes while retaining edges between anchors."""
+        """Remove non-anchor nodes while retaining induced anchor edges.
+
+        Args:
+            anchors: Node indices to keep.
+        """
         for node in reversed(self._g.node_indices()):
             if node not in anchors:
                 self._g.remove_node_retain_edges(node)

@@ -1,4 +1,12 @@
-"""Utilities to capture execution environment snapshots."""
+"""Execution environment snapshots used by executors.
+
+Snapshots capture enough environment state to run work units reproducibly in
+subprocesses or on remote schedulers:
+
+- isolated virtual environment
+- copied env files
+- serialized callable payloads
+"""
 
 from __future__ import annotations
 
@@ -35,16 +43,30 @@ class Snapshot(ABC):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
-        """Prepare execution command and env vars for a work unit. Returns (job_id, argv, env_overrides)."""
+        """Prepare command and environment for one work unit.
+
+        Args:
+            work_unit: Work unit to execute.
+            workspace: Workspace for payload/log paths.
+            assigned_resources_getter: Callable returning runtime resources for
+                sentinel injection.
+
+        Returns:
+            Tuple ``(job_id, argv, env_overrides)``.
+        """
 
 
 class LocalSnapshot(Snapshot):
-    """Environment snapshot materialized on local disk for task execution."""
+    """Environment snapshot materialized locally for task execution."""
 
     __slots__ = ("env_files", "snapshot_dir", "uv_bin", "venv_dir")
 
     def __init__(self, snapshots_dir: Path) -> None:
-        """Create a fresh snapshot directory and materialize environment state."""
+        """Create snapshot directory and materialize environment state.
+
+        Args:
+            snapshots_dir: Parent directory where snapshots are stored.
+        """
         self.uv_bin = uv.find_uv_bin()
         self.snapshot_dir = snapshots_dir / f"{_token_base32(6)}"
         self.snapshot_dir.mkdir(parents=True)
@@ -57,7 +79,16 @@ class LocalSnapshot(Snapshot):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
-        """Prepare a uv command and env overrides to execute a serialized work-unit payload."""
+        """Prepare command/env overrides to execute serialized payload.
+
+        Args:
+            work_unit: Work unit to execute.
+            workspace: Workspace for payload/log paths.
+            assigned_resources_getter: Callable returning runtime resources.
+
+        Returns:
+            Tuple ``(job_id, argv, env_overrides)``.
+        """
         job_id = _token_base32(6)
         payload_dir = self.snapshot_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
@@ -81,7 +112,17 @@ class LocalSnapshot(Snapshot):
         return job_id, argv, env_overrides
 
     def _snapshot_venv(self, venv_dir: Path) -> Path:
-        """Install a frozen snapshot of current package and dependencies into a virtual env."""
+        """Install a frozen dependency snapshot into virtual environment.
+
+        Args:
+            venv_dir: Target virtual environment directory.
+
+        Returns:
+            ``venv_dir``.
+
+        Raises:
+            RuntimeError: If ``uv sync`` fails.
+        """
         env = os.environ.copy() | {"UV_PROJECT_ENVIRONMENT": str(venv_dir)}
 
         # `uv sync --no-editable` would use cached, but outdated, copies of (local) workspace members
@@ -104,7 +145,14 @@ class LocalSnapshot(Snapshot):
         return venv_dir
 
     def _snapshot_env_files(self, snapshot_dir: Path) -> list[Path]:
-        """Make a frozen copy of `.env` and `.env.local` files."""
+        """Copy supported env files into snapshot directory.
+
+        Args:
+            snapshot_dir: Snapshot root directory.
+
+        Returns:
+            List of copied env-file paths.
+        """
         env_files = []
         for f in (".env", ".env.local"):
             src = Path.cwd() / f
@@ -120,4 +168,12 @@ class LocalSnapshot(Snapshot):
 
 
 def _token_base32(nbytes: int) -> str:
+    """Return URL/file-safe random base32 token.
+
+    Args:
+        nbytes: Number of random bytes before encoding.
+
+    Returns:
+        Base32 token without padding.
+    """
     return base64.b32encode(secrets.token_bytes(nbytes)).decode("ascii").rstrip("=")

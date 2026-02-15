@@ -1,4 +1,15 @@
-"""Public task decorator and metadata models."""
+"""Task metadata model and public ``@task`` decorator.
+
+This module defines the stable metadata contract used by :class:`misen.tasks.Task`:
+
+- identity and cache behavior (`id`, `exclude`, `defaults`, `versions`)
+- storage strategy (`index_by`, `serializer`)
+- execution requirements (`resources`)
+
+The decorator writes this metadata onto function objects, while
+``resolve_task_properties`` normalizes behavior for local functions, lambdas,
+and external callables.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +37,20 @@ R = TypeVar("R")
 
 
 class TaskProperties(Struct, frozen=True):
-    """Immutable metadata describing how a Task should be identified and cached."""
+    """Immutable metadata describing task identity, execution, and caching.
+
+    Attributes:
+        id: Stable task identifier.
+        cache: Whether task results are persisted in the workspace.
+        exclude: Argument names excluded from hash identity.
+        defaults: Argument values treated as "default" and omitted from hashes
+            when matching.
+        versions: Per-argument hash-version overrides used to invalidate stale
+            semantics without renaming the task.
+        index_by: How result hashes are derived.
+        resources: Callable that computes resource requirements from arguments.
+        serializer: Serializer type used to persist cached results.
+    """
 
     id: str
     cache: bool = False
@@ -39,7 +63,16 @@ class TaskProperties(Struct, frozen=True):
 
 
 class Resources(Struct, frozen=True):
-    """Resource requirements for executing a Task."""
+    """Resource requirements for executing a task.
+
+    Attributes:
+        time: Requested wall-clock time in minutes, if known.
+        nodes: Number of nodes required.
+        memory: Memory in GiB.
+        cpus: CPU cores.
+        gpus: GPU count.
+        gpu_memory: Optional requested GPU memory in GiB.
+    """
 
     time: int | None = None
     nodes: int = 1
@@ -60,7 +93,26 @@ def task(
     resources: Callable[..., Resources] | Resources | None = None,
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Decorator to control how a Task is identified and cached."""
+    """Attach :class:`TaskProperties` metadata to a function.
+
+    Args:
+        id: Stable task identifier. Required for local project functions.
+        cache: Whether task results should be stored in the workspace.
+        exclude: Argument names excluded from task identity.
+        defaults: Argument defaults excluded from task identity when equal.
+        versions: Optional argument-value version map used to force hash
+            changes for specific semantic revisions.
+        index_by: Hashing strategy for result identity.
+        resources: Static resources object or callable from function args to
+            resources.
+        serializer: Serializer class used for cached results.
+
+    Returns:
+        A decorator that annotates the target function.
+
+    Raises:
+        ValueError: If ``id`` is not provided.
+    """
     if id is None:
         msg = "id must be provided."
         raise ValueError(msg)
@@ -71,7 +123,14 @@ def task(
         resources = lambda r=resources, *_, **__: r  # noqa: E731
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        """Attach task properties to the decorated function."""
+        """Attach task metadata to the decorated function.
+
+        Args:
+            func: Function to annotate.
+
+        Returns:
+            The same function, now carrying ``__task_properties__``.
+        """
         func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
             id=id,
             cache=cache,
@@ -89,7 +148,17 @@ def task(
 
 
 def resolve_task_properties(func: FunctionType) -> TaskProperties:
-    """Return TaskProperties for a function object."""
+    """Resolve :class:`TaskProperties` for a function object.
+
+    Args:
+        func: Python function object.
+
+    Returns:
+        Resolved task properties.
+
+    Raises:
+        ValueError: If a local project function lacks ``@task(...)`` metadata.
+    """
     if is_lambda_function(func):
         return TaskProperties(lambda_task_id(func))
 
@@ -105,7 +174,14 @@ def resolve_task_properties(func: FunctionType) -> TaskProperties:
 
 
 def _normalize_versions(versions: dict[str, dict[Any, int]] | None) -> dict[tuple[str, ResultHash], int]:
-    """Normalize argument version mapping into hash-keyed lookup form."""
+    """Normalize argument-version mapping into hash-key lookup.
+
+    Args:
+        versions: Nested ``argument -> value -> version`` mapping.
+
+    Returns:
+        Flat mapping keyed by ``(argument_name, ResultHash(value))``.
+    """
     return {
         (name, ResultHash.from_object(value)): version
         for name, value_to_version in (versions or {}).items()

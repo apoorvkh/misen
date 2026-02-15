@@ -1,4 +1,4 @@
-"""CLI entrypoint for executing a payload file."""
+"""CLI entrypoint for executing serialized work-unit payloads."""
 
 from pathlib import Path
 
@@ -7,7 +7,11 @@ import tyro
 
 
 def execute(payload: Path) -> None:
-    """Execute a payload file (containing a cloudpickle-serialized function)."""
+    """Execute a cloudpickle payload file.
+
+    Args:
+        payload: Path to payload bytes representing a zero-argument callable.
+    """
     payload_fn = cloudpickle.loads(payload.read_bytes())
     payload_fn()
 

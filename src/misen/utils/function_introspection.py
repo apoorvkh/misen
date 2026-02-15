@@ -1,4 +1,4 @@
-"""Internal helpers for function-object identification and stable callable IDs."""
+"""Function-introspection helpers for stable task identifiers."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ __all__ = [
 
 
 def _external_library_roots() -> tuple[Path, ...]:
-    """Return normalized roots that typically contain stdlib/installed libraries."""
+    """Return normalized roots for stdlib and installed libraries."""
     paths = get_paths()
     roots = {
         Path(path).resolve()
@@ -39,12 +39,19 @@ _EXTERNAL_LIBRARY_ROOTS = _external_library_roots()
 
 
 def is_function_object(obj: object) -> TypeGuard[FunctionType]:
-    """Return True if object is a Python function object (including lambdas)."""
+    """Return whether object is a Python function (including lambdas)."""
     return isinstance(obj, FunctionType)
 
 
 def is_local_project_function(func: FunctionType) -> bool:
-    """Return True if callable source appears to come from user project code, not stdlib/site-packages."""
+    """Return whether callable source appears to come from project code.
+
+    Args:
+        func: Function object to inspect.
+
+    Returns:
+        ``True`` if source path is outside known stdlib/site-packages roots.
+    """
     source_callable: object = func
     with suppress(ValueError):
         source_callable = unwrap(func)
@@ -61,12 +68,22 @@ def is_local_project_function(func: FunctionType) -> bool:
 
 
 def is_lambda_function(func: FunctionType) -> bool:
-    """Return True if the given callable is a lambda function."""
+    """Return whether callable is a lambda function."""
     return func.__name__ == "<lambda>"
 
 
 def canonical_lambda_ast_representation(func: FunctionType) -> str:
-    """Return a canonical AST string for a lambda function."""
+    """Return canonical AST representation for a lambda.
+
+    Args:
+        func: Lambda function object.
+
+    Returns:
+        Deterministic AST dump string.
+
+    Raises:
+        ValueError: If source cannot be retrieved or lambda node is not found.
+    """
     try:
         source_lines, start_line = getsourcelines(func)
     except (OSError, TypeError) as exc:
@@ -88,12 +105,12 @@ def canonical_lambda_ast_representation(func: FunctionType) -> str:
 
 
 def lambda_task_id(func: FunctionType) -> str:
-    """Return a deterministic task id for a lambda function."""
+    """Return deterministic task id for a lambda function."""
     canonical_ast = canonical_lambda_ast_representation(func)
     digest = sha256(canonical_ast.encode()).hexdigest()
     return f"lambda.{digest}"
 
 
 def external_callable_id(func: FunctionType) -> str:
-    """Return a default id for an external function."""
+    """Return default identifier for an external callable."""
     return f"{func.__module__}.{func.__qualname__}"
