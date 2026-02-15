@@ -4,31 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-import socket
-from typing import TYPE_CHECKING, Literal, TypedDict
-
-import msgspec
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-ASSIGNED_RESOURCES_ENV_VAR = "MISEN_ASSIGNED_RESOURCES"
-ASSIGNED_RESOURCES_EXECUTOR_ENV_VAR = "MISEN_EXECUTOR_TYPE"
-_SLURM_NODELIST_KEYS = ("SLURM_STEP_NODELIST", "SLURM_JOB_NODELIST", "SLURM_NODELIST")
-_SLURM_CPU_COUNT_KEYS = ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "SLURM_JOB_CPUS_PER_NODE")
-_SLURM_GPU_COUNT_KEYS = ("SLURM_GPUS_PER_TASK", "SLURM_GPUS_ON_NODE", "SLURM_JOB_GPUS")
-_SLURM_GPU_INDEX_KEYS = ("CUDA_VISIBLE_DEVICES", "SLURM_STEP_GPUS", "SLURM_JOB_GPUS")
-
-__all__ = [
-    "ASSIGNED_RESOURCES_ENV_VAR",
-    "ASSIGNED_RESOURCES_EXECUTOR_ENV_VAR",
-    "AssignedResources",
-    "assigned_resources_env",
-    "assigned_resources_from_environ",
-    "executor_type_from_environ",
-    "local_assigned_resources_from_environ",
-    "slurm_assigned_resources_from_environ",
-]
+__all__ = ["AssignedResources", "get_assigned_resources_slurm"]
 
 
 class AssignedResources(TypedDict):
@@ -39,61 +20,33 @@ class AssignedResources(TypedDict):
         Callers can derive logical visibility (e.g., from `CUDA_VISIBLE_DEVICES`) as needed.
     """
 
-    executor: Literal["local", "slurm", "unknown"]
     hostnames: tuple[str, ...]
-    cpu_indices: tuple[int, ...]
-    gpu_indices: tuple[int, ...]
     cpu_count: int | None
+    cpu_indices: tuple[int, ...]
     gpu_count: int | None
+    gpu_indices: tuple[int, ...]
 
 
-def assigned_resources_env(resources: AssignedResources) -> dict[str, str]:
-    """Serialize assigned resources into environment variables."""
-    return {ASSIGNED_RESOURCES_ENV_VAR: msgspec.json.encode(resources).decode("utf-8")}
-
-
-def assigned_resources_from_environ(env: Mapping[str, str] | None = None) -> AssignedResources:
-    """Resolve assigned resources from process environment."""
-    env = os.environ if env is None else env
-    if executor_type_from_environ(env) == "slurm":
-        return slurm_assigned_resources_from_environ(env)
-    return local_assigned_resources_from_environ(env)
-
-
-def executor_type_from_environ(env: Mapping[str, str] | None = None) -> Literal["local", "slurm"]:
-    """Infer the active executor type from explicit env marker or scheduler vars."""
-    env = os.environ if env is None else env
-    if (executor_type := env.get(ASSIGNED_RESOURCES_EXECUTOR_ENV_VAR)) in ("local", "slurm"):
-        return executor_type
-    return "slurm" if "SLURM_JOB_ID" in env else "local"
-
-
-def local_assigned_resources_from_environ(env: Mapping[str, str] | None = None) -> AssignedResources:
-    """Resolve assigned resources for LocalExecutor jobs."""
-    env = os.environ if env is None else env
-    if (payload := _decode_assigned_resources(env)) is not None:
-        return payload
-    hostname = socket.gethostname()
-    return _assigned_resources(executor="local", hostnames=(hostname,) if hostname else ())
-
-
-def slurm_assigned_resources_from_environ(env: Mapping[str, str] | None = None) -> AssignedResources:
+def get_assigned_resources_slurm() -> AssignedResources:
     """Resolve assigned resources for SLURM jobs."""
-    env = os.environ if env is None else env
-    if (payload := _decode_assigned_resources(env)) is not None:
-        return payload
-    hostnames = _expand_slurm_nodelist(_first_nonempty(env, _SLURM_NODELIST_KEYS))
+    nodelist_keys = ("SLURM_STEP_NODELIST", "SLURM_JOB_NODELIST", "SLURM_NODELIST")
+    cpu_count_keys = ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "SLURM_JOB_CPUS_PER_NODE")
+    gpu_count_keys = ("SLURM_GPUS_PER_TASK", "SLURM_GPUS_ON_NODE", "SLURM_JOB_GPUS")
+    gpu_index_keys = ("SLURM_STEP_GPUS", "SLURM_JOB_GPUS")
+
+    env = os.environ
+    hostnames = _expand_slurm_nodelist(_first_nonempty(env, nodelist_keys))
     if not hostnames and (hostname := env.get("SLURMD_NODENAME")):
         hostnames = (hostname,)
 
     cpu_indices = _parse_numeric_indices(env.get("SLURM_CPU_BIND_LIST"))
-    cpu_count = _first_int(_first_nonempty(env, _SLURM_CPU_COUNT_KEYS)) or (len(cpu_indices) if cpu_indices else None)
+    cpu_count = _first_int(_first_nonempty(env, cpu_count_keys)) or (len(cpu_indices) if cpu_indices else None)
     if not cpu_indices and cpu_count is not None:
         cpu_indices = tuple(range(cpu_count))
 
-    gpu_visible = _first_nonempty(env, _SLURM_GPU_INDEX_KEYS)
+    gpu_visible = _first_nonempty(env, gpu_index_keys)
     gpu_indices = _parse_numeric_indices(gpu_visible)
-    gpu_count = _first_int(_first_nonempty(env, _SLURM_GPU_COUNT_KEYS))
+    gpu_count = _first_int(_first_nonempty(env, gpu_count_keys))
     if gpu_count is None:
         if gpu_indices:
             gpu_count = len(gpu_indices)
@@ -103,42 +56,13 @@ def slurm_assigned_resources_from_environ(env: Mapping[str, str] | None = None) 
         # Fallback only when we don't have non-numeric UUID device IDs.
         gpu_indices = tuple(range(gpu_count))
 
-    return _assigned_resources(
-        executor="slurm",
+    return AssignedResources(
         hostnames=hostnames,
         cpu_indices=cpu_indices,
         gpu_indices=gpu_indices,
         cpu_count=cpu_count,
         gpu_count=gpu_count,
     )
-
-
-def _decode_assigned_resources(env: Mapping[str, str]) -> AssignedResources | None:
-    if not (payload := env.get(ASSIGNED_RESOURCES_ENV_VAR)):
-        return None
-    try:
-        return msgspec.json.decode(payload.encode("utf-8"), type=AssignedResources)
-    except (msgspec.DecodeError, msgspec.ValidationError):
-        return None
-
-
-def _assigned_resources(
-    *,
-    executor: Literal["local", "slurm", "unknown"],
-    hostnames: tuple[str, ...] = (),
-    cpu_indices: tuple[int, ...] = (),
-    gpu_indices: tuple[int, ...] = (),
-    cpu_count: int | None = None,
-    gpu_count: int | None = None,
-) -> AssignedResources:
-    return {
-        "executor": executor,
-        "hostnames": hostnames,
-        "cpu_indices": cpu_indices,
-        "gpu_indices": gpu_indices,
-        "cpu_count": cpu_count,
-        "gpu_count": gpu_count,
-    }
 
 
 def _first_nonempty(env: Mapping[str, str], keys: tuple[str, ...]) -> str | None:

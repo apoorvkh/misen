@@ -89,16 +89,17 @@ class WorkUnit:
         self,
         workspace: Workspace,
         job_id: str,
-        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+        assigned_resources_getter: Callable[[], AssignedResources | None],
     ) -> None:
         """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
         from misen.task import Task
 
         task_results: dict[Task, Any] = {}
-        _assigned_resources = assigned_resources() if callable(assigned_resources) else assigned_resources
+        assigned_resources = assigned_resources_getter()
 
         def resolve_arg(arg: Any) -> Any:
             """Resolve non-cacheable Task dependencies from cached runtime results."""
+
             def resolve_leaf(leaf: Any) -> Any:
                 if isinstance(leaf, Task) and not leaf.properties.cache:
                     return task_results[leaf]
@@ -124,14 +125,14 @@ class WorkUnit:
                 compute_if_uncached=True,
                 compute_uncached_deps=False,
                 _job_id=job_id,
-                _assigned_resources=_assigned_resources,
+                _assigned_resources=assigned_resources,
             )
 
     def as_payload(
         self,
         workspace: Workspace,
         job_id: str,
-        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+        assigned_resources_getter: Callable[[], AssignedResources | None],
     ) -> bytes:
         """Return a serialized payload that can be executed to run the work unit."""
         return cloudpickle.dumps(
@@ -139,7 +140,7 @@ class WorkUnit:
                 self.execute,
                 workspace=workspace,
                 job_id=job_id,
-                assigned_resources=assigned_resources,
+                assigned_resources_getter=assigned_resources_getter,
             )
         )
 

@@ -33,9 +33,9 @@ class Snapshot(ABC):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+        assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
-        """Prepare execution command and environment overrides for a work unit."""
+        """Prepare execution command and env vars for a work unit. Returns (job_id, argv, env_overrides)."""
 
 
 class LocalSnapshot(Snapshot):
@@ -55,7 +55,7 @@ class LocalSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+        assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
         """Prepare a uv command and env overrides to execute a serialized work-unit payload."""
         job_id = _token_base32(6)
@@ -64,9 +64,7 @@ class LocalSnapshot(Snapshot):
         payload_path = payload_dir / f"{_token_base32(6)}.pkl"
         payload_path.write_bytes(
             work_unit.as_payload(
-                workspace=workspace,
-                job_id=job_id,
-                assigned_resources=assigned_resources,
+                workspace=workspace, job_id=job_id, assigned_resources_getter=assigned_resources_getter
             )
         )
         argv: list[str] = [

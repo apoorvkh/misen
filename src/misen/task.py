@@ -17,11 +17,11 @@ Results are identified by `result_hash()`. Any task which computes the same resu
 from __future__ import annotations
 
 import itertools
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+import tempfile
+from contextlib import nullcontext
 from functools import cache
 from inspect import Signature, signature
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
@@ -58,13 +58,6 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-@contextmanager
-def _temporary_work_dir_context(temp_root: Path, prefix: str) -> Iterator[Path]:
-    temp_root.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=temp_root, prefix=prefix) as temp_dir:
-        yield Path(temp_dir)
-
-
 class Task(Generic[R]):
     """A Task is a lazy wrapper for a function and its arguments.
 
@@ -79,7 +72,6 @@ class Task(Generic[R]):
 
     __slots__ = (
         "_frozen",
-        "_has_work_dir",
         "_signature",
         "_task_hash",
         "args",
@@ -116,17 +108,9 @@ class Task(Generic[R]):
 
         self.resources = self.properties.resources(*self.args, **self.kwargs)
 
-        dependencies: set[Task] = set()
-        has_work_dir = False
-        for value in itertools.chain(self.args, self.kwargs.values()):
-            for leaf in iter_nested_leaves(value):
-                if isinstance(leaf, Task):
-                    dependencies.add(leaf)
-                elif leaf is WORK_DIR:
-                    has_work_dir = True
-
-        self.dependencies = frozenset(dependencies)
-        self._has_work_dir = has_work_dir
+        values = itertools.chain(self.args, self.kwargs.values())
+        leaves = itertools.chain.from_iterable(map(iter_nested_leaves, values))
+        self.dependencies = frozenset(leaf for leaf in leaves if isinstance(leaf, Task))
 
         self.task_hash()
         self._frozen = True
@@ -322,6 +306,13 @@ class Task(Generic[R]):
             for t in self.dependencies
         }
 
+        @cache
+        def _work_dir() -> Path:
+            if self.properties.cache:
+                return workspace.get_work_dir(task=self)
+            _task_hash = self.resolved_hash(workspace=workspace).b32()
+            return Path(tempfile.mkdtemp(prefix=f"misen-work-{_task_hash}-"))
+
         def resolve_argument(dep: Any) -> Any:
             """Resolve Task / sentinel leaves recursively for execution."""
 
@@ -329,10 +320,7 @@ class Task(Generic[R]):
                 if isinstance(leaf, Task):
                     return dep_results[leaf]
                 if leaf is WORK_DIR:
-                    if work_dir is None:
-                        msg = "WORK_DIR sentinel requested, but work directory is unavailable."
-                        raise RuntimeError(msg)
-                    return work_dir
+                    return _work_dir()
                 if leaf is ASSIGNED_RESOURCES:
                     return _assigned_resources
                 return leaf
@@ -344,12 +332,11 @@ class Task(Generic[R]):
         with (
             self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
         ):
-            with self._work_dir_context(workspace=workspace) as work_dir:
-                with workspace.open_task_log(task=self, mode="a", job_id=_job_id, timestamp="current") as task_log:
-                    with capture_all_output(task_log, tee_to_stdout=True):
-                        args = (resolve_argument(v) for v in self.args)
-                        kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
-                        result = self.func(*args, **kwargs)
+            with workspace.open_task_log(task=self, mode="a", job_id=_job_id, timestamp="current") as task_log:
+                with capture_all_output(task_log, tee_to_stdout=True):
+                    args = (resolve_argument(v) for v in self.args)
+                    kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
+                    result = self.func(*args, **kwargs)
 
             # Store `Task -> hash(result)` mapping in Workspace
             # Indicator of Task completion
@@ -382,16 +369,6 @@ class Task(Generic[R]):
         """Returns work directory from Workspace."""
         workspace = resolve_auto(workspace=workspace)
         return workspace.get_work_dir(task=self)
-
-    def _work_dir_context(self, workspace: Workspace) -> AbstractContextManager[Path | None]:
-        if self.properties.cache:
-            return nullcontext(workspace.get_work_dir(task=self) if self._has_work_dir else None)
-        if not self._has_work_dir:
-            return nullcontext(None)
-        return _temporary_work_dir_context(
-            temp_root=workspace.get_temp_dir() / "work_dirs",
-            prefix=f"{self.task_hash().short_b32()}-",
-        )
 
     def _runtime_lock(self, workspace: Workspace) -> LockLike:
         """Workspace manages a lock for each Task, expected to be held during runtime."""
@@ -469,6 +446,10 @@ class Task(Generic[R]):
             """Return hash identifier for an argument value."""
             if isinstance(value, Task):
                 return cast("TaskHash | ResultHash", leaf_repr(value))
+            if value is ASSIGNED_RESOURCES or value is WORK_DIR:
+                # TODO: sentinel should be in exclusions
+                msg = "Resolved task arguments cannot contain sentinel values."
+                raise RuntimeError(msg)
             return ResultHash.from_object(map_nested_leaves(value, leaf_repr))
 
         def include_argument(key: str, value: Any) -> bool:
@@ -579,5 +560,5 @@ class TaskProperties(Struct, frozen=True):
     defaults: dict[str, Any] = {}
     versions: dict[tuple[str, ResultHash], int] = {}
     index_by: Literal["task", "result"] = "result"
-    resources: Callable[..., Resources] = lambda **_: Resources()
+    resources: Callable[..., Resources] = lambda *_, **__: Resources()
     serializer: type[Serializer] = DefaultSerializer
