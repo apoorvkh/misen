@@ -4,19 +4,18 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from collections.abc import Mapping
-from dataclasses import make_dataclass
 from functools import cache
-from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
-import tyro
 from msgspec import Struct
 
-from misen.executor import Executor, ExecutorType
 from misen.task import Task
 from misen.utils.auto import resolve_auto
-from misen.utils.settings import DEFAULT_SETTINGS_FILE, Settings
-from misen.workspace import Workspace, WorkspaceType
+from misen.utils.experiment_cli import experiment_cli
+
+if TYPE_CHECKING:
+    from misen.executor import Executor
+    from misen.workspace import Workspace
 
 __all__ = ["Experiment"]
 
@@ -58,36 +57,4 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
     @classmethod
     def cli(cls) -> None:
         """Run a command-line interface for the experiment."""
-        _fields_without_defaults = []
-        _fields_with_defaults = [
-            ("command", Literal["run", "count"], "run"),
-            ("settings_file", Path, DEFAULT_SETTINGS_FILE),
-            ("executor_type", ExecutorType | Literal["auto"], "auto"),
-            ("workspace_type", WorkspaceType | Literal["auto"], "auto"),
-        ]
-
-        args, _ = tyro.cli(
-            make_dataclass("", _fields_without_defaults + _fields_with_defaults),
-            add_help=False,
-            return_unknown_args=True,
-        )
-        args = cast("Any", args)  # TODO ?
-
-        if args.executor_type != "auto":
-            _fields_without_defaults.append(("executor", Executor.resolve_type(args.executor_type)))
-        if args.workspace_type != "auto":
-            _fields_without_defaults.append(("workspace", Workspace.resolve_type(args.workspace_type)))
-        _fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[cls]))  # ty:ignore[invalid-type-form]  # TODO
-
-        args = tyro.cli(make_dataclass("", _fields_without_defaults + _fields_with_defaults))
-        args = cast("Any", args)  # TODO ?
-
-        settings = Settings(file=args.settings_file)
-
-        executor = Executor.auto(settings=settings) if args.executor_type == "auto" else args.executor
-
-        workspace = Workspace.auto(settings=settings) if args.workspace_type == "auto" else args.workspace
-
-        match args.command:
-            case "run":
-                args.experiment.run(executor=executor, workspace=workspace)
+        experiment_cli(cls)

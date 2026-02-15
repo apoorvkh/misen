@@ -45,7 +45,7 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         Returns:
             A dependency graph of backend-specific Job handles corresponding to WorkUnits.
         """
-        work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks, workspace=workspace)
+        work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
 
         # dispatch work units and collect job handles
 

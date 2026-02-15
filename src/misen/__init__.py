@@ -2,9 +2,10 @@
 
 from misen.executor import Executor
 from misen.experiment import Experiment
-from misen.task import Resources, Task, task
+from misen.task import Task
 from misen.utils.sentinels import ASSIGNED_RESOURCES, WORK_DIR
 from misen.utils.settings import Settings
+from misen.utils.task_properties import Resources, task
 from misen.workspace import Workspace
 
 __all__ = [

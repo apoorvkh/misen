@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import functools
+from functools import cache
 from operator import is_
 from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
 from misen.task import Task
+from misen.utils.graph import DependencyGraph
 from misen.utils.nested_args import map_nested_leaves
 
 if TYPE_CHECKING:
@@ -16,7 +18,6 @@ if TYPE_CHECKING:
 
     from misen.task import Resources
     from misen.utils.assigned_resources import AssignedResources
-    from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
 
 
@@ -50,7 +51,7 @@ class WorkUnit:
 
         # Dependency graph of tasks.
         # Truncated at caching boundaries since downstream cacheable nodes become WorkUnit dependencies.
-        self.graph = root.dependency_graph(exclude_cacheable=True)
+        self.graph = _build_task_dependency_graph(task=root, exclude_cacheable=True)
 
         # Union of resources for all tasks in graph
         from misen.task import Resources
@@ -145,11 +146,11 @@ class WorkUnit:
         )
 
 
-def build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
+def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
     """Given a set of tasks, transform their Task DAG into a DAG of WorkUnits."""
     # Task dependency graph: an edge from A to B means A depends on B
     union = Task((lambda *_: None), *tasks)
-    task_graph: DependencyGraph[Task] = union.dependency_graph(workspace=workspace)
+    task_graph: DependencyGraph[Task] = _build_task_dependency_graph(task=union)
     task_graph.remove_node_by_value(union, cmp=is_, first=True)
 
     # Retain only root and cachable tasks (and the induced graph minor)
@@ -163,3 +164,58 @@ def build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[
         work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
 
     return work_graph
+
+
+def _build_task_dependency_graph(
+    task: Task[Any],
+    *,
+    exclude_cacheable: bool = False,
+    exclude_cached: bool = False,
+    workspace: Workspace | None = None,
+) -> DependencyGraph[Task[Any]]:
+    """Build a dependency graph rooted at the provided task-like object."""
+    if exclude_cacheable:
+
+        @cache
+        def include_dependency(dependency: Task[Any]) -> bool:
+            return dependency.properties.cache is False
+
+    elif exclude_cached:
+        if workspace is None:
+            msg = "workspace is required when exclude_cached=True."
+            raise ValueError(msg)
+
+        @cache
+        def include_dependency(dependency: Task[Any]) -> bool:
+            return not dependency.is_cached(workspace=workspace)
+
+    else:
+
+        def include_dependency(dependency: Task[Any]) -> bool:  # noqa: ARG001
+            return True
+
+    graph: DependencyGraph[Task[Any]] = DependencyGraph()
+    nodes: dict[Task[Any], int] = {}
+
+    def get_node_index(candidate: Task[Any]) -> int:
+        node_index = nodes.get(candidate)
+        if node_index is None:
+            node_index = nodes[candidate] = graph.add_node(candidate)
+        return node_index
+
+    stack: list[Task[Any]] = [task]
+    seen: set[Task[Any]] = {task}
+
+    while stack:
+        current = stack.pop()
+        current_node = get_node_index(current)
+
+        for dependency in current.dependencies:
+            if not include_dependency(dependency):
+                continue
+            graph.add_edge(current_node, get_node_index(dependency), None)
+            if dependency not in seen:
+                seen.add(dependency)
+                stack.append(dependency)
+
+    return graph

@@ -16,49 +16,37 @@ Results are identified by `result_hash()`. Any task which computes the same resu
 
 from __future__ import annotations
 
-import itertools
-import tempfile
 from contextlib import nullcontext
-from functools import cache
 from inspect import Signature, signature
-from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
-from msgspec import Struct
-from typing_extensions import assert_never
-
 from misen.utils.auto import resolve_auto
-from misen.utils.functions import (
-    external_callable_id,
-    is_function_object,
-    is_lambda_function,
-    is_local_project_function,
-    lambda_task_id,
-)
-from misen.utils.graph import DependencyGraph
+from misen.utils.frozen_mixin import FrozenMixin
+from misen.utils.functions import is_function_object
 from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
-from misen.utils.log_capture import capture_all_output
-from misen.utils.nested_args import iter_nested_leaves, map_nested_leaves
-from misen.utils.object_io import DefaultSerializer, Serializer
-from misen.utils.sentinels import ASSIGNED_RESOURCES, WORK_DIR
+from misen.utils.task_construction import collect_task_dependencies, hash_task_arguments
+from misen.utils.task_properties import Resources, TaskProperties, resolve_task_properties
+from misen.utils.task_runtime import execute_task, save_task_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from pathlib import Path
     from types import FunctionType
 
     from misen.executor import Executor, Job
     from misen.utils.assigned_resources import AssignedResources
+    from misen.utils.graph import DependencyGraph
     from misen.utils.locks import LockLike
     from misen.workspace import Workspace
 
-__all__ = ["Resources", "Task", "task"]
+__all__ = ["Task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 
-class Task(Generic[R]):
+class Task(FrozenMixin, Generic[R]):
     """A Task is a lazy wrapper for a function and its arguments.
 
     Attributes:
@@ -71,7 +59,6 @@ class Task(Generic[R]):
     """
 
     __slots__ = (
-        "_frozen",
         "_signature",
         "_task_hash",
         "args",
@@ -93,46 +80,12 @@ class Task(Generic[R]):
         self.kwargs: P.kwargs = MappingProxyType(kwargs)
         self._signature: Signature = signature(func)
 
-        if is_lambda_function(func):
-            self.properties = TaskProperties(lambda_task_id(func))
-        elif is_local_project_function(func):
-            if not hasattr(func, "__task_properties__"):
-                msg = (
-                    f"Local function {func.__module__}.{func.__qualname__} must define "
-                    "__task_properties__. Use @task(...)."
-                )
-                raise ValueError(msg)
-            self.properties: TaskProperties = func.__task_properties__
-        else:
-            self.properties = TaskProperties(external_callable_id(func))
+        self.properties: TaskProperties = resolve_task_properties(func)
+        self.resources: Resources = self.properties.resources(*self.args, **self.kwargs)
+        self.dependencies: frozenset[Task[Any]] = collect_task_dependencies(self.args, self.kwargs)
+        self._task_hash: TaskHash = self.task_hash()
 
-        self.resources = self.properties.resources(*self.args, **self.kwargs)
-
-        values = itertools.chain(self.args, self.kwargs.values())
-        leaves = itertools.chain.from_iterable(map(iter_nested_leaves, values))
-        self.dependencies = frozenset(leaf for leaf in leaves if isinstance(leaf, Task))
-
-        self.task_hash()
-        self._frozen = True
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Prevent mutation after initialization."""
-        if getattr(self, "_frozen", False):
-            msg = f"Task is immutable. Tried to set attribute '{name}' as {value}."
-            raise AttributeError(msg)
-        object.__setattr__(self, name, value)
-
-    def __getstate__(self) -> dict[str, Any]:
-        """Return pickle state compatibile with immutability flag."""
-        state = {name: getattr(self, name) for name in self.__slots__}
-        state["_frozen"] = False
-        return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore pickle state while preserving immutability semantics."""
-        for name in self.__slots__:
-            setattr(self, name, state[name])
-        self._frozen = True
+        self.freeze()
 
     def __repr__(self) -> str:
         """Return a short debug representation for the task."""
@@ -158,63 +111,6 @@ class Task(Generic[R]):
     def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
         """Are all immediate dependencies cached?"""
         return not any(self.uncached_deps(workspace=workspace))  # "if there are not any uncached deps"
-
-    def dependency_graph(
-        self,
-        *,
-        exclude_cacheable: bool = False,
-        exclude_cached: bool = False,
-        workspace: Workspace | Literal["auto"] = "auto",
-    ) -> DependencyGraph[Task]:
-        """Build a DependencyGraph rooted at this Task. Directed edges: task -> dependency.
-
-        Args:
-            exclude_cacheable: Omit any dependency Task with `properties.cache == True`.
-            exclude_cached: Omit any dependency that is already cached in the Workspace.
-            workspace: Required only if `exclude_cached=True`.
-
-        Returns:
-            A DependencyGraph containing all reachable Tasks (based on inclusion criteria).
-        """
-        if exclude_cached:
-            workspace = resolve_auto(workspace=workspace)
-
-        @cache
-        def _include(dependency: Task) -> bool:
-            """Return True if the dependency should be included."""
-            if exclude_cacheable:
-                return dependency.properties.cache is False
-            if exclude_cached:
-                return not dependency.is_cached(workspace=workspace)
-            return True
-
-        graph: DependencyGraph[Task] = DependencyGraph()
-        nodes: dict[Task, int] = {}
-
-        def _get_node(t: Task) -> int:
-            """Return the graph node index for the given task."""
-            i = nodes.get(t)
-            if i is None:
-                i = nodes[t] = graph.add_node(t)
-            return i
-
-        # DFS to traverse the Task DAG and materialize nodes/edges.
-        stack: list[Task] = [self]
-        seen: set[Task] = {self}
-
-        while stack:
-            task: Task = stack.pop()
-            task_node = _get_node(task)
-
-            for dep in task.dependencies:
-                if not _include(dep):
-                    continue
-                graph.add_edge(task_node, _get_node(dep), None)
-                if dep not in seen:
-                    seen.add(dep)
-                    stack.append(dep)
-
-        return graph
 
     def done(self, workspace: Workspace) -> bool:
         """If Workspace contains a ResultHash for this Task (expected regardless of result caching)."""
@@ -294,74 +190,31 @@ class Task(Generic[R]):
             msg = f"{self} has dependencies which must be computed and cached first: {uncached_deps}"
             raise RuntimeError(msg)
 
-        # Get (or recursively compute) results of dependencies
-        dep_results: dict[Task, Any] = {
-            t: t.result(
+        dependency_results: dict[Task[Any], Any] = {
+            dependency: dependency.result(
                 workspace=workspace,
                 compute_if_uncached=True,
                 compute_uncached_deps=True,
                 _job_id=_job_id,
                 _assigned_resources=_assigned_resources,
             )
-            for t in self.dependencies
+            for dependency in self.dependencies
         }
 
-        @cache
-        def _work_dir() -> Path:
-            if self.properties.cache:
-                return workspace.get_work_dir(task=self)
-            _task_hash = self.resolved_hash(workspace=workspace).b32()
-            return Path(tempfile.mkdtemp(prefix=f"misen-work-{_task_hash}-"))
+        result = execute_task(
+            task=self,
+            workspace=workspace,
+            dependency_results=dependency_results,
+            assigned_resources=_assigned_resources,
+            job_id=_job_id,
+            lock_context=(
+                self._runtime_lock(workspace=workspace).context(blocking=False)
+                if self.properties.cache
+                else nullcontext()
+            ),
+        )
 
-        def resolve_argument(dep: Any) -> Any:
-            """Resolve Task / sentinel leaves recursively for execution."""
-
-            def resolve_leaf(leaf: Any) -> Any:
-                if isinstance(leaf, Task):
-                    return dep_results[leaf]
-                if leaf is WORK_DIR:
-                    return _work_dir()
-                if leaf is ASSIGNED_RESOURCES:
-                    return _assigned_resources
-                return leaf
-
-            return map_nested_leaves(dep, resolve_leaf)
-
-        # Runtime lock: should not run cached Tasks if already being computed; fails immediately if so.
-
-        with (
-            self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
-        ):
-            with workspace.open_task_log(task=self, mode="a", job_id=_job_id, timestamp="current") as task_log:
-                with capture_all_output(task_log, tee_to_stdout=True):
-                    args = (resolve_argument(v) for v in self.args)
-                    kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
-                    result = self.func(*args, **kwargs)
-
-            # Store `Task -> hash(result)` mapping in Workspace
-            # Indicator of Task completion
-
-            # Index the result by the resolved Task or result object
-            # "task" is better if expecting unique argument <-> result correspondence
-            match self.properties.index_by:
-                case "task":
-                    index = self.resolved_hash(workspace=workspace)
-                case "result":
-                    index = result
-                case _:
-                    assert_never(self.properties.index_by)
-
-            workspace.set_result_hash(self, ResultHash.from_object(index))
-
-            # Cache result in Workspace
-
-            if self.properties.cache:
-                try:
-                    workspace.results[self] = result
-                except Exception:
-                    del workspace.results[self]
-                    workspace.clear_result_hash(task=self)
-                    raise
+        save_task_result(task=self, result=result, workspace=workspace)
 
         return result
 
@@ -369,6 +222,44 @@ class Task(Generic[R]):
         """Returns work directory from Workspace."""
         workspace = resolve_auto(workspace=workspace)
         return workspace.get_work_dir(task=self)
+
+    def task_hash(self) -> TaskHash:
+        """Identifier for Task, based on dependency structure."""
+        if hasattr(self, "_task_hash"):
+            return self._task_hash
+        hashed_args = hash_task_arguments(
+            signature=self._signature,
+            args=self.args,
+            kwargs=self.kwargs,
+            properties=self.properties,
+        )
+        return TaskHash.from_object((self.properties.id, hashed_args))
+
+    def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
+        """Identifier for Task, based on resolved arguments. Requires dependencies to be computed first."""
+        resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
+
+        if resolved_hash is None:
+            hashed_args = hash_task_arguments(
+                signature=self._signature,
+                args=self.args,
+                kwargs=self.kwargs,
+                properties=self.properties,
+                hash_task_by_result=True,
+                workspace=workspace,
+            )
+            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, hashed_args))
+            workspace.set_resolved_hash(self, resolved_hash)
+
+        return resolved_hash
+
+    def result_hash(self, workspace: Workspace) -> ResultHash:
+        """Return the stored ResultHash for this task.
+
+        Raises:
+            RuntimeError: if the task has not been computed / recorded in the workspace.
+        """
+        return workspace.get_result_hash(self)
 
     def _runtime_lock(self, workspace: Workspace) -> LockLike:
         """Workspace manages a lock for each Task, expected to be held during runtime."""
@@ -386,179 +277,3 @@ class Task(Generic[R]):
         if not isinstance(other, Task):
             return NotImplemented
         return self.task_hash() == other.task_hash()
-
-    def task_hash(self) -> TaskHash:
-        """Identifier for Task, based on dependency structure."""
-        if not hasattr(self, "_task_hash"):
-            self._task_hash = TaskHash.from_object((self.properties.id, self._hashed_arguments()))
-        return self._task_hash
-
-    def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
-        """Identifier for Task, based on resolved arguments. Requires dependencies to be computed first."""
-        resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
-
-        if resolved_hash is None:
-            hashed_arguments = self._hashed_arguments(hash_task_by_result=True, workspace=workspace)
-            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, hashed_arguments))
-            workspace.set_resolved_hash(self, resolved_hash)
-
-        return resolved_hash
-
-    def result_hash(self, workspace: Workspace) -> ResultHash:
-        """Return the stored ResultHash for this task.
-
-        Raises:
-            RuntimeError: if the task has not been computed / recorded in the workspace.
-        """
-        return workspace.get_result_hash(self)
-
-    def _hashed_arguments(
-        self,
-        *,
-        hash_task_by_result: bool = False,
-        workspace: Workspace | Literal["auto"] = "auto",
-    ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
-        """Hash for each argument.
-
-        Args:
-            hash_task_by_result: Represent Task-valued arguments by ResultHash if True, otherwise by TaskHash.
-            workspace:
-                For looking up a Task's ResultHash (required only if `hash_task_by_result=True`).
-
-        Returns:
-            Mapping of {argument_name : hash(argument value)}
-            Excluding:
-                - any keys in `properties.exclude`
-                - any keys whose value equals declared default in `properties.defaults`
-            Note: hash "version" of a specific (argument, value) pair can be set from `properties.versions`.
-        """
-        # Signature of function is used for creating {argument_name : value} map
-        bound_arguments = self._signature.bind(*self.args, **self.kwargs)
-        bound_arguments.apply_defaults()
-
-        def leaf_repr(value: Any) -> TaskHash | ResultHash | Any:
-            """Return canonical representation for a leaf value used in argument hashing."""
-            if isinstance(value, Task):
-                return value.result_hash(workspace=workspace) if hash_task_by_result else value.task_hash()
-            return value
-
-        def argument_hash(value: Any) -> TaskHash | ResultHash:
-            """Return hash identifier for an argument value."""
-            if isinstance(value, Task):
-                return cast("TaskHash | ResultHash", leaf_repr(value))
-            if value is ASSIGNED_RESOURCES or value is WORK_DIR:
-                # TODO: sentinel should be in exclusions
-                msg = "Resolved task arguments cannot contain sentinel values."
-                raise RuntimeError(msg)
-            return ResultHash.from_object(map_nested_leaves(value, leaf_repr))
-
-        def include_argument(key: str, value: Any) -> bool:
-            """Return True if this argument should contribute to task hashing."""
-            return key not in self.properties.exclude and (
-                key not in self.properties.defaults or self.properties.defaults[key] != value
-            )
-
-        hashed_arguments: dict[str, tuple[TaskHash | ResultHash, int]] = {}
-        for key, value in bound_arguments.arguments.items():
-            if not include_argument(key, value):
-                continue
-            arg_hash = argument_hash(value)
-            version = self.properties.versions.get((key, arg_hash), 0)  # ty:ignore[no-matching-overload]
-            hashed_arguments[key] = (arg_hash, version)
-
-        return hashed_arguments
-
-
-def task(
-    *,
-    id: str | None = None,  # noqa: A002
-    cache: bool = False,
-    exclude: set[str] | None = None,
-    defaults: dict[str, Any] | None = None,
-    versions: dict[str, dict[Any, int]] | None = None,
-    index_by: Literal["task", "result"] = "result",
-    resources: Callable[..., Resources] | Resources | None = None,
-    serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Decorator to control how a Task is identified and cached.
-
-    Attaches `__task_properties__: TaskProperties` attribute to `self.func`.
-
-    Arguments:
-        id:
-            Stable identifier for the task definition. Will raise ValueError if None.
-        cache:
-            If True, `Task.result()` may store results in the Workspace.
-        exclude:
-            Exclude arguments (by name) from hashing.
-        defaults:
-            If an argument value matches the provided default, it is omitted from hashing.
-        versions:
-            For versioning per (argument, value) pair. Normalized to a {argument : ResultHash(value)} mapping.
-        index_by:
-            Determines how result is indexed (i.e. how ResultHash is computed) in Workspace:
-            - "task": index by resolved task hash
-            - "result": index by the result object
-        resources:
-            Optional resource resolver for each Task instance.
-            - If a callable: called with the task arguments during `Task(...)` construction.
-            - If Resources: used directly for every `Task(...)`.
-        serializer:
-            Serializer type for saving/loading results.
-
-    Returns:
-        A decorator that mutates `func` by setting `func.__task_properties__`.
-    """
-    if id is None:
-        msg = "id must be provided."
-        raise ValueError(msg)
-
-    if resources is None:
-        resources = Resources()
-    if isinstance(resources, Resources):
-        resources = lambda r=resources, **_: r  # noqa: E731
-
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
-        """Attach task properties to the decorated function."""
-        func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
-            id=id,
-            cache=cache,
-            exclude=(exclude or set()),
-            defaults=(defaults or {}),
-            versions={
-                (name, ResultHash.from_object(value)): vs
-                for name, vv in (versions or {}).items()
-                for value, vs in vv.items()
-            },
-            index_by=index_by,
-            resources=resources,
-            serializer=serializer,
-        )
-
-        return func
-
-    return decorator
-
-
-class Resources(Struct, frozen=True):
-    """Resource requirements for executing a Task."""
-
-    time: int | None = None
-    nodes: int = 1
-    memory: int = 8
-    cpus: int = 1
-    gpus: int = 0
-    gpu_memory: int | None = None
-
-
-class TaskProperties(Struct, frozen=True):
-    """Immutable metadata describing how a Task should be identified and cached."""
-
-    id: str
-    cache: bool = False
-    exclude: set[str] = set()
-    defaults: dict[str, Any] = {}
-    versions: dict[tuple[str, ResultHash], int] = {}
-    index_by: Literal["task", "result"] = "result"
-    resources: Callable[..., Resources] = lambda *_, **__: Resources()
-    serializer: type[Serializer] = DefaultSerializer
