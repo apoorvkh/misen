@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
-from misen.task import Task
+from misen.tasks import Task
 from misen.utils.graph import DependencyGraph
-from misen.utils.nested_args import map_nested_leaves
+from misen.utils.task_utils import map_nested_leaves
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from misen.task import Resources
+    from misen.task_properties import Resources
     from misen.utils.assigned_resources import AssignedResources
     from misen.workspace import Workspace
 
@@ -54,7 +54,7 @@ class WorkUnit:
         self.graph = _build_task_dependency_graph(task=root, exclude_cacheable=True)
 
         # Union of resources for all tasks in graph
-        from misen.task import Resources
+        from misen.task_properties import Resources
 
         _resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
         self.resources = Resources(
@@ -93,7 +93,7 @@ class WorkUnit:
         assigned_resources_getter: Callable[[], AssignedResources | None],
     ) -> None:
         """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
-        from misen.task import Task
+        from misen.tasks import Task
 
         task_results: dict[Task, Any] = {}
         assigned_resources = assigned_resources_getter()

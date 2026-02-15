@@ -1,4 +1,4 @@
-"""Function-introspection helpers used by task wrapping logic."""
+"""Internal helpers for function-object identification and stable callable IDs."""
 
 from __future__ import annotations
 
@@ -12,6 +12,15 @@ from sysconfig import get_paths
 from textwrap import dedent
 from types import FunctionType
 from typing import TypeGuard
+
+__all__ = [
+    "canonical_lambda_ast_representation",
+    "external_callable_id",
+    "is_function_object",
+    "is_lambda_function",
+    "is_local_project_function",
+    "lambda_task_id",
+]
 
 
 def _external_library_roots() -> tuple[Path, ...]:

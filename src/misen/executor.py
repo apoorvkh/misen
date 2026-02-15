@@ -24,7 +24,7 @@ from misen.utils.work_unit import WorkUnit, build_work_graph
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from misen.task import Task
+    from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
     from misen.utils.snapshot import Snapshot
     from misen.workspace import Workspace

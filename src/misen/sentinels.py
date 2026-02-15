@@ -1,4 +1,4 @@
-"""Sentinel values used across the codebase."""
+"""Public sentinel values used in task argument binding."""
 
 from typing import TYPE_CHECKING, cast
 

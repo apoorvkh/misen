@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, MutableMapping
     from pathlib import Path
 
-    from misen.task import Task
+    from misen.tasks import Task
     from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
     from misen.utils.locks import LockLike
     from misen.utils.work_unit import WorkUnit

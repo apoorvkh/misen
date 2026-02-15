@@ -1,4 +1,4 @@
-"""Helpers for @task decorator normalization."""
+"""Public task decorator and metadata models."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeVar
 
 from msgspec import Struct
 
-from misen.utils.functions import (
+from misen.utils.function_introspection import (
     external_callable_id,
     is_lambda_function,
     is_local_project_function,
@@ -19,8 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import FunctionType
 
-
-__all__ = ["Resources", "TaskProperties", "task"]
+__all__ = ["Resources", "TaskProperties", "resolve_task_properties", "task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -61,35 +60,7 @@ def task(
     resources: Callable[..., Resources] | Resources | None = None,
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Decorator to control how a Task is identified and cached.
-
-    Attaches `__task_properties__: TaskProperties` attribute to `self.func`.
-
-    Arguments:
-        id:
-            Stable identifier for the task definition. Will raise ValueError if None.
-        cache:
-            If True, `Task.result()` may store results in the Workspace.
-        exclude:
-            Exclude arguments (by name) from hashing.
-        defaults:
-            If an argument value matches the provided default, it is omitted from hashing.
-        versions:
-            For versioning per (argument, value) pair. Normalized to a {argument : ResultHash(value)} mapping.
-        index_by:
-            Determines how result is indexed (i.e. how ResultHash is computed) in Workspace:
-            - "task": index by resolved task hash
-            - "result": index by the result object
-        resources:
-            Optional resource resolver for each Task instance.
-            - If a callable: called with the task arguments during `Task(...)` construction.
-            - If Resources: used directly for every `Task(...)`.
-        serializer:
-            Serializer type for saving/loading results.
-
-    Returns:
-        A decorator that mutates `func` by setting `func.__task_properties__`.
-    """
+    """Decorator to control how a Task is identified and cached."""
     if id is None:
         msg = "id must be provided."
         raise ValueError(msg)

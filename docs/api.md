@@ -1,6 +1,6 @@
 # Task
 
-::: misen.task.Task
+::: misen.tasks.Task
     options:
       members:
         - __init__
@@ -15,11 +15,11 @@
 
 # @task decorator
 
-::: misen.task.task
+::: misen.task_properties.task
 
-# @resources decorator
+# Resources
 
-::: misen.task.resources
+::: misen.task_properties.Resources
 
 # DiskWorkspace
 

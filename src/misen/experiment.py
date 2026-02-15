@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 from msgspec import Struct
 
-from misen.task import Task
+from misen.tasks import Task
 from misen.utils.auto import resolve_auto
 from misen.utils.experiment_cli import experiment_cli
 

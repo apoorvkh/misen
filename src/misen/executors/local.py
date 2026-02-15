@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from io import FileIO
     from pathlib import Path
 
-    from misen.task import Resources
+    from misen.task_properties import Resources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 

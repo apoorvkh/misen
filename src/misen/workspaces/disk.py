@@ -19,7 +19,7 @@ from misen.utils.locks import LockLike, NFSLock
 from misen.workspace import Workspace
 
 if TYPE_CHECKING:
-    from misen.task import Task
+    from misen.tasks import Task
 
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)

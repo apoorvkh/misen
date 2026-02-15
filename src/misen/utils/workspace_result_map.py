@@ -7,7 +7,7 @@ import shutil
 from collections.abc import Iterator, MutableMapping
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from misen.task import Task
+from misen.tasks import Task
 
 if TYPE_CHECKING:
     from pathlib import Path

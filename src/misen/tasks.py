@@ -21,13 +21,17 @@ from inspect import Signature, signature
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
+from misen.task_properties import Resources, TaskProperties, resolve_task_properties
 from misen.utils.auto import resolve_auto
 from misen.utils.frozen_mixin import FrozenMixin
-from misen.utils.functions import is_function_object
+from misen.utils.function_introspection import is_function_object
 from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
-from misen.utils.task_construction import collect_task_dependencies, hash_task_arguments
-from misen.utils.task_properties import Resources, TaskProperties, resolve_task_properties
-from misen.utils.task_runtime import execute_task, save_task_result
+from misen.utils.task_utils import (
+    collect_task_dependencies,
+    execute_task,
+    hash_task_arguments,
+    save_task_result,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -131,21 +135,6 @@ class Task(FrozenMixin, Generic[R]):
             # raised if dependencies are not cached (pre-requisite to Task runtime)
             return False
 
-    def submit(
-        self,
-        *,
-        workspace: Workspace | Literal["auto"] = "auto",
-        executor: Executor | Literal["auto"] = "auto",
-    ) -> DependencyGraph[Job]:
-        """Submit this Task (and its dependency graph) to an Executor for deferred execution.
-
-        Returns:
-            DependencyGraph of Jobs (for monitoring progress of chunked units of work).
-        """
-        executor = resolve_auto(executor=executor)
-        workspace = resolve_auto(workspace=workspace)
-        return executor.submit(tasks={self}, workspace=workspace)
-
     def result(
         self,
         *,
@@ -201,22 +190,37 @@ class Task(FrozenMixin, Generic[R]):
             for dependency in self.dependencies
         }
 
-        result = execute_task(
-            task=self,
-            workspace=workspace,
-            dependency_results=dependency_results,
-            assigned_resources=_assigned_resources,
-            job_id=_job_id,
-            lock_context=(
-                self._runtime_lock(workspace=workspace).context(blocking=False)
-                if self.properties.cache
-                else nullcontext()
-            ),
+        lock_context = (
+            self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
         )
+
+        with lock_context:
+            result = execute_task(
+                task=self,
+                workspace=workspace,
+                dependency_results=dependency_results,
+                assigned_resources=_assigned_resources,
+                job_id=_job_id,
+            )
 
         save_task_result(task=self, result=result, workspace=workspace)
 
         return result
+
+    def submit(
+        self,
+        *,
+        workspace: Workspace | Literal["auto"] = "auto",
+        executor: Executor | Literal["auto"] = "auto",
+    ) -> DependencyGraph[Job]:
+        """Submit this Task (and its dependency graph) to an Executor for deferred execution.
+
+        Returns:
+            DependencyGraph of Jobs (for monitoring progress of chunked units of work).
+        """
+        executor = resolve_auto(executor=executor)
+        workspace = resolve_auto(workspace=workspace)
+        return executor.submit(tasks={self}, workspace=workspace)
 
     def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
         """Returns work directory from Workspace."""
