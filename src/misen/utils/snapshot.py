@@ -16,8 +16,9 @@ from typing import TYPE_CHECKING
 import uv
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
+    from misen.utils.assigned_resources import AssignedResources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -28,7 +29,12 @@ class Snapshot(ABC):
     __slots__ = ()
 
     @abstractmethod
-    def prepare_job(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[str, list[str], Mapping[str, str]]:
+    def prepare_job(
+        self,
+        work_unit: WorkUnit,
+        workspace: Workspace,
+        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+    ) -> tuple[str, list[str], Mapping[str, str]]:
         """Prepare execution command and environment overrides for a work unit."""
 
 
@@ -45,13 +51,24 @@ class LocalSnapshot(Snapshot):
         self.venv_dir = self._snapshot_venv(self.snapshot_dir / ".venv")
         self.env_files = self._snapshot_env_files(self.snapshot_dir)
 
-    def prepare_job(self, work_unit: WorkUnit, workspace: Workspace) -> tuple[str, list[str], Mapping[str, str]]:
+    def prepare_job(
+        self,
+        work_unit: WorkUnit,
+        workspace: Workspace,
+        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+    ) -> tuple[str, list[str], Mapping[str, str]]:
         """Prepare a uv command and env overrides to execute a serialized work-unit payload."""
         job_id = _token_base32(6)
         payload_dir = self.snapshot_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         payload_path = payload_dir / f"{_token_base32(6)}.pkl"
-        payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
+        payload_path.write_bytes(
+            work_unit.as_payload(
+                workspace=workspace,
+                job_id=job_id,
+                assigned_resources=assigned_resources,
+            )
+        )
         argv: list[str] = [
             self.uv_bin,
             "run",

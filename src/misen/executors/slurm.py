@@ -9,6 +9,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 from misen.executor import Executor, Job, WorkUnit
+from misen.utils.assigned_resources import slurm_assigned_resources_from_environ
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
@@ -99,7 +100,11 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             dep_ids = ":".join(job.slurm_job_id for job in dependencies)
             sbatch_cmd.extend(["--dependency", f"afterok:{dep_ids}"])
 
-        job_id, argv, env_overrides = snapshot.prepare_job(work_unit=work_unit, workspace=workspace)
+        job_id, argv, env_overrides = snapshot.prepare_job(
+            work_unit=work_unit,
+            workspace=workspace,
+            assigned_resources=slurm_assigned_resources_from_environ,
+        )
 
         job_log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         sbatch_cmd.extend(["--output", str(job_log_path)])

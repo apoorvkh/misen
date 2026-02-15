@@ -17,9 +17,11 @@ Results are identified by `result_hash()`. Any task which computes the same resu
 from __future__ import annotations
 
 import itertools
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import cache
 from inspect import Signature, signature
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
@@ -39,14 +41,14 @@ from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
 from misen.utils.nested_args import iter_nested_leaves, map_nested_leaves
 from misen.utils.object_io import DefaultSerializer, Serializer
-from misen.utils.sentinels import WORK_DIR
+from misen.utils.sentinels import ASSIGNED_RESOURCES, WORK_DIR
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
     from types import FunctionType
 
     from misen.executor import Executor, Job
+    from misen.utils.assigned_resources import AssignedResources
     from misen.utils.locks import LockLike
     from misen.workspace import Workspace
 
@@ -54,6 +56,13 @@ __all__ = ["Resources", "Task", "task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+
+@contextmanager
+def _temporary_work_dir_context(temp_root: Path, prefix: str) -> Iterator[Path]:
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=temp_root, prefix=prefix) as temp_dir:
+        yield Path(temp_dir)
 
 
 class Task(Generic[R]):
@@ -70,6 +79,7 @@ class Task(Generic[R]):
 
     __slots__ = (
         "_frozen",
+        "_has_work_dir",
         "_signature",
         "_task_hash",
         "args",
@@ -116,10 +126,7 @@ class Task(Generic[R]):
                     has_work_dir = True
 
         self.dependencies = frozenset(dependencies)
-
-        if not self.properties.cache and has_work_dir:
-            msg = "WORK_DIR sentinel can only be used when Task.properties.cache == True."
-            raise ValueError(msg)
+        self._has_work_dir = has_work_dir
 
         self.task_hash()
         self._frozen = True
@@ -266,6 +273,7 @@ class Task(Generic[R]):
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
         _job_id: str | None = None,
+        _assigned_resources: AssignedResources | None = None,
     ) -> R:
         """Compute (or retrieve) this Task's result.
 
@@ -309,27 +317,39 @@ class Task(Generic[R]):
                 compute_if_uncached=True,
                 compute_uncached_deps=True,
                 _job_id=_job_id,
+                _assigned_resources=_assigned_resources,
             )
             for t in self.dependencies
         }
-        wd = workspace.get_work_dir(task=self) if self.properties.cache else None
 
         def resolve_argument(dep: Any) -> Any:
-            """Resolve Task / WORK_DIR leaves recursively for execution."""
-            return map_nested_leaves(
-                dep, lambda leaf: dep_results[leaf] if isinstance(leaf, Task) else wd if leaf is WORK_DIR else leaf
-            )
+            """Resolve Task / sentinel leaves recursively for execution."""
+
+            def resolve_leaf(leaf: Any) -> Any:
+                if isinstance(leaf, Task):
+                    return dep_results[leaf]
+                if leaf is WORK_DIR:
+                    if work_dir is None:
+                        msg = "WORK_DIR sentinel requested, but work directory is unavailable."
+                        raise RuntimeError(msg)
+                    return work_dir
+                if leaf is ASSIGNED_RESOURCES:
+                    return _assigned_resources
+                return leaf
+
+            return map_nested_leaves(dep, resolve_leaf)
 
         # Runtime lock: should not run cached Tasks if already being computed; fails immediately if so.
 
         with (
             self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
         ):
-            with workspace.open_task_log(task=self, mode="a", job_id=_job_id, timestamp="current") as task_log:
-                with capture_all_output(task_log, tee_to_stdout=True):
-                    args = (resolve_argument(v) for v in self.args)
-                    kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
-                    result = self.func(*args, **kwargs)
+            with self._work_dir_context(workspace=workspace) as work_dir:
+                with workspace.open_task_log(task=self, mode="a", job_id=_job_id, timestamp="current") as task_log:
+                    with capture_all_output(task_log, tee_to_stdout=True):
+                        args = (resolve_argument(v) for v in self.args)
+                        kwargs = {k: resolve_argument(v) for k, v in self.kwargs.items()}
+                        result = self.func(*args, **kwargs)
 
             # Store `Task -> hash(result)` mapping in Workspace
             # Indicator of Task completion
@@ -362,6 +382,16 @@ class Task(Generic[R]):
         """Returns work directory from Workspace."""
         workspace = resolve_auto(workspace=workspace)
         return workspace.get_work_dir(task=self)
+
+    def _work_dir_context(self, workspace: Workspace) -> AbstractContextManager[Path | None]:
+        if self.properties.cache:
+            return nullcontext(workspace.get_work_dir(task=self) if self._has_work_dir else None)
+        if not self._has_work_dir:
+            return nullcontext(None)
+        return _temporary_work_dir_context(
+            temp_root=workspace.get_temp_dir() / "work_dirs",
+            prefix=f"{self.task_hash().short_b32()}-",
+        )
 
     def _runtime_lock(self, workspace: Workspace) -> LockLike:
         """Workspace manages a lock for each Task, expected to be held during runtime."""

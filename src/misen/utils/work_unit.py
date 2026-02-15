@@ -12,7 +12,10 @@ from misen.task import Task
 from misen.utils.nested_args import map_nested_leaves
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from misen.task import Resources
+    from misen.utils.assigned_resources import AssignedResources
     from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
 
@@ -82,11 +85,17 @@ class WorkUnit:
         """Return a short debug representation for the work unit."""
         return f"WorkUnit(hash={self.root.task_hash().short_b32()})"
 
-    def execute(self, workspace: Workspace, job_id: str) -> None:
+    def execute(
+        self,
+        workspace: Workspace,
+        job_id: str,
+        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+    ) -> None:
         """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
         from misen.task import Task
 
         task_results: dict[Task, Any] = {}
+        _assigned_resources = assigned_resources() if callable(assigned_resources) else assigned_resources
 
         def resolve_arg(arg: Any) -> Any:
             """Resolve non-cacheable Task dependencies from cached runtime results."""
@@ -115,11 +124,24 @@ class WorkUnit:
                 compute_if_uncached=True,
                 compute_uncached_deps=False,
                 _job_id=job_id,
+                _assigned_resources=_assigned_resources,
             )
 
-    def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
+    def as_payload(
+        self,
+        workspace: Workspace,
+        job_id: str,
+        assigned_resources: Callable[[], AssignedResources | None] | AssignedResources | None = None,
+    ) -> bytes:
         """Return a serialized payload that can be executed to run the work unit."""
-        return cloudpickle.dumps(functools.partial(self.execute, workspace=workspace, job_id=job_id))
+        return cloudpickle.dumps(
+            functools.partial(
+                self.execute,
+                workspace=workspace,
+                job_id=job_id,
+                assigned_resources=assigned_resources,
+            )
+        )
 
 
 def build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
