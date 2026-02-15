@@ -1,25 +1,29 @@
-"""Local multiprocessing executor implementation."""
+"""Local subprocess-based executor implementation."""
 
 from __future__ import annotations
 
-import multiprocessing
 import os
+import socket
 import subprocess
 import threading
+from bisect import insort
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 from misen.executor import Executor, Job
+from misen.utils.assigned_resources import AssignedResources
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
-    from multiprocessing.process import BaseProcess
+    from io import FileIO
     from pathlib import Path
 
     from misen.task import Resources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
+
+JobState = Literal["pending", "running", "done", "failed", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -31,11 +35,9 @@ class _ResourceBudget:
     gpus: int
 
     def fits(self, resources: Resources) -> bool:
-        """Return True if the resources fit within the budget."""
         return resources.cpus <= self.cpus and resources.memory <= self.memory and resources.gpus <= self.gpus
 
     def subtract(self, resources: Resources) -> _ResourceBudget:
-        """Return a new budget with the resources subtracted."""
         return _ResourceBudget(
             cpus=self.cpus - resources.cpus,
             memory=self.memory - resources.memory,
@@ -43,7 +45,6 @@ class _ResourceBudget:
         )
 
     def add(self, resources: Resources) -> _ResourceBudget:
-        """Return a new budget with the resources added."""
         return _ResourceBudget(
             cpus=self.cpus + resources.cpus,
             memory=self.memory + resources.memory,
@@ -51,156 +52,248 @@ class _ResourceBudget:
         )
 
 
-def _run_subprocess(argv: list[str], env: dict[str, str], log_path: Path) -> None:
-    """Run a command in a worker process, writing output directly to the job log."""
-    with log_path.open("a", buffering=1, encoding="utf-8", errors="replace") as log_file:
-        try:
-            completed = subprocess.run(  # noqa: S603
-                argv,
-                env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        except FileNotFoundError:
-            raise SystemExit(127) from None
-    raise SystemExit(completed.returncode)
-
-
 class LocalJob(Job):
-    """Job implementation backed by a multiprocessing.Process."""
+    """Job implementation backed by a subprocess.Popen."""
 
-    __slots__ = ("_lock", "_process", "_state", "argv", "dependencies", "env", "resources")
+    __slots__ = (
+        "_lock",
+        "_log_fp",
+        "_process",
+        "_state",
+        "assigned_cpu_indices",
+        "assigned_gpu_indices",
+        "dependencies",
+        "resources",
+        "snapshot",
+        "workspace",
+    )
 
     def __init__(
         self,
         work_unit: WorkUnit,
         resources: Resources,
         dependencies: set[LocalJob],
-        argv: list[str],
-        env: dict[str, str],
-        job_id: str,
-        log_path: Path,
+        snapshot: LocalSnapshot,
+        workspace: Workspace,
     ) -> None:
-        """Initialize a local job for a work unit."""
-        super().__init__(work_unit=work_unit, job_id=job_id, log_path=log_path)
+        super().__init__(work_unit=work_unit, job_id=None, log_path=None)
         self.resources = resources
         self.dependencies = dependencies
-        self.argv = argv
-        self.env = env
-        self._process: BaseProcess | None = None
-        self._state: Literal["pending", "running", "done", "failed", "unknown"] = "pending"
+        self.snapshot = snapshot
+        self.workspace = workspace
+
+        self.assigned_cpu_indices: tuple[int, ...] = ()
+        self.assigned_gpu_indices: tuple[int, ...] = ()
+
+        self._process: subprocess.Popen[bytes] | None = None
+        self._log_fp = None  # keep alive while the child runs
+        self._state: JobState = "pending"
         self._lock = threading.Lock()
 
-    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
+    def state(self) -> JobState:
         """Return the current process state."""
         with self._lock:
             if self._state in {"done", "failed"}:
                 return self._state
 
-            if self._process is None:
+            proc = self._process
+            if proc is None:
                 return "pending"
 
-            if self._process.is_alive():
+            rc = proc.poll()
+            if rc is None:
                 return "running"
 
-            if self._process.exitcode == 0:
-                self._state = "done"
-            elif self._process.exitcode is not None:
-                self._state = "failed"
+            # Process exited; close log handle.
+            self._close_log_fp_locked()
+
+            self._state = "done" if rc == 0 else "failed"
             return self._state
 
-    def set_process(self, process: BaseProcess) -> None:
-        """Set the underlying process and mark running."""
+    def set_process(self, process: subprocess.Popen[bytes], log_fp: FileIO) -> None:
+        """Set the underlying process + log handle and mark running."""
         with self._lock:
             self._process = process
+            self._log_fp = log_fp
             self._state = "running"
 
     def mark_failed(self) -> None:
-        """Mark the job as failed."""
         with self._lock:
+            self._close_log_fp_locked()
             self._state = "failed"
+
+    def _close_log_fp_locked(self) -> None:
+        fp = self._log_fp
+        if fp is None:
+            return
+        try:
+            fp.close()
+        finally:
+            self._log_fp = None
 
 
 class _LocalScheduler:
     """Background scheduler for managing local job execution."""
 
     def __init__(self, total_budget: _ResourceBudget) -> None:
-        """Initialize the scheduler with a total resource budget."""
-        self._total_budget = total_budget
         self._available_budget = total_budget
+        self._available_cpu_indices = list(range(total_budget.cpus))
+        self._available_gpu_indices = list(range(total_budget.gpus))
+
+        hostname = socket.gethostname()
+        self._hostnames = (hostname,) if hostname else ()
+
         self._pending: list[LocalJob] = []
         self._running: set[LocalJob] = set()
+
         self._condition = threading.Condition()
-        self._context = multiprocessing.get_context("spawn")
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def submit(self, job: LocalJob) -> None:
-        """Submit a job for scheduling."""
         with self._condition:
             self._pending.append(job)
             self._condition.notify_all()
 
     def _run(self) -> None:
-        """Scheduler loop that launches ready jobs."""
+        """Scheduler loop that launches ready jobs and reaps finished ones."""
         while True:
             with self._condition:
-                self._collect_finished()
-                started = self._start_ready_jobs()
+                self._collect_finished_locked()
+                started_any = self._start_ready_jobs_locked()
+
                 if not self._pending and not self._running:
                     self._condition.wait()
-                elif not started:
+                    continue
+
+                # If we didn't start anything, sleep briefly (we'll be notified on submit).
+                if not started_any:
                     self._condition.wait(timeout=0.1)
 
-    def _collect_finished(self) -> None:
-        """Collect finished jobs and release their resources."""
-        finished = {job for job in self._running if job.state() in {"done", "failed"}}
+    def _collect_finished_locked(self) -> None:
+        finished = [job for job in self._running if job.state() in {"done", "failed"}]
         if not finished:
             return
+
         for job in finished:
             self._running.remove(job)
             self._available_budget = self._available_budget.add(job.resources)
+            self._release_allocations(job.assigned_cpu_indices, job.assigned_gpu_indices)
+
         self._condition.notify_all()
 
-    def _start_ready_jobs(self) -> bool:
-        """Start pending jobs that are ready and return True if any started."""
+    def _start_ready_jobs_locked(self) -> bool:
         started_any = False
+
         for job in list(self._pending):
-            dependency_states = {dep.state() for dep in job.dependencies}
-            if "failed" in dependency_states:
-                job.mark_failed()
-                self._pending.remove(job)
-                started_any = True
+            if not self._deps_ready(job):
+                # If deps failed, _deps_ready() marks failed and removes from pending.
+                started_any = started_any or (job not in self._pending)
                 continue
-            if dependency_states and dependency_states != {"done"}:
-                continue
+
             if not self._available_budget.fits(job.resources):
                 continue
 
-            if job.job_id is None:
-                job.mark_failed()
-                self._pending.remove(job)
-                started_any = True
+            allocations = self._reserve_indices(job.resources)
+            if allocations is None:
                 continue
-            process = self._context.Process(
-                target=_run_subprocess,
-                args=(job.argv, job.env, job.log_path),
-            )
+            cpu_indices, gpu_indices = allocations
+
             try:
-                process.start()
-            except (OSError, RuntimeError):
-                job.mark_failed()
-                self._pending.remove(job)
+                self._launch_job(job, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
+            except (OSError, RuntimeError, ValueError):
+                self._mark_pending_failed(job, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
                 started_any = True
                 continue
-            job.set_process(process)
 
             self._available_budget = self._available_budget.subtract(job.resources)
             self._pending.remove(job)
             self._running.add(job)
             started_any = True
+
         return started_any
+
+    def _deps_ready(self, job: LocalJob) -> bool:
+        states = {dep.state() for dep in job.dependencies}
+        if "failed" in states:
+            self._mark_pending_failed(job)
+            return False
+        return not states or states == {"done"}
+
+    def _launch_job(self, job: LocalJob, cpu_indices: tuple[int, ...], gpu_indices: tuple[int, ...]) -> None:
+        assigned_resources = AssignedResources(
+            hostnames=self._hostnames,
+            cpu_indices=cpu_indices,
+            gpu_indices=gpu_indices,
+            cpu_count=job.resources.cpus,
+            gpu_count=job.resources.gpus,
+        )
+
+        job.job_id, argv, env_overrides = job.snapshot.prepare_job(
+            work_unit=job.work_unit,
+            workspace=job.workspace,
+            assigned_resources_getter=(lambda r=assigned_resources: r),
+        )
+
+        job.log_path = job.workspace.get_job_log(job_id=job.job_id, work_unit=job.work_unit)
+        log_fp = job.log_path.open("ab", buffering=0)
+        try:
+            process = subprocess.Popen(  # noqa: S603
+                argv,
+                env=os.environ | env_overrides,
+                stdout=log_fp,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception:
+            # Don't leak a file descriptor if Popen fails.
+            log_fp.close()
+            raise
+
+        job.set_process(process, log_fp=log_fp)
+        job.assigned_cpu_indices = cpu_indices
+        job.assigned_gpu_indices = gpu_indices
+
+    def _reserve_indices(self, resources: Resources) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+        cpu_indices = self._allocate_indices(self._available_cpu_indices, resources.cpus)
+        if cpu_indices is None:
+            return None
+        gpu_indices = self._allocate_indices(self._available_gpu_indices, resources.gpus)
+        if gpu_indices is None:
+            self._release_allocations(cpu_indices, ())
+            return None
+        return cpu_indices, gpu_indices
+
+    def _release_allocations(self, cpu_indices: tuple[int, ...], gpu_indices: tuple[int, ...]) -> None:
+        self._release_indices(self._available_cpu_indices, cpu_indices)
+        self._release_indices(self._available_gpu_indices, gpu_indices)
+
+    def _mark_pending_failed(
+        self,
+        job: LocalJob,
+        cpu_indices: tuple[int, ...] = (),
+        gpu_indices: tuple[int, ...] = (),
+    ) -> None:
+        self._release_allocations(cpu_indices, gpu_indices)
+        job.mark_failed()
+        if job in self._pending:
+            self._pending.remove(job)
+
+    @staticmethod
+    def _allocate_indices(pool: list[int], count: int) -> tuple[int, ...] | None:
+        """Allocate `count` indices from a sorted index pool."""
+        if count == 0:
+            return ()
+        if len(pool) < count:
+            return None
+        indices = tuple(pool[:count])
+        del pool[:count]
+        return indices
+
+    @staticmethod
+    def _release_indices(pool: list[int], indices: tuple[int, ...]) -> None:
+        """Return indices to a pool while preserving sorted order."""
+        for idx in indices:
+            insort(pool, idx)
 
 
 class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
@@ -211,7 +304,6 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
     max_gpus: int | None = None
 
     def __post_init__(self) -> None:
-        """Initialize the local scheduler and resource budget."""
         self._resource_budget = _ResourceBudget(
             cpus=self.max_cpus or (os.cpu_count() or 1),
             memory=self.max_memory or _infer_total_memory_gb(),
@@ -222,18 +314,19 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
     @classmethod
     @cache
     def _cached_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
-        """Return a cached local snapshot instance for this executor class."""
         return LocalSnapshot(snapshots_dir=snapshots_dir)
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Create or reuse the local executor snapshot."""
         snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
         return LocalExecutor._cached_snapshot(snapshots_dir=snapshots_dir)
 
     def _dispatch(
-        self, work_unit: WorkUnit, dependencies: set[LocalJob], workspace: Workspace, snapshot: LocalSnapshot
+        self,
+        work_unit: WorkUnit,
+        dependencies: set[LocalJob],
+        workspace: Workspace,
+        snapshot: LocalSnapshot,
     ) -> LocalJob:
-        """Dispatch a work unit to the local scheduler."""
         resources = work_unit.resources
         if not self._resource_budget.fits(resources):
             msg = (
@@ -244,16 +337,12 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             )
             raise ValueError(msg)
 
-        job_id, argv, env_overrides = snapshot.prepare_job(work_unit=work_unit, workspace=workspace)
-        log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         job = LocalJob(
             work_unit=work_unit,
             resources=resources,
             dependencies=dependencies,
-            argv=argv,
-            env=os.environ.copy() | dict(env_overrides),
-            job_id=job_id,
-            log_path=log_path,
+            snapshot=snapshot,
+            workspace=workspace,
         )
         self._scheduler.submit(job)
         return job

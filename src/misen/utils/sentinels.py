@@ -3,6 +3,11 @@
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    import pathlib
+    from pathlib import Path
 
-WORK_DIR = cast("pathlib.Path", object())
+    from misen.utils.assigned_resources import AssignedResources
+
+__all__ = ["ASSIGNED_RESOURCES", "WORK_DIR"]
+
+WORK_DIR = cast("Path", object())
+ASSIGNED_RESOURCES = cast("AssignedResources | None", object())

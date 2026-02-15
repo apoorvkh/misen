@@ -17,9 +17,11 @@ Results are identified by `result_hash()`. Any task which computes the same resu
 from __future__ import annotations
 
 import itertools
+import tempfile
 from contextlib import nullcontext
 from functools import cache
 from inspect import Signature, signature
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
@@ -39,14 +41,14 @@ from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
 from misen.utils.nested_args import iter_nested_leaves, map_nested_leaves
 from misen.utils.object_io import DefaultSerializer, Serializer
-from misen.utils.sentinels import WORK_DIR
+from misen.utils.sentinels import ASSIGNED_RESOURCES, WORK_DIR
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
     from types import FunctionType
 
     from misen.executor import Executor, Job
+    from misen.utils.assigned_resources import AssignedResources
     from misen.utils.locks import LockLike
     from misen.workspace import Workspace
 
@@ -106,20 +108,9 @@ class Task(Generic[R]):
 
         self.resources = self.properties.resources(*self.args, **self.kwargs)
 
-        dependencies: set[Task] = set()
-        has_work_dir = False
-        for value in itertools.chain(self.args, self.kwargs.values()):
-            for leaf in iter_nested_leaves(value):
-                if isinstance(leaf, Task):
-                    dependencies.add(leaf)
-                elif leaf is WORK_DIR:
-                    has_work_dir = True
-
-        self.dependencies = frozenset(dependencies)
-
-        if not self.properties.cache and has_work_dir:
-            msg = "WORK_DIR sentinel can only be used when Task.properties.cache == True."
-            raise ValueError(msg)
+        values = itertools.chain(self.args, self.kwargs.values())
+        leaves = itertools.chain.from_iterable(map(iter_nested_leaves, values))
+        self.dependencies = frozenset(leaf for leaf in leaves if isinstance(leaf, Task))
 
         self.task_hash()
         self._frozen = True
@@ -266,6 +257,7 @@ class Task(Generic[R]):
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
         _job_id: str | None = None,
+        _assigned_resources: AssignedResources | None = None,
     ) -> R:
         """Compute (or retrieve) this Task's result.
 
@@ -309,16 +301,31 @@ class Task(Generic[R]):
                 compute_if_uncached=True,
                 compute_uncached_deps=True,
                 _job_id=_job_id,
+                _assigned_resources=_assigned_resources,
             )
             for t in self.dependencies
         }
-        wd = workspace.get_work_dir(task=self) if self.properties.cache else None
+
+        @cache
+        def _work_dir() -> Path:
+            if self.properties.cache:
+                return workspace.get_work_dir(task=self)
+            _task_hash = self.resolved_hash(workspace=workspace).b32()
+            return Path(tempfile.mkdtemp(prefix=f"misen-work-{_task_hash}-"))
 
         def resolve_argument(dep: Any) -> Any:
-            """Resolve Task / WORK_DIR leaves recursively for execution."""
-            return map_nested_leaves(
-                dep, lambda leaf: dep_results[leaf] if isinstance(leaf, Task) else wd if leaf is WORK_DIR else leaf
-            )
+            """Resolve Task / sentinel leaves recursively for execution."""
+
+            def resolve_leaf(leaf: Any) -> Any:
+                if isinstance(leaf, Task):
+                    return dep_results[leaf]
+                if leaf is WORK_DIR:
+                    return _work_dir()
+                if leaf is ASSIGNED_RESOURCES:
+                    return _assigned_resources
+                return leaf
+
+            return map_nested_leaves(dep, resolve_leaf)
 
         # Runtime lock: should not run cached Tasks if already being computed; fails immediately if so.
 
@@ -439,6 +446,10 @@ class Task(Generic[R]):
             """Return hash identifier for an argument value."""
             if isinstance(value, Task):
                 return cast("TaskHash | ResultHash", leaf_repr(value))
+            if value is ASSIGNED_RESOURCES or value is WORK_DIR:
+                # TODO: sentinel should be in exclusions
+                msg = "Resolved task arguments cannot contain sentinel values."
+                raise RuntimeError(msg)
             return ResultHash.from_object(map_nested_leaves(value, leaf_repr))
 
         def include_argument(key: str, value: Any) -> bool:
@@ -549,5 +560,5 @@ class TaskProperties(Struct, frozen=True):
     defaults: dict[str, Any] = {}
     versions: dict[tuple[str, ResultHash], int] = {}
     index_by: Literal["task", "result"] = "result"
-    resources: Callable[..., Resources] = lambda **_: Resources()
+    resources: Callable[..., Resources] = lambda *_, **__: Resources()
     serializer: type[Serializer] = DefaultSerializer

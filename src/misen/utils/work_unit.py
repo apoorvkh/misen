@@ -12,7 +12,10 @@ from misen.task import Task
 from misen.utils.nested_args import map_nested_leaves
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from misen.task import Resources
+    from misen.utils.assigned_resources import AssignedResources
     from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
 
@@ -82,14 +85,21 @@ class WorkUnit:
         """Return a short debug representation for the work unit."""
         return f"WorkUnit(hash={self.root.task_hash().short_b32()})"
 
-    def execute(self, workspace: Workspace, job_id: str) -> None:
+    def execute(
+        self,
+        workspace: Workspace,
+        job_id: str,
+        assigned_resources_getter: Callable[[], AssignedResources | None],
+    ) -> None:
         """Execute self.graph Tasks one-by-one in dependency order. Should be called by `Executor._dispatch()`."""
         from misen.task import Task
 
         task_results: dict[Task, Any] = {}
+        assigned_resources = assigned_resources_getter()
 
         def resolve_arg(arg: Any) -> Any:
             """Resolve non-cacheable Task dependencies from cached runtime results."""
+
             def resolve_leaf(leaf: Any) -> Any:
                 if isinstance(leaf, Task) and not leaf.properties.cache:
                     return task_results[leaf]
@@ -115,11 +125,24 @@ class WorkUnit:
                 compute_if_uncached=True,
                 compute_uncached_deps=False,
                 _job_id=job_id,
+                _assigned_resources=assigned_resources,
             )
 
-    def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
+    def as_payload(
+        self,
+        workspace: Workspace,
+        job_id: str,
+        assigned_resources_getter: Callable[[], AssignedResources | None],
+    ) -> bytes:
         """Return a serialized payload that can be executed to run the work unit."""
-        return cloudpickle.dumps(functools.partial(self.execute, workspace=workspace, job_id=job_id))
+        return cloudpickle.dumps(
+            functools.partial(
+                self.execute,
+                workspace=workspace,
+                job_id=job_id,
+                assigned_resources_getter=assigned_resources_getter,
+            )
+        )
 
 
 def build_work_graph(tasks: set[Task], workspace: Workspace) -> DependencyGraph[WorkUnit]:
