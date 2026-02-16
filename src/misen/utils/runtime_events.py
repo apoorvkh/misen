@@ -8,7 +8,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -291,7 +291,7 @@ def runtime_job_failed(job_key: int) -> None:
     _JOB_BOARD.failed(job_key)
 
 
-def task_label(task: Task[object]) -> str:
+def task_label(task: Task[Any]) -> str:
     """Return a compact human-readable label for a task."""
     return f"{task.properties.id} ({task.task_hash().short_b32()})"
 

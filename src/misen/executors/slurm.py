@@ -165,10 +165,7 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             msg = f"Unexpected sbatch output: {out!r}"
             raise RuntimeError(msg)
         runtime_event(
-            (
-                f"SLURM job submitted: {work_unit_label(work_unit)} "
-                f"(job_id={job_id}, slurm_job_id={slurm_job_id})"
-            ),
+            (f"SLURM job submitted: {work_unit_label(work_unit)} (job_id={job_id}, slurm_job_id={slurm_job_id})"),
             style="green",
         )
         return SlurmJob(work_unit=work_unit, job_id=job_id, slurm_job_id=slurm_job_id, log_path=job_log_path)

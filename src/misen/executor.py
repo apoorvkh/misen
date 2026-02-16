@@ -81,15 +81,13 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
                 with runtime_activity("Creating a snapshot of the project environment", style="yellow"):
                     snapshot = self._make_snapshot(workspace=workspace)
             except Exception:
+                elapsed_s = time.perf_counter() - started_at
                 runtime_event(
-                    f"Failed to create a snapshot of the project environment in {(time.perf_counter() - started_at):.2f}s)",
-                    style="bold red",
+                    f"Failed to create a snapshot of the project environment in {elapsed_s:.2f}s)", style="bold red"
                 )
                 raise
-            runtime_event(
-                f"Created a snapshot of the project environment in {(time.perf_counter() - started_at):.2f}s",
-                style="green",
-            )
+            elapsed_s = time.perf_counter() - started_at
+            runtime_event(f"Created a snapshot of the project environment in {elapsed_s:.2f}s", style="green")
 
             with runtime_progress(f"Submitting work units to {executor_name}", total=num_dispatch) as progress_bar:
                 for w in work_units:

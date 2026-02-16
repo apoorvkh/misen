@@ -206,6 +206,7 @@ def execute_task(
     task_name = task_label(task)
     runtime_event(f"Task started: {task_name} (job_id={job_id or 'n/a'})", style="yellow")
     started_at = time.perf_counter()
+
     argument_resolver = _build_argument_resolver(
         task=task,
         workspace=workspace,
@@ -219,16 +220,14 @@ def execute_task(
                 args = (argument_resolver(value) for value in task.args)
                 kwargs = {name: argument_resolver(value) for name, value in task.kwargs.items()}
                 result = task.func(*args, **kwargs)
-    except Exception as exc:
-        elapsed_s = time.perf_counter() - started_at
+    except Exception:
         runtime_event(
-            f"Task failed: {task_name} in {elapsed_s:.2f}s ({type(exc).__name__}: {exc})",
+            f"Task failed: {task_name} in {(time.perf_counter() - started_at):.2f}s",
             style="bold red",
         )
         raise
 
-    elapsed_s = time.perf_counter() - started_at
-    runtime_event(f"Task finished: {task_name} in {elapsed_s:.2f}s", style="green")
+    runtime_event(f"Task finished: {task_name} in {(time.perf_counter() - started_at):.2f}s", style="green")
     return cast("R", result)
 
 
