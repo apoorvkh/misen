@@ -92,6 +92,10 @@ class WorkUnit:
         """Return compact debug representation."""
         return f"WorkUnit(hash={self.root.task_hash().short_b32()})"
 
+    def done(self, workspace: Workspace) -> bool:
+        """Return whether work unit has been completed."""
+        return self.root.done(workspace=workspace)
+
     def execute(
         self,
         workspace: Workspace,

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast, ge
 
 from typing_extensions import assert_never
 
+from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, work_unit_label
 from misen.utils.settings import FromSettingsABC
 from misen.utils.work_unit import WorkUnit, build_work_graph
 
@@ -61,21 +62,63 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
             Dependency graph of job handles keyed to work-unit topology.
         """
         work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
+        work_units = list(work_graph)  # dependency order
+
+        jobs: dict[WorkUnit, CompletedJob | JobT] = {
+            w: CompletedJob(work_unit=w) for w in work_units if w.done(workspace=workspace)
+        }
+
+        num_complete = len(jobs)
+        num_dispatch = len(work_units) - num_complete
+        executor_name = self.__class__.__name__
 
         # dispatch work units and collect job handles
 
-        jobs: dict[WorkUnit, CompletedJob | JobT] = {}
-        snapshot: SnapshotT | None = None
-
-        for w in work_graph:  # dependency order
-            if w.root.done(workspace=workspace):
-                jobs[w] = CompletedJob(work_unit=w)
-            else:
-                # lazily snapshot only when at least one work unit actually needs dispatch
-                if snapshot is None:
+        if num_dispatch > 0:
+            started_at = time.perf_counter()
+            try:
+                with runtime_activity("Creating a snapshot of the project environment", style="yellow"):
                     snapshot = self._make_snapshot(workspace=workspace)
-                dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
-                jobs[w] = self._dispatch(work_unit=w, dependencies=dependencies, workspace=workspace, snapshot=snapshot)
+            except Exception:
+                runtime_event(
+                    f"Failed to create a snapshot of the project environment in {(time.perf_counter() - started_at):.2f}s)",
+                    style="bold red",
+                )
+                raise
+            runtime_event(
+                f"Created a snapshot of the project environment in {(time.perf_counter() - started_at):.2f}s",
+                style="green",
+            )
+
+            with runtime_progress(f"Submitting work units to {executor_name}", total=num_dispatch) as progress_bar:
+                for w in work_units:
+                    if w in jobs:
+                        continue
+
+                    started_at = time.perf_counter()
+                    try:
+                        dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
+                        jobs[w] = self._dispatch(
+                            work_unit=w,
+                            dependencies=dependencies,
+                            workspace=workspace,
+                            snapshot=snapshot,
+                        )
+                    except Exception:
+                        elapsed_s = time.perf_counter() - started_at
+                        runtime_event(
+                            (f"Dispatch failed for {work_unit_label(w)} in {elapsed_s:.2f}s"), style="bold red"
+                        )
+                        raise
+                    progress_bar(1)
+
+        runtime_event(
+            (
+                f"Submitted {num_dispatch} work unit(s) to {executor_name}"
+                f"{f' ({num_complete} already complete)' if num_complete > 0 else ''}"
+            ),
+            style="green bold",
+        )
 
         # return job graph corresponding to work graph
 

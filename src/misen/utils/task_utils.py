@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import itertools
 import tempfile
+import time
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
@@ -21,6 +22,7 @@ from typing_extensions import assert_never
 from misen.sentinels import ASSIGNED_RESOURCES, WORK_DIR
 from misen.utils.hashes import ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
+from misen.utils.runtime_events import runtime_event, task_label
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -201,6 +203,9 @@ def execute_task(
     Returns:
         Task result value.
     """
+    task_name = task_label(task)
+    runtime_event(f"Task started: {task_name} (job_id={job_id or 'n/a'})", style="yellow")
+    started_at = time.perf_counter()
     argument_resolver = _build_argument_resolver(
         task=task,
         workspace=workspace,
@@ -208,11 +213,23 @@ def execute_task(
         assigned_resources=assigned_resources,
     )
 
-    with workspace.open_task_log(task=task, mode="a", job_id=job_id, timestamp="current") as task_log:
-        with capture_all_output(task_log, tee_to_stdout=True):
-            args = (argument_resolver(value) for value in task.args)
-            kwargs = {name: argument_resolver(value) for name, value in task.kwargs.items()}
-            return task.func(*args, **kwargs)
+    try:
+        with workspace.open_task_log(task=task, mode="a", job_id=job_id, timestamp="current") as task_log:
+            with capture_all_output(task_log, tee_to_stdout=True):
+                args = (argument_resolver(value) for value in task.args)
+                kwargs = {name: argument_resolver(value) for name, value in task.kwargs.items()}
+                result = task.func(*args, **kwargs)
+    except Exception as exc:
+        elapsed_s = time.perf_counter() - started_at
+        runtime_event(
+            f"Task failed: {task_name} in {elapsed_s:.2f}s ({type(exc).__name__}: {exc})",
+            style="bold red",
+        )
+        raise
+
+    elapsed_s = time.perf_counter() - started_at
+    runtime_event(f"Task finished: {task_name} in {elapsed_s:.2f}s", style="green")
+    return cast("R", result)
 
 
 def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:

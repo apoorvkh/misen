@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal
 
 from misen.executor import Executor, Job, WorkUnit
 from misen.utils.assigned_resources import get_assigned_resources_slurm
+from misen.utils.runtime_events import runtime_event, work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
@@ -163,6 +164,13 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         if not slurm_job_id.isdigit():
             msg = f"Unexpected sbatch output: {out!r}"
             raise RuntimeError(msg)
+        runtime_event(
+            (
+                f"SLURM job submitted: {work_unit_label(work_unit)} "
+                f"(job_id={job_id}, slurm_job_id={slurm_job_id})"
+            ),
+            style="green",
+        )
         return SlurmJob(work_unit=work_unit, job_id=job_id, slurm_job_id=slurm_job_id, log_path=job_log_path)
 
 

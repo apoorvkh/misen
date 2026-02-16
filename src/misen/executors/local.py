@@ -24,6 +24,13 @@ from typing import TYPE_CHECKING, Literal
 
 from misen.executor import Executor, Job
 from misen.utils.assigned_resources import AssignedResources
+from misen.utils.runtime_events import (
+    runtime_job_done,
+    runtime_job_failed,
+    runtime_job_pending,
+    runtime_job_running,
+    work_unit_label,
+)
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
@@ -250,14 +257,22 @@ class _LocalScheduler:
         Notes:
             Caller must hold ``self._condition``.
         """
-        finished = [job for job in self._running if job.state() in {"done", "failed"}]
+        finished: list[tuple[LocalJob, JobState]] = []
+        for job in self._running:
+            state = job.state()
+            if state in {"done", "failed"}:
+                finished.append((job, state))
         if not finished:
             return
 
-        for job in finished:
+        for job, state in finished:
             self._running.remove(job)
             self._available_budget = self._available_budget.add(job.resources)
             self._release_allocations(job.assigned_cpu_indices, job.assigned_gpu_indices)
+            if state == "done":
+                runtime_job_done(id(job))
+            elif state == "failed":
+                runtime_job_failed(id(job))
 
         self._condition.notify_all()
 
@@ -351,6 +366,7 @@ class _LocalScheduler:
         job.set_process(process, log_fp=log_fp)
         job.assigned_cpu_indices = cpu_indices
         job.assigned_gpu_indices = gpu_indices
+        runtime_job_running(id(job), job_id=job.job_id, pid=process.pid)
 
     def _reserve_indices(self, resources: Resources) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
         """Reserve CPU/GPU indices for a resource request.
@@ -392,6 +408,7 @@ class _LocalScheduler:
         job.mark_failed()
         if job in self._pending:
             self._pending.remove(job)
+        runtime_job_failed(id(job))
 
     @staticmethod
     def _allocate_indices(pool: list[int], count: int) -> tuple[int, ...] | None:
@@ -483,6 +500,7 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             snapshot=snapshot,
             workspace=workspace,
         )
+        runtime_job_pending(id(job), label=work_unit_label(work_unit))
         self._scheduler.submit(job)
         return job
 
