@@ -15,6 +15,7 @@ dependencies = [
   "msgspec>=0.20.0",
   "psutil",
   "rich>=13.7.0",
+  "python-dotenv>=1.0",
   "rustworkx>=0.15.0",
   "tomli>=1.1.0 ; python_version < '3.11'",
   "typing_extensions>=4.1.0",

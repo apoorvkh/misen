@@ -9,7 +9,7 @@ Design overview:
 3. Backends expose lightweight :class:`Job` handles for polling and waiting.
 
 This module intentionally does not encode backend-specific logic. Concrete
-behavior lives in :mod:`misen.executors.local` and :mod:`misen.executors.slurm`.
+behavior lives in backend modules under :mod:`misen.executors`.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing_extensions import assert_never
 
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, work_unit_label
 from misen.utils.settings import FromSettingsABC
-from misen.utils.work_unit import WorkUnit, build_work_graph
+from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,11 +30,12 @@ if TYPE_CHECKING:
     from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
     from misen.utils.snapshot import Snapshot
+    from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
 __all__ = ["Executor", "Job"]
 
-ExecutorType: TypeAlias = Literal["local", "slurm"]
+ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
 JobT = TypeVar("JobT", bound="Job")
 SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
 
@@ -186,6 +187,10 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
                     from misen.executors.local import LocalExecutor
 
                     return LocalExecutor
+                case "in_process":
+                    from misen.executors.in_process import InProcessExecutor
+
+                    return InProcessExecutor
                 case "slurm":
                     from misen.executors.slurm import SlurmExecutor
 
