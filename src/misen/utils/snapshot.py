@@ -17,18 +17,22 @@ import secrets
 import shutil
 import subprocess
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import uv
+from dotenv import load_dotenv
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from misen.utils.assigned_resources import AssignedResources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
+
+__all__ = ["LocalSnapshot", "NullSnapshot", "Snapshot", "apply_env_files_temporarily"]
 
 
 class Snapshot(ABC):
@@ -54,6 +58,23 @@ class Snapshot(ABC):
         Returns:
             Tuple ``(job_id, argv, env_overrides)``.
         """
+
+
+class NullSnapshot(Snapshot):
+    """Snapshot placeholder for executors that never dispatch subprocess jobs."""
+
+    __slots__ = ()
+
+    def prepare_job(
+        self,
+        work_unit: WorkUnit,
+        workspace: Workspace,
+        assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
+    ) -> tuple[str, list[str], Mapping[str, str]]:
+        """Raise because null snapshots cannot prepare external commands."""
+        _ = work_unit, workspace, assigned_resources_getter
+        msg = "NullSnapshot cannot prepare external job commands."
+        raise RuntimeError(msg)
 
 
 class LocalSnapshot(Snapshot):
@@ -154,17 +175,52 @@ class LocalSnapshot(Snapshot):
             List of copied env-file paths.
         """
         env_files = []
-        for f in (".env", ".env.local"):
-            src = Path.cwd() / f
-            dst = snapshot_dir / f
-            with contextlib.suppress(FileNotFoundError):
-                shutil.copy(src, dst)
-                env_files.append(dst)
-                # owner-only permissions for .env.local (may contain secrets)
-                if f == ".env.local":
-                    with contextlib.suppress(OSError):
-                        dst.chmod(0o600)
+        for src in _discover_env_files():
+            dst = snapshot_dir / src.name
+            shutil.copy(src, dst)
+            env_files.append(dst)
+            # owner-only permissions for .env.local (may contain secrets)
+            if src.name == ".env.local":
+                with contextlib.suppress(OSError):
+                    dst.chmod(0o600)
         return env_files
+
+
+@contextmanager
+def apply_env_files_temporarily() -> Iterator[None]:
+    """Temporarily load environment variables from dotenv files.
+
+    Later files override earlier ones. Modified keys are restored after exiting
+    the context.
+
+    Args:
+        env_files: Optional explicit env-file list. Defaults to
+            :func:`discover_env_files` for the current working directory.
+    """
+    initial_environ = os.environ.copy()
+    for f in _discover_env_files():
+        load_dotenv(f, override=True)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(initial_environ)
+
+
+_ENV_FILENAMES = (".env", ".env.local")
+
+
+def _discover_env_files(cwd: Path | None = None) -> list[Path]:
+    """Return existing env files in precedence order.
+
+    Args:
+        cwd: Optional directory to search. Defaults to ``Path.cwd()``.
+
+    Returns:
+        Existing files among ``.env`` then ``.env.local``.
+    """
+    root = cwd or Path.cwd()
+    return [path for path in (root / name for name in _ENV_FILENAMES) if path.exists()]
 
 
 def _token_base32(nbytes: int) -> str:

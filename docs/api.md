@@ -29,6 +29,10 @@
 
 ::: misen.executors.local.LocalExecutor
 
+# InProcessExecutor
+
+::: misen.executors.in_process.InProcessExecutor
+
 # SlurmExecutor
 
 ::: misen.executors.slurm.SlurmExecutor
