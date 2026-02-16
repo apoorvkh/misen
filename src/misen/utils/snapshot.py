@@ -71,10 +71,10 @@ class NullSnapshot(Snapshot):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
-        """Raise because null snapshots cannot prepare external commands."""
+        """Null snapshots don't prepare external commands."""
         _ = work_unit, workspace, assigned_resources_getter
-        msg = "NullSnapshot cannot prepare external job commands."
-        raise RuntimeError(msg)
+        job_id = _token_base32(6)
+        return job_id, [], {}
 
 
 class LocalSnapshot(Snapshot):

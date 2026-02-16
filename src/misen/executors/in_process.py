@@ -32,6 +32,9 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         Returns:
             Single-node job graph (or empty graph when no tasks were submitted).
         """
+        null_work_unit = WorkUnit(root=Task(lambda: None), dependencies=set())
+        job_id, _, _ = self._make_snapshot(workspace=workspace).prepare_job(null_work_unit, workspace=workspace)
+
         union = Task((lambda *_: None), *tasks)
         task_graph = build_task_dependency_graph(task=union)
         task_graph.remove_node_by_value(union, cmp=is_, first=True)
@@ -40,9 +43,10 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
             WorkUnit.execute(
                 graph=task_graph,
                 workspace=workspace,
-                job_id="0",
+                job_id=job_id,
                 assigned_resources_getter=lambda: None,
             )
+
         return DependencyGraph()
 
     def _make_snapshot(self, workspace: Workspace) -> NullSnapshot:
