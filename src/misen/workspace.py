@@ -5,6 +5,9 @@
 - Executors schedule and run work.
 - Tasks describe computation and identity.
 - Workspace persists hashes/results and coordinates cross-process locks.
+- Runtime lock contract: for cacheable tasks, a workspace lock keyed by
+  resolved task identity enforces at most one active execution at a time.
+  Non-cacheable tasks are not serialized by this runtime lock.
 
 This separation keeps execution backends modular while preserving one
 consistent cache/locking contract.
@@ -188,6 +191,11 @@ class Workspace(FromSettingsABC):
 
         Returns:
             Lock-like object with acquire/release/context APIs.
+
+        Notes:
+            ``namespace="task"`` is used for cacheable task runtime exclusion
+            (single active execution per workspace/key). ``namespace="result"``
+            is used for serialized result materialization.
         """
 
     @abstractmethod

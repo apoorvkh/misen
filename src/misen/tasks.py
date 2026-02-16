@@ -10,6 +10,9 @@ Core design decisions:
   - ``result_hash``: identity of function result
 - Runtime execution is workspace-driven so caching and locking semantics are
   consistent across local and distributed executors.
+- For a fixed workspace, cacheable tasks execute under a per-task runtime lock
+  (single active instance), while non-cacheable tasks do not take this lock and
+  may execute concurrently.
 
 ``Task.result()`` supports eager local execution; ``Task.submit()`` routes to an
 executor for dependency-aware concurrent scheduling.
@@ -213,6 +216,9 @@ class Task(FrozenMixin, Generic[R]):
 
         Notes:
             Cacheable tasks acquire a workspace runtime lock before execution.
+            For a given workspace/resolved task identity, this enforces a
+            single active runtime. Non-cacheable tasks skip runtime locking and
+            can run concurrently.
             Logs are captured to task logs and optionally mirrored to stdout.
         """
         workspace = resolve_auto(workspace=workspace)
@@ -359,6 +365,11 @@ class Task(FrozenMixin, Generic[R]):
 
         Raises:
             RuntimeError: If dependencies are not cached yet.
+
+        Notes:
+            This lock is used only for cacheable tasks. It enforces that, for a
+            specific workspace and resolved task identity, only one runtime is
+            active at a time.
         """
         if not self.are_deps_cached(workspace=workspace):  # necessary to compute resolved_hash
             msg = f"Dependencies of {self} must be run before acquiring runtime lock"

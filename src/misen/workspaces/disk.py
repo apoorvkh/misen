@@ -278,6 +278,10 @@ class DiskWorkspace(Workspace):
 
         Returns:
             Lock-like object.
+
+        Notes:
+            Task-namespace locks back the cacheable-task runtime exclusivity
+            guarantee for a given workspace and resolved task key.
         """
         return NFSLock(
             lockfile=(self.get_temp_dir() / f"{namespace}_locks" / f"{key}.lock"),
