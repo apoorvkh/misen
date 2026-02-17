@@ -1,0 +1,11 @@
+executor_type = "slurm"
+
+[[executor_kwargs.default_flags]]
+mem = "2G"
+
+[[executor_kwargs.rules]]
+when.cpus = 1
+when.gpus = [{ op = "ge", value = 1 }, { op = "le", value = 4 }]
+when.gpu_memory = { op = "ge", value = 40 }
+set.partition = "gpu"
+set.constraint = "a100"
