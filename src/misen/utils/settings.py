@@ -137,6 +137,9 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
 
         class_type = cls._resolve_type(settings.toml_data[f"{key}_type"])
         class_kwargs = settings.toml_data.get(f"{key}_kwargs", {})
+        if not isinstance(class_kwargs, dict):
+            msg = f"Invalid kwargs for {key} in {settings.file}: expected table/dict."
+            raise TypeError(msg)
         return class_type(**class_kwargs)
 
     def __reduce__(self) -> tuple[Callable[[type[msgspec.Struct], bytes], msgspec.Struct], tuple[type[Self], bytes]]:

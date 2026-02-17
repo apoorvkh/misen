@@ -72,6 +72,7 @@ class Resources(Struct, frozen=True):
         cpus: CPU cores.
         gpus: GPU count.
         gpu_memory: Optional requested GPU memory in GiB.
+        gpu_vendor: Optional requested GPU vendor.
     """
 
     time: int | None = None
@@ -80,6 +81,7 @@ class Resources(Struct, frozen=True):
     cpus: int = 1
     gpus: int = 0
     gpu_memory: int | None = None
+    gpu_vendor: Literal["nvidia", "amd", "intel", "apple"] | None = None
 
 
 def task(
