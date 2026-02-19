@@ -20,22 +20,19 @@ executor for dependency-aware concurrent scheduling.
 
 from __future__ import annotations
 
+import itertools
 from contextlib import nullcontext
 from inspect import Signature, signature
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
+from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
 from misen.task_properties import Resources, TaskProperties, resolve_task_properties
 from misen.utils.auto import resolve_auto
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
 from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
-from misen.utils.task_utils import (
-    collect_task_dependencies,
-    execute_task,
-    hash_task_arguments,
-    save_task_result,
-)
+from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -43,7 +40,7 @@ if TYPE_CHECKING:
     from types import FunctionType
 
     from misen.executor import Executor, Job
-    from misen.utils.assigned_resources import AssignedResources
+    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.graph import DependencyGraph
     from misen.utils.locks import LockLike
     from misen.workspace import Workspace
@@ -99,6 +96,16 @@ class Task(FrozenMixin, Generic[R]):
 
         self.properties: TaskProperties = resolve_task_properties(func)
         self.resources: Resources = self.properties.resources(*self.args, **self.kwargs)
+
+        values = tuple(itertools.chain(self.args, self.kwargs.values()))
+
+        if self.resources.nodes > 1 and ASSIGNED_RESOURCES in values:
+            msg = "ASSIGNED_RESOURCES cannot be used when resources.nodes > 1; use ASSIGNED_RESOURCES_PER_NODE."
+            raise ValueError(msg)
+        if self.resources.nodes == 1 and ASSIGNED_RESOURCES_PER_NODE in values:
+            msg = "ASSIGNED_RESOURCES_PER_NODE cannot be used when resources.nodes == 1; use ASSIGNED_RESOURCES."
+            raise ValueError(msg)
+
         self.dependencies: frozenset[Task[Any]] = collect_task_dependencies(self.args, self.kwargs)
         self._task_hash: TaskHash = self.task_hash()
 
@@ -194,7 +201,7 @@ class Task(FrozenMixin, Generic[R]):
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
         _job_id: str | None = None,
-        _assigned_resources: AssignedResources | None = None,
+        _assigned_resources: AssignedResources | AssignedResourcesPerNode | None = None,
     ) -> R:
         """Compute (or retrieve) this Task's result.
 

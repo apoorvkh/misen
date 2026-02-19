@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from typing_extensions import assert_never
 
-from misen.sentinels import ASSIGNED_RESOURCES, WORK_DIR
+from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
 from misen.utils.hashes import ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
 from misen.utils.runtime_events import runtime_event, task_label
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from misen.task_properties import TaskProperties
     from misen.tasks import Task
-    from misen.utils.assigned_resources import AssignedResources
+    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.workspace import Workspace
 
 __all__ = [
@@ -144,7 +144,7 @@ def hash_task_arguments(
         if isinstance(value, Task):
             return cast("TaskHash | ResultHash", leaf_representation(value))
 
-        if value is ASSIGNED_RESOURCES or value is WORK_DIR:
+        if value is ASSIGNED_RESOURCES or value is ASSIGNED_RESOURCES_PER_NODE or value is WORK_DIR:
             msg = "Resolved task arguments cannot contain sentinel values."
             raise RuntimeError(msg)
 
@@ -188,7 +188,7 @@ def execute_task(
     task: Task[R],
     workspace: Workspace,
     dependency_results: dict[Task[Any], Any],
-    assigned_resources: AssignedResources | None,
+    assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
     job_id: str | None,
 ) -> R:
     """Execute task function under log capture.
@@ -262,7 +262,7 @@ def _build_argument_resolver(
     task: Task[Any],
     workspace: Workspace,
     dependency_results: dict[Task[Any], Any],
-    assigned_resources: AssignedResources | None,
+    assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
 ) -> Callable[[Any], Any]:
     """Build argument resolver for runtime task execution.
 
@@ -270,7 +270,7 @@ def _build_argument_resolver(
         task: Task being executed.
         workspace: Workspace providing work-dir and cached dependency access.
         dependency_results: Immediate dependency result map.
-        assigned_resources: Optional runtime resource assignment.
+        assigned_resources: Optional runtime resource assignment (single-node or multi-node).
 
     Returns:
         Callable that maps arbitrary nested argument structures into runtime
@@ -293,7 +293,7 @@ def _build_argument_resolver(
                 return dependency_results[leaf]
             if leaf is WORK_DIR:
                 return work_dir()
-            if leaf is ASSIGNED_RESOURCES:
+            if leaf is ASSIGNED_RESOURCES or leaf is ASSIGNED_RESOURCES_PER_NODE:
                 return assigned_resources
             return leaf
 

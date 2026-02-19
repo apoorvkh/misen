@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from misen.task_properties import Resources
-    from misen.utils.assigned_resources import AssignedResources
+    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.workspace import Workspace
 
 __all__ = ["WorkUnit", "build_task_dependency_graph", "build_work_graph"]
@@ -108,7 +108,7 @@ class WorkUnit:
         graph: DependencyGraph[Task[Any]],
         workspace: Workspace,
         job_id: str,
-        assigned_resources_getter: Callable[[], AssignedResources | None],
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
     ) -> None:
         """Execute tasks in dependency order for a task graph.
 
@@ -159,7 +159,7 @@ class WorkUnit:
         self,
         workspace: Workspace,
         job_id: str,
-        assigned_resources_getter: Callable[[], AssignedResources | None],
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
     ) -> bytes:
         """Serialize executable payload for backend dispatch.
 

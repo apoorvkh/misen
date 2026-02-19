@@ -14,13 +14,13 @@ handles), but this module performs all scheduling in-process.
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import threading
 from bisect import insort
-from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Literal
+
+import msgspec
 
 from misen.executor import Executor, Job
 from misen.utils.assigned_resources import AssignedResources
@@ -44,16 +44,15 @@ if TYPE_CHECKING:
 JobState = Literal["pending", "running", "done", "failed", "unknown"]
 
 
-@dataclass(frozen=True)
-class _ResourceBudget:
+class _ResourceBudget(msgspec.Struct, frozen=True):
     """Available resource budget for local scheduling.
 
     Values are interpreted as hard scheduler limits for concurrent job
     placement.
     """
 
-    cpus: int
     memory: int
+    cpus: int
     gpus: int
 
     def fits(self, resources: Resources) -> bool:
@@ -193,7 +192,7 @@ class LocalJob(Job):
             self._log_fp = None
 
 
-class _LocalScheduler:
+class _LocalScheduler(msgspec.Struct, dict=True):
     """Background scheduler for local jobs.
 
     The scheduler owns:
@@ -206,22 +205,13 @@ class _LocalScheduler:
     dispatch stays lightweight and thread-safe.
     """
 
-    def __init__(self, total_budget: _ResourceBudget) -> None:
-        """Start scheduler loop with a fixed global resource budget.
+    available_budget: _ResourceBudget
+    available_cpu_indices: list[int]
+    available_gpu_indices: list[int]
 
-        Args:
-            total_budget: Maximum resources available for all concurrent jobs.
-        """
-        self._available_budget = total_budget
-        self._available_cpu_indices = list(range(total_budget.cpus))
-        self._available_gpu_indices = list(range(total_budget.gpus))
-
-        hostname = socket.gethostname()
-        self._hostnames = (hostname,) if hostname else ()
-
+    def __post_init__(self) -> None:
         self._pending: list[LocalJob] = []
         self._running: set[LocalJob] = set()
-
         self._condition = threading.Condition()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -267,7 +257,7 @@ class _LocalScheduler:
 
         for job, state in finished:
             self._running.remove(job)
-            self._available_budget = self._available_budget.add(job.resources)
+            self.available_budget = self.available_budget.add(job.resources)
             self._release_allocations(job.assigned_cpu_indices, job.assigned_gpu_indices)
             if state == "done":
                 runtime_job_done(id(job))
@@ -290,7 +280,7 @@ class _LocalScheduler:
                 started_any = started_any or (job not in self._pending)
                 continue
 
-            if not self._available_budget.fits(job.resources):
+            if not self.available_budget.fits(job.resources):
                 continue
 
             allocations = self._reserve_indices(job.resources)
@@ -305,7 +295,7 @@ class _LocalScheduler:
                 started_any = True
                 continue
 
-            self._available_budget = self._available_budget.subtract(job.resources)
+            self.available_budget = self.available_budget.subtract(job.resources)
             self._pending.remove(job)
             self._running.add(job)
             started_any = True
@@ -336,11 +326,10 @@ class _LocalScheduler:
             gpu_indices: Physical GPU indices reserved for this job.
         """
         assigned_resources = AssignedResources(
-            hostnames=self._hostnames,
             cpu_indices=cpu_indices,
             gpu_indices=gpu_indices,
-            cpu_count=job.resources.cpus,
-            gpu_count=job.resources.gpus,
+            memory=job.resources.memory,
+            gpu_memory=job.resources.gpu_memory,
         )
 
         job.job_id, argv, env_overrides = job.snapshot.prepare_job(
@@ -377,10 +366,10 @@ class _LocalScheduler:
         Returns:
             Tuple of reserved CPU/GPU indices, or ``None`` if unavailable.
         """
-        cpu_indices = self._allocate_indices(self._available_cpu_indices, resources.cpus)
+        cpu_indices = self._allocate_indices(self.available_cpu_indices, resources.cpus)
         if cpu_indices is None:
             return None
-        gpu_indices = self._allocate_indices(self._available_gpu_indices, resources.gpus)
+        gpu_indices = self._allocate_indices(self.available_gpu_indices, resources.gpus)
         if gpu_indices is None:
             self._release_allocations(cpu_indices, ())
             return None
@@ -388,14 +377,11 @@ class _LocalScheduler:
 
     def _release_allocations(self, cpu_indices: tuple[int, ...], gpu_indices: tuple[int, ...]) -> None:
         """Return previously reserved CPU/GPU indices to the free pools."""
-        self._release_indices(self._available_cpu_indices, cpu_indices)
-        self._release_indices(self._available_gpu_indices, gpu_indices)
+        self._release_indices(self.available_cpu_indices, cpu_indices)
+        self._release_indices(self.available_gpu_indices, gpu_indices)
 
     def _mark_pending_failed(
-        self,
-        job: LocalJob,
-        cpu_indices: tuple[int, ...] = (),
-        gpu_indices: tuple[int, ...] = (),
+        self, job: LocalJob, cpu_indices: tuple[int, ...] = (), gpu_indices: tuple[int, ...] = ()
     ) -> None:
         """Mark a pending job failed and release any provisional allocations.
 
@@ -431,18 +417,30 @@ class _LocalScheduler:
 class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
     """Executor that runs work units as local subprocesses."""
 
-    max_cpus: int | None = None
-    max_memory: int | None = None
+    max_memory: int | Literal["all"] = "all"
+    max_cpus: int | Literal["all"] = "all"
+    cpu_indices: list[int] | None = None
     max_gpus: int | None = None
+    gpu_indices: list[int] | None = None
 
     def __post_init__(self) -> None:
-        """Initialize scheduler with configured or inferred resource limits."""
-        self._resource_budget = _ResourceBudget(
-            cpus=self.max_cpus or (os.cpu_count() or 1),
-            memory=self.max_memory or _infer_total_memory_gb(),
-            gpus=self.max_gpus or 0,
+        """Infer resource limits and initialize scheduler."""
+        if self.max_memory == "all":
+            self.max_memory = _infer_total_memory_gb()
+
+        if self.max_cpus == "all":
+            self.max_cpus = os.cpu_count() or 1
+        cpu_indices = self.cpu_indices or list(range(self.max_cpus))
+
+        if self.max_gpus is not None and self.gpu_indices is not None:
+            msg = "Provide either max_gpus or gpu_indices for LocalExecutor, not both."
+            raise ValueError(msg)
+        gpu_indices = self.gpu_indices or list(range(self.max_gpus or 0))
+
+        self._resource_budget = _ResourceBudget(memory=self.max_memory, cpus=len(cpu_indices), gpus=len(gpu_indices))
+        self._scheduler = _LocalScheduler(
+            self._resource_budget, available_cpu_indices=cpu_indices, available_gpu_indices=gpu_indices
         )
-        self._scheduler = _LocalScheduler(self._resource_budget)
 
     @classmethod
     @cache

@@ -9,39 +9,33 @@ from typing import TYPE_CHECKING, TypedDict
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["AssignedResources", "get_assigned_resources_slurm"]
+__all__ = [
+    "AssignedResources",
+    "AssignedResourcesPerNode",
+    "get_assigned_resources_slurm",
+    "get_assigned_resources_slurm_per_node",
+]
 
 
 class AssignedResources(TypedDict):
-    """Scheduler-assigned runtime resources for the current job.
+    """Scheduler-assigned runtime resources for a single node."""
 
-    Note:
-        `cpu_indices` / `gpu_indices` represent scheduler-provided physical indices when available.
-        Callers can derive logical visibility (e.g., from `CUDA_VISIBLE_DEVICES`) as needed.
-    """
-
-    hostnames: tuple[str, ...]
-    cpu_count: int | None
     cpu_indices: tuple[int, ...]
-    gpu_count: int | None
     gpu_indices: tuple[int, ...]
+    memory: int | None
+    gpu_memory: int | None
+
+
+AssignedResourcesPerNode = dict[str, AssignedResources]
 
 
 def get_assigned_resources_slurm() -> AssignedResources:
-    """Resolve assigned resources from SLURM environment variables.
-
-    Returns:
-        Assigned resources dictionary with host, CPU, and GPU metadata.
-    """
-    nodelist_keys = ("SLURM_STEP_NODELIST", "SLURM_JOB_NODELIST", "SLURM_NODELIST")
+    """Resolve assigned resources from SLURM environment variables."""
     cpu_count_keys = ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "SLURM_JOB_CPUS_PER_NODE")
     gpu_count_keys = ("SLURM_GPUS_PER_TASK", "SLURM_GPUS_ON_NODE", "SLURM_JOB_GPUS")
     gpu_index_keys = ("SLURM_STEP_GPUS", "SLURM_JOB_GPUS")
 
     env = os.environ
-    hostnames = _expand_slurm_nodelist(_first_nonempty(env, nodelist_keys))
-    if not hostnames and (hostname := env.get("SLURMD_NODENAME")):
-        hostnames = (hostname,)
 
     cpu_indices = _parse_numeric_indices(env.get("SLURM_CPU_BIND_LIST"))
     cpu_count = _first_int(_first_nonempty(env, cpu_count_keys)) or (len(cpu_indices) if cpu_indices else None)
@@ -60,13 +54,40 @@ def get_assigned_resources_slurm() -> AssignedResources:
         # Fallback only when we don't have non-numeric UUID device IDs.
         gpu_indices = tuple(range(gpu_count))
 
-    return AssignedResources(
-        hostnames=hostnames,
-        cpu_indices=cpu_indices,
-        gpu_indices=gpu_indices,
-        cpu_count=cpu_count,
-        gpu_count=gpu_count,
-    )
+    memory = _parse_memory_gib(_first_nonempty(env, ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU")))
+    gpu_memory = _parse_memory_gib(_first_nonempty(env, ("SLURM_MEM_PER_GPU",)))
+
+    return AssignedResources(cpu_indices=cpu_indices, gpu_indices=gpu_indices, memory=memory, gpu_memory=gpu_memory)
+
+
+def get_assigned_resources_slurm_per_node() -> AssignedResourcesPerNode:
+    """Resolve host->resources mapping from SLURM environment variables."""
+    nodelist_keys = ("SLURM_STEP_NODELIST", "SLURM_JOB_NODELIST", "SLURM_NODELIST")
+    env = os.environ
+    hostnames = _expand_slurm_nodelist(_first_nonempty(env, nodelist_keys))
+    if not hostnames and (hostname := env.get("SLURMD_NODENAME")):
+        hostnames = (hostname,)
+
+    resources = get_assigned_resources_slurm()
+    return dict.fromkeys(hostnames, resources)
+
+
+def _parse_memory_gib(value: str | None) -> int | None:
+    """Parse SLURM memory token to GiB integer when possible."""
+    if value is None:
+        return None
+
+    normalized = value.strip().upper()
+    if not normalized:
+        return None
+
+    if normalized.endswith(("G", "GB")):
+        return _first_int(normalized)
+    if normalized.endswith(("M", "MB")):
+        mb = _first_int(normalized)
+        return None if mb is None else max(1, (mb + 1023) // 1024)
+
+    return _first_int(normalized)
 
 
 def _first_nonempty(env: Mapping[str, str], keys: tuple[str, ...]) -> str | None:

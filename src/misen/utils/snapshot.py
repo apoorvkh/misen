@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-    from misen.utils.assigned_resources import AssignedResources
+    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -45,7 +45,7 @@ class Snapshot(ABC):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
         """Prepare command and environment for one work unit.
 
@@ -69,7 +69,7 @@ class NullSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
         """Null snapshots don't prepare external commands."""
         _ = work_unit, workspace, assigned_resources_getter
@@ -98,7 +98,7 @@ class LocalSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | None] = lambda: None,
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
     ) -> tuple[str, list[str], Mapping[str, str]]:
         """Prepare command/env overrides to execute serialized payload.
 
@@ -116,7 +116,9 @@ class LocalSnapshot(Snapshot):
         payload_path = payload_dir / f"{_token_base32(6)}.pkl"
         payload_path.write_bytes(
             work_unit.as_payload(
-                workspace=workspace, job_id=job_id, assigned_resources_getter=assigned_resources_getter
+                workspace=workspace,
+                job_id=job_id,
+                assigned_resources_getter=assigned_resources_getter,
             )
         )
         argv: list[str] = [

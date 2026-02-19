@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 import msgspec
 
 from misen.executor import Executor, Job
-from misen.utils.assigned_resources import get_assigned_resources_slurm
+from misen.utils.assigned_resources import get_assigned_resources_slurm, get_assigned_resources_slurm_per_node
 from misen.utils.runtime_events import runtime_event, work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
@@ -173,7 +173,9 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         job_id, argv, env_overrides = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,
-            assigned_resources_getter=get_assigned_resources_slurm,
+            assigned_resources_getter=get_assigned_resources_slurm_per_node
+            if resources.nodes > 1
+            else get_assigned_resources_slurm,
         )
 
         job_log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)

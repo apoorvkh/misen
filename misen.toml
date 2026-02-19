@@ -1,6 +1,6 @@
 executor_type = "slurm"
 
-[[executor_kwargs.default_flags]]
+[executor_kwargs.default_flags]
 mem = "2G"
 
 [[executor_kwargs.rules]]
