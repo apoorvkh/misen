@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import msgspec
 
-from misen.executor import Executor, Job, WorkUnit
+from misen.executor import Executor, Job
 from misen.utils.assigned_resources import get_assigned_resources_slurm
 from misen.utils.runtime_events import runtime_event, work_unit_label
 from misen.utils.snapshot import LocalSnapshot
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from misen.task_properties import Resources
+    from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
 
