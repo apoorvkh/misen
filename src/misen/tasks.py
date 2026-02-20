@@ -21,6 +21,7 @@ executor for dependency-aware concurrent scheduling.
 from __future__ import annotations
 
 import itertools
+import shutil
 from contextlib import nullcontext
 from inspect import Signature, signature
 from types import MappingProxyType
@@ -226,6 +227,9 @@ class Task(FrozenMixin, Generic[R]):
             For a given workspace/resolved task identity, this enforces a
             single active runtime. Non-cacheable tasks skip runtime locking and
             can run concurrently.
+            Upon successful completion, non-cacheable task work dirs are
+            cleaned up; cacheable task work dirs are cleaned up when
+            ``@task(cleanup_work_dir=True)`` is set.
             Logs are captured to task logs and optionally mirrored to stdout.
         """
         workspace = resolve_auto(workspace=workspace)
@@ -261,7 +265,7 @@ class Task(FrozenMixin, Generic[R]):
         )
 
         with lock_context:
-            result = execute_task(
+            result, work_dir = execute_task(
                 task=self,
                 workspace=workspace,
                 dependency_results=dependency_results,
@@ -270,6 +274,12 @@ class Task(FrozenMixin, Generic[R]):
             )
 
         save_task_result(task=self, result=result, workspace=workspace)
+        if (
+            (not self.properties.cache or self.properties.cleanup_work_dir)
+            and work_dir is not None
+            and work_dir.exists()
+        ):
+            shutil.rmtree(work_dir)
 
         return result
 

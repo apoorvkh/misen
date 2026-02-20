@@ -13,7 +13,6 @@ from __future__ import annotations
 import itertools
 import tempfile
 import time
-from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -190,7 +189,7 @@ def execute_task(
     dependency_results: dict[Task[Any], Any],
     assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
     job_id: str | None,
-) -> R:
+) -> tuple[R, Path | None]:
     """Execute task function under log capture.
 
     Args:
@@ -201,13 +200,13 @@ def execute_task(
         job_id: Optional job id for task-log grouping.
 
     Returns:
-        Task result value.
+        Task result value plus the runtime work directory used (if any).
     """
     task_name = task_label(task)
     runtime_event(f"Task started: {task_name} (job_id={job_id or 'n/a'})", style="yellow")
     started_at = time.perf_counter()
 
-    argument_resolver = _build_argument_resolver(
+    argument_resolver, work_directory = _build_argument_resolver(
         task=task,
         workspace=workspace,
         dependency_results=dependency_results,
@@ -228,7 +227,7 @@ def execute_task(
         raise
 
     runtime_event(f"Task finished: {task_name} in {(time.perf_counter() - started_at):.2f}s", style="green")
-    return cast("R", result)
+    return cast("R", result), work_directory
 
 
 def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:
@@ -263,7 +262,7 @@ def _build_argument_resolver(
     workspace: Workspace,
     dependency_results: dict[Task[Any], Any],
     assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
-) -> Callable[[Any], Any]:
+) -> tuple[Callable[[Any], Any], Path | None]:
     """Build argument resolver for runtime task execution.
 
     Args:
@@ -273,30 +272,37 @@ def _build_argument_resolver(
         assigned_resources: Optional runtime resource assignment (single-node or multi-node).
 
     Returns:
-        Callable that maps arbitrary nested argument structures into runtime
-        values (dependency outputs, work dirs, assigned resources).
+        Tuple of:
+        - callable mapping arbitrary nested argument structures into runtime
+          values (dependency outputs, work dirs, assigned resources)
+        - runtime work directory if ``WORK_DIR`` is requested
     """
     from misen.tasks import Task
 
-    @cache
+    work_directory: Path | None = None
+
     def work_dir() -> Path:
         """Return cache-backed or temporary work directory for this execution."""
-        if task.properties.cache:
-            return workspace.get_work_dir(task=task)
-
-        resolved = task.resolved_hash(workspace=workspace).b32()
-        return Path(tempfile.mkdtemp(prefix=f"misen-work-{resolved}-"))
+        nonlocal work_directory
+        if work_directory is None:
+            if task.properties.cache:
+                work_directory = workspace.get_work_dir(task=task)
+            else:
+                resolved = task.resolved_hash(workspace=workspace).b32()
+                work_directory = Path(tempfile.mkdtemp(prefix=f"misen-work-{resolved}-"))
+        return work_directory
 
     def argument_resolver(value: Any) -> Any:
-        def leaf_resolver(leaf: Any) -> Any:
-            if isinstance(leaf, Task):
-                return dependency_results[leaf]
-            if leaf is WORK_DIR:
-                return work_dir()
-            if leaf is ASSIGNED_RESOURCES or leaf is ASSIGNED_RESOURCES_PER_NODE:
-                return assigned_resources
-            return leaf
+        if value is WORK_DIR:
+            return work_dir()
+        if value is ASSIGNED_RESOURCES or value is ASSIGNED_RESOURCES_PER_NODE:
+            return assigned_resources
+        return map_nested_leaves(
+            value,
+            lambda leaf: dependency_results[leaf] if isinstance(leaf, Task) else leaf,
+        )
 
-        return map_nested_leaves(value, leaf_resolver)
+    if WORK_DIR in itertools.chain(task.args, task.kwargs.values()):
+        work_dir()
 
-    return argument_resolver
+    return argument_resolver, work_directory

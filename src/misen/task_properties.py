@@ -50,6 +50,8 @@ class TaskProperties(Struct, frozen=True):
         index_by: How result hashes are derived.
         resources: Callable that computes resource requirements from arguments.
         serializer: Serializer type used to persist cached results.
+        cleanup_work_dir: Whether to remove cacheable task work dirs after a
+            successful run. Non-cacheable task work dirs are always cleaned up.
     """
 
     id: str
@@ -60,6 +62,7 @@ class TaskProperties(Struct, frozen=True):
     index_by: Literal["task", "result"] = "result"
     resources: Callable[..., Resources] = lambda *_, **__: Resources()
     serializer: type[Serializer] = DefaultSerializer
+    cleanup_work_dir: bool = False
 
 
 class Resources(Struct, frozen=True):
@@ -94,6 +97,7 @@ def task(
     index_by: Literal["task", "result"] = "result",
     resources: Callable[..., Resources] | Resources | None = None,
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
+    cleanup_work_dir: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Attach :class:`TaskProperties` metadata to a function.
 
@@ -108,6 +112,8 @@ def task(
         resources: Static resources object or callable from function args to
             resources.
         serializer: Serializer class used for cached results.
+        cleanup_work_dir: Whether to remove cacheable task work dirs after a
+            successful run. Non-cacheable task work dirs are always cleaned up.
 
     Returns:
         A decorator that annotates the target function.
@@ -142,6 +148,7 @@ def task(
             index_by=index_by,
             resources=resources,
             serializer=serializer,
+            cleanup_work_dir=cleanup_work_dir,
         )
 
         return func
