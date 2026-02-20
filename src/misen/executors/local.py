@@ -483,7 +483,11 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             ValueError: If requested resources exceed configured local limits.
         """
         resources = work_unit.resources
-        if self.gpu_vendor is not None and (resources.gpu_vendor != self.gpu_vendor):
+        if (
+            self.gpu_vendor is not None
+            and resources.gpu_vendor is not None
+            and (resources.gpu_vendor != self.gpu_vendor)
+        ):
             msg = (
                 f"Requested gpu_vendor={resources.gpu_vendor!r} does not match "
                 f"LocalExecutor.gpu_vendor={self.gpu_vendor!r}."
