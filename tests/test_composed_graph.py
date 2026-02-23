@@ -2,14 +2,16 @@ import os
 import sys
 import time
 
-from misen import Experiment, Task, task
+from misen import ASSIGNED_RESOURCES, Experiment, Task, task
+from misen.utils.assigned_resources import AssignedResources
 
 
-@task(id="add", cache=False)
-def add(a: float, b: float) -> float:
+@task(id="add", cache=False, exclude={"x"})
+def add(a: float, b: float, x: AssignedResources | None = None) -> float:
     print(f"Running add with {a}, {b}")
     print(f"{os.environ['MY_ENV_VAR']}")
     print(sys.executable)
+    print("Assigned Resources:", x)
     return a + b
 
 
@@ -62,8 +64,8 @@ class MyExperiment(Experiment):
         var_task = Task(variance, numbers=gen_task.T)
         mult_task = Task(multiply, a=sum_task.T, b=mean_task.T)
 
-        add_task = Task(add, a=mult_task.T, b=var_task.T)
-        add_task_dup = Task(add, a=mult_task.T, b=var_task.T)
+        add_task = Task(add, a=mult_task.T, b=var_task.T, x=ASSIGNED_RESOURCES)
+        add_task_dup = Task(add, a=mult_task.T, b=var_task.T, x=ASSIGNED_RESOURCES)
 
         final_multiply_task = Task(multiply, a=add_task.T, b=add_task_dup.T)
 
