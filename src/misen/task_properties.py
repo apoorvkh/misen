@@ -13,7 +13,7 @@ and external callables.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeAlias, TypeVar
 
 from msgspec import Struct
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import FunctionType
 
-__all__ = ["Resources", "TaskProperties", "resolve_task_properties", "task"]
+__all__ = ["GpuRuntime", "Resources", "TaskProperties", "resolve_task_properties", "task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -65,6 +65,9 @@ class TaskProperties(Struct, frozen=True):
     cleanup_work_dir: bool = False
 
 
+GpuRuntime: TypeAlias = Literal["cuda", "rocm", "xpu"]
+
+
 class Resources(Struct, frozen=True):
     """Resource requirements for executing a task.
 
@@ -75,7 +78,7 @@ class Resources(Struct, frozen=True):
         cpus: CPU cores.
         gpus: GPU count.
         gpu_memory: Optional requested GPU memory in GiB.
-        gpu_vendor: Optional requested GPU vendor.
+        gpu_runtime: Requested GPU runtime.
     """
 
     time: int | None = None
@@ -84,7 +87,7 @@ class Resources(Struct, frozen=True):
     cpus: int = 1
     gpus: int = 0
     gpu_memory: int | None = None
-    gpu_vendor: Literal["nvidia", "amd", "intel", "apple"] | None = None
+    gpu_runtime: GpuRuntime = "cuda"
 
 
 def task(

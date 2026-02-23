@@ -20,7 +20,11 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 import msgspec
 
 from misen.executor import Executor, Job
-from misen.utils.assigned_resources import get_assigned_resources_slurm, get_assigned_resources_slurm_per_node
+from misen.utils.assigned_resources import (
+    build_assigned_resources_env,
+    get_assigned_resources_slurm,
+    get_assigned_resources_slurm_per_node,
+)
 from misen.utils.runtime_events import runtime_event, work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
@@ -177,11 +181,16 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             if resources.nodes > 1
             else get_assigned_resources_slurm,
         )
+        assigned_resources_env = build_assigned_resources_env(
+            assigned_resources=None,
+            gpu_runtime=resources.gpu_runtime,
+            source=("slurm_per_node" if resources.nodes > 1 else "slurm"),
+        )
 
         job_log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         sbatch_cmd.extend(["--output", str(job_log_path)])
 
-        env_prefix = ["env", *[f"{k}={v}" for k, v in env_overrides.items()]]
+        env_prefix = ["env", *[f"{k}={v}" for k, v in (env_overrides | assigned_resources_env).items()]]
         sbatch_cmd.extend(["--export", "ALL"])
         sbatch_cmd.extend(["--wrap", shlex.join([*env_prefix, *argv])])
 
@@ -203,7 +212,7 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         return SlurmJob(work_unit=work_unit, job_id=job_id, slurm_job_id=slurm_job_id, log_path=job_log_path)
 
 
-ResourceKey: TypeAlias = Literal["time", "nodes", "memory", "cpus", "gpus", "gpu_memory", "gpu_vendor"]
+ResourceKey: TypeAlias = Literal["time", "nodes", "memory", "cpus", "gpus", "gpu_memory", "gpu_runtime"]
 OperatorName: TypeAlias = Literal["eq", "ne", "lt", "le", "gt", "ge", "contains", "is_", "is_not"]
 
 
@@ -242,7 +251,7 @@ def _resolve_dynamic_sbatch_flags(
     Condition semantics:
       - `when: {"gpus": 1}` means gpus == 1
       - `when: {"gpu_memory": None}` means gpu_memory is null (None)
-      - `when: {"gpu_vendor": "nvidia"}` means gpu_vendor == "nvidia"
+      - `when: {"gpu_runtime": "rocm"}` means gpu_runtime == "rocm"
       - Predicate form supports operator names from Python's `operator` module:
         eq, ne, lt, le, gt, ge, contains, is_, is_not.
 

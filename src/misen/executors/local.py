@@ -4,7 +4,8 @@ Concurrency model:
 
 - Submit-time builds a dependency graph of work units.
 - A background scheduler thread launches ready jobs when resources fit.
-- Resource budgeting is explicit (CPUs, memory, GPUs) and prevents oversubscription.
+- Resource budgeting is explicit (CPUs, memory, runtime-specific GPUs) and
+  prevents oversubscription.
 - Dependency failures propagate to downstream pending jobs.
 
 Execution still uses the generic executor contract (snapshot + dispatch + job
@@ -23,7 +24,7 @@ from typing import TYPE_CHECKING, Literal
 import msgspec
 
 from misen.executor import Executor, Job
-from misen.utils.assigned_resources import AssignedResources
+from misen.utils.assigned_resources import AssignedResources, build_assigned_resources_env
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from io import FileIO
     from pathlib import Path
 
-    from misen.task_properties import Resources
+    from misen.task_properties import GpuRuntime, Resources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -53,48 +54,44 @@ class _ResourceBudget(msgspec.Struct, frozen=True):
 
     memory: int
     cpus: int
-    gpus: int
+    cuda_gpus: int
+    rocm_gpus: int
+    xpu_gpus: int
 
     def fits(self, resources: Resources) -> bool:
-        """Return whether requested resources fit in current budget.
-
-        Args:
-            resources: Requested work-unit resources.
-
-        Returns:
-            ``True`` if all requested dimensions are within budget.
-        """
-        return resources.cpus <= self.cpus and resources.memory <= self.memory and resources.gpus <= self.gpus
+        """Return whether requested resources fit in current budget."""
+        return (
+            resources.cpus <= self.cpus
+            and resources.memory <= self.memory
+            and resources.gpus <= self._runtime_gpu_budget(resources.gpu_runtime)
+        )
 
     def subtract(self, resources: Resources) -> _ResourceBudget:
-        """Return new budget after reserving resources.
-
-        Args:
-            resources: Resources to reserve.
-
-        Returns:
-            Updated budget with resources subtracted.
-        """
-        return _ResourceBudget(
-            cpus=self.cpus - resources.cpus,
-            memory=self.memory - resources.memory,
-            gpus=self.gpus - resources.gpus,
-        )
+        """Return new budget after reserving resources."""
+        return self._adjust(resources=resources, multiplier=-1)
 
     def add(self, resources: Resources) -> _ResourceBudget:
-        """Return new budget after releasing resources.
+        """Return new budget after releasing resources."""
+        return self._adjust(resources=resources, multiplier=1)
 
-        Args:
-            resources: Resources to release.
-
-        Returns:
-            Updated budget with resources added.
-        """
+    def _adjust(self, resources: Resources, multiplier: Literal[-1, 1]) -> _ResourceBudget:
+        runtime_delta = resources.gpus * multiplier
         return _ResourceBudget(
-            cpus=self.cpus + resources.cpus,
-            memory=self.memory + resources.memory,
-            gpus=self.gpus + resources.gpus,
+            cpus=self.cpus + (resources.cpus * multiplier),
+            memory=self.memory + (resources.memory * multiplier),
+            cuda_gpus=self.cuda_gpus + (runtime_delta if resources.gpu_runtime == "cuda" else 0),
+            rocm_gpus=self.rocm_gpus + (runtime_delta if resources.gpu_runtime == "rocm" else 0),
+            xpu_gpus=self.xpu_gpus + (runtime_delta if resources.gpu_runtime == "xpu" else 0),
         )
+
+    def _runtime_gpu_budget(self, gpu_runtime: GpuRuntime) -> int:
+        match gpu_runtime:
+            case "cuda":
+                return self.cuda_gpus
+            case "rocm":
+                return self.rocm_gpus
+            case "xpu":
+                return self.xpu_gpus
 
 
 class LocalJob(Job):
@@ -121,23 +118,15 @@ class LocalJob(Job):
         snapshot: LocalSnapshot,
         workspace: Workspace,
     ) -> None:
-        """Initialize a local job.
-
-        Args:
-            work_unit: Work unit to run.
-            resources: Resource request for this work unit.
-            dependencies: Upstream local jobs that must complete first.
-            snapshot: Snapshot used to prepare execution command/env.
-            workspace: Workspace for logs/artifacts.
-        """
+        """Initialize a local job."""
         super().__init__(work_unit=work_unit, job_id=None, log_path=None)
         self.resources = resources
         self.dependencies = dependencies
         self.snapshot = snapshot
         self.workspace = workspace
 
-        self.assigned_cpu_indices: tuple[int, ...] = ()
-        self.assigned_gpu_indices: tuple[int, ...] = ()
+        self.assigned_cpu_indices: list[int] = []
+        self.assigned_gpu_indices: list[int] = []
 
         self._process: subprocess.Popen[bytes] | None = None
         self._log_fp = None  # keep alive while the child runs
@@ -165,12 +154,7 @@ class LocalJob(Job):
             return self._state
 
     def set_process(self, process: subprocess.Popen[bytes], log_fp: FileIO) -> None:
-        """Attach process/log handles and mark job as running.
-
-        Args:
-            process: Spawned child process.
-            log_fp: Open file descriptor receiving combined stdout/stderr.
-        """
+        """Attach process/log handles and mark job as running."""
         with self._lock:
             self._process = process
             self._log_fp = log_fp
@@ -207,7 +191,9 @@ class _LocalScheduler(msgspec.Struct, dict=True):
 
     available_budget: _ResourceBudget
     available_cpu_indices: list[int]
-    available_gpu_indices: list[int]
+    available_cuda_gpu_indices: list[int]
+    available_rocm_gpu_indices: list[int]
+    available_xpu_gpu_indices: list[int]
 
     def __post_init__(self) -> None:
         self._pending: list[LocalJob] = []
@@ -217,11 +203,7 @@ class _LocalScheduler(msgspec.Struct, dict=True):
         self._thread.start()
 
     def submit(self, job: LocalJob) -> None:
-        """Queue a job for scheduling.
-
-        Args:
-            job: Local job to enqueue.
-        """
+        """Queue a job for scheduling."""
         with self._condition:
             self._pending.append(job)
             self._condition.notify_all()
@@ -258,7 +240,7 @@ class _LocalScheduler(msgspec.Struct, dict=True):
         for job, state in finished:
             self._running.remove(job)
             self.available_budget = self.available_budget.add(job.resources)
-            self._release_allocations(job.assigned_cpu_indices, job.assigned_gpu_indices)
+            self._release_allocations(job.assigned_cpu_indices, job.resources.gpu_runtime, job.assigned_gpu_indices)
             if state == "done":
                 runtime_job_done(id(job))
             elif state == "failed":
@@ -303,28 +285,15 @@ class _LocalScheduler(msgspec.Struct, dict=True):
         return started_any
 
     def _deps_ready(self, job: LocalJob) -> bool:
-        """Return whether all job dependencies are complete and successful.
-
-        Args:
-            job: Candidate pending job.
-
-        Returns:
-            ``True`` when dependencies are done; ``False`` otherwise.
-        """
+        """Return whether all job dependencies are complete and successful."""
         states = {dep.state() for dep in job.dependencies}
         if "failed" in states:
             self._mark_pending_failed(job)
             return False
         return not states or states == {"done"}
 
-    def _launch_job(self, job: LocalJob, cpu_indices: tuple[int, ...], gpu_indices: tuple[int, ...]) -> None:
-        """Spawn the child process for one job and bind resource metadata.
-
-        Args:
-            job: Job to launch.
-            cpu_indices: Physical CPU indices reserved for this job.
-            gpu_indices: Physical GPU indices reserved for this job.
-        """
+    def _launch_job(self, job: LocalJob, cpu_indices: list[int], gpu_indices: list[int]) -> None:
+        """Spawn the child process for one job and bind resource metadata."""
         assigned_resources = AssignedResources(
             cpu_indices=cpu_indices,
             gpu_indices=gpu_indices,
@@ -338,12 +307,16 @@ class _LocalScheduler(msgspec.Struct, dict=True):
             assigned_resources_getter=(lambda r=assigned_resources: r),
         )
 
+        assigned_resources_env = build_assigned_resources_env(
+            assigned_resources=assigned_resources, gpu_runtime=job.resources.gpu_runtime, source="inline"
+        )
+
         job.log_path = job.workspace.get_job_log(job_id=job.job_id, work_unit=job.work_unit)
         log_fp = job.log_path.open("ab", buffering=0)
         try:
             process = subprocess.Popen(  # noqa: S603
                 argv,
-                env=os.environ | env_overrides,
+                env=os.environ | env_overrides | assigned_resources_env,
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
             )
@@ -357,58 +330,61 @@ class _LocalScheduler(msgspec.Struct, dict=True):
         job.assigned_gpu_indices = gpu_indices
         runtime_job_running(id(job), job_id=job.job_id, pid=process.pid)
 
-    def _reserve_indices(self, resources: Resources) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
-        """Reserve CPU/GPU indices for a resource request.
-
-        Args:
-            resources: Requested resources.
-
-        Returns:
-            Tuple of reserved CPU/GPU indices, or ``None`` if unavailable.
-        """
+    def _reserve_indices(self, resources: Resources) -> tuple[list[int], list[int]] | None:
+        """Reserve CPU/GPU indices for a resource request."""
         cpu_indices = self._allocate_indices(self.available_cpu_indices, resources.cpus)
         if cpu_indices is None:
             return None
-        gpu_indices = self._allocate_indices(self.available_gpu_indices, resources.gpus)
+
+        gpu_pool = self._gpu_index_pool(resources.gpu_runtime)
+        gpu_indices = self._allocate_indices(gpu_pool, resources.gpus)
         if gpu_indices is None:
-            self._release_allocations(cpu_indices, ())
+            self._release_allocations(cpu_indices, resources.gpu_runtime, [])
             return None
         return cpu_indices, gpu_indices
 
-    def _release_allocations(self, cpu_indices: tuple[int, ...], gpu_indices: tuple[int, ...]) -> None:
+    def _release_allocations(self, cpu_indices: list[int], gpu_runtime: GpuRuntime, gpu_indices: list[int]) -> None:
         """Return previously reserved CPU/GPU indices to the free pools."""
         self._release_indices(self.available_cpu_indices, cpu_indices)
-        self._release_indices(self.available_gpu_indices, gpu_indices)
+        self._release_indices(self._gpu_index_pool(gpu_runtime), gpu_indices)
 
     def _mark_pending_failed(
-        self, job: LocalJob, cpu_indices: tuple[int, ...] = (), gpu_indices: tuple[int, ...] = ()
+        self,
+        job: LocalJob,
+        cpu_indices: list[int] | None = None,
+        gpu_indices: list[int] | None = None,
     ) -> None:
-        """Mark a pending job failed and release any provisional allocations.
-
-        Args:
-            job: Job to fail.
-            cpu_indices: CPU indices to release.
-            gpu_indices: GPU indices to release.
-        """
-        self._release_allocations(cpu_indices, gpu_indices)
+        """Mark a pending job failed and release any provisional allocations."""
+        if cpu_indices is None:
+            cpu_indices = []
+        if gpu_indices is None:
+            gpu_indices = []
+        self._release_allocations(cpu_indices, job.resources.gpu_runtime, gpu_indices)
         job.mark_failed()
         if job in self._pending:
             self._pending.remove(job)
         runtime_job_failed(id(job))
 
-    @staticmethod
-    def _allocate_indices(pool: list[int], count: int) -> tuple[int, ...] | None:
-        """Allocate `count` indices from a sorted index pool."""
-        if count == 0:
-            return ()
-        if len(pool) < count:
-            return None
-        indices = tuple(pool[:count])
-        del pool[:count]
-        return indices
+    def _gpu_index_pool(self, gpu_runtime: GpuRuntime) -> list[int]:
+        match gpu_runtime:
+            case "cuda":
+                return self.available_cuda_gpu_indices
+            case "rocm":
+                return self.available_rocm_gpu_indices
+            case "xpu":
+                return self.available_xpu_gpu_indices
 
     @staticmethod
-    def _release_indices(pool: list[int], indices: tuple[int, ...]) -> None:
+    def _allocate_indices(pool: list[int], count: int) -> list[int] | None:
+        """Allocate `count` indices from a sorted index pool."""
+        if count == 0:
+            return []
+        if len(pool) < count:
+            return None
+        return pool[:count]
+
+    @staticmethod
+    def _release_indices(pool: list[int], indices: list[int]) -> None:
         """Return indices to a pool while preserving sorted order."""
         for idx in indices:
             insort(pool, idx)
@@ -418,29 +394,50 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
     """Executor that runs work units as local subprocesses."""
 
     max_memory: int | Literal["all"] = "all"
-    max_cpus: int | Literal["all"] = "all"
+    num_cpus: int | Literal["all"] = "all"
     cpu_indices: list[int] | None = None
-    max_gpus: int | None = None
-    gpu_indices: list[int] | None = None
-    gpu_vendor: Literal["nvidia", "amd", "intel", "apple"] | None = None
+    num_cuda_gpus: int = 0
+    cuda_gpu_indices: list[int] | None = None
+    num_rocm_gpus: int = 0
+    rocm_gpu_indices: list[int] | None = None
+    num_xpu_gpus: int = 0
+    xpu_gpu_indices: list[int] | None = None
 
     def __post_init__(self) -> None:
         """Infer resource limits and initialize scheduler."""
         if self.max_memory == "all":
             self.max_memory = _infer_total_memory_gb()
 
-        if self.max_cpus == "all":
-            self.max_cpus = os.cpu_count() or 1
-        cpu_indices = self.cpu_indices or list(range(self.max_cpus))
+        cpu_indices = _resolve_cpu_indices(num_cpus=self.num_cpus, cpu_indices=self.cpu_indices)
+        cuda_gpu_indices = _resolve_gpu_indices(
+            gpu_runtime="cuda",
+            num_gpus=self.num_cuda_gpus,
+            gpu_indices=self.cuda_gpu_indices,
+        )
+        rocm_gpu_indices = _resolve_gpu_indices(
+            gpu_runtime="rocm",
+            num_gpus=self.num_rocm_gpus,
+            gpu_indices=self.rocm_gpu_indices,
+        )
+        xpu_gpu_indices = _resolve_gpu_indices(
+            gpu_runtime="xpu",
+            num_gpus=self.num_xpu_gpus,
+            gpu_indices=self.xpu_gpu_indices,
+        )
 
-        if self.max_gpus is not None and self.gpu_indices is not None:
-            msg = "Provide either max_gpus or gpu_indices for LocalExecutor, not both."
-            raise ValueError(msg)
-        gpu_indices = self.gpu_indices or list(range(self.max_gpus or 0))
-
-        self._resource_budget = _ResourceBudget(memory=self.max_memory, cpus=len(cpu_indices), gpus=len(gpu_indices))
+        self._resource_budget = _ResourceBudget(
+            memory=self.max_memory,
+            cpus=len(cpu_indices),
+            cuda_gpus=len(cuda_gpu_indices),
+            rocm_gpus=len(rocm_gpu_indices),
+            xpu_gpus=len(xpu_gpu_indices),
+        )
         self._scheduler = _LocalScheduler(
-            self._resource_budget, available_cpu_indices=cpu_indices, available_gpu_indices=gpu_indices
+            self._resource_budget,
+            available_cpu_indices=cpu_indices,
+            available_cuda_gpu_indices=cuda_gpu_indices,
+            available_rocm_gpu_indices=rocm_gpu_indices,
+            available_xpu_gpu_indices=xpu_gpu_indices,
         )
 
     @classmethod
@@ -450,14 +447,7 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
         return LocalSnapshot(snapshots_dir=snapshots_dir)
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Create or reuse snapshot for this submit call.
-
-        Args:
-            workspace: Workspace used to locate snapshot directory.
-
-        Returns:
-            Snapshot instance.
-        """
+        """Create or reuse snapshot for this submit call."""
         snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
         return LocalExecutor._cached_snapshot(snapshots_dir=snapshots_dir)
 
@@ -468,37 +458,16 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
         workspace: Workspace,
         snapshot: LocalSnapshot,
     ) -> LocalJob:
-        """Queue a work unit in the local scheduler.
-
-        Args:
-            work_unit: Work unit to execute.
-            dependencies: Upstream jobs that must complete first.
-            workspace: Workspace for logs/artifacts.
-            snapshot: Snapshot used to generate payload command.
-
-        Returns:
-            Job handle representing scheduled work.
-
-        Raises:
-            ValueError: If requested resources exceed configured local limits.
-        """
+        """Queue a work unit in the local scheduler."""
         resources = work_unit.resources
-        if (
-            self.gpu_vendor is not None
-            and resources.gpu_vendor is not None
-            and (resources.gpu_vendor != self.gpu_vendor)
-        ):
-            msg = (
-                f"Requested gpu_vendor={resources.gpu_vendor!r} does not match "
-                f"LocalExecutor.gpu_vendor={self.gpu_vendor!r}."
-            )
-            raise ValueError(msg)
         if not self._resource_budget.fits(resources):
             msg = (
                 "Requested resources exceed LocalExecutor limits: "
-                f"requested cpus={resources.cpus}, memory={resources.memory}, gpus={resources.gpus}; "
+                f"requested cpus={resources.cpus}, memory={resources.memory}, "
+                f"gpus={resources.gpus} (runtime={resources.gpu_runtime}); "
                 f"limits cpus={self._resource_budget.cpus}, memory={self._resource_budget.memory}, "
-                f"gpus={self._resource_budget.gpus}."
+                f"cuda_gpus={self._resource_budget.cuda_gpus}, rocm_gpus={self._resource_budget.rocm_gpus}, "
+                f"xpu_gpus={self._resource_budget.xpu_gpus}."
             )
             raise ValueError(msg)
 
@@ -527,3 +496,54 @@ def _infer_total_memory_gb() -> int:
         return max(1, total_bytes // (1024**3))
     except (ValueError, OSError, AttributeError):
         return 1
+
+
+def _resolve_cpu_indices(num_cpus: int | Literal["all"], cpu_indices: list[int] | None) -> list[int]:
+    """Resolve scheduler CPU pool from count/list configuration."""
+    if cpu_indices is not None:
+        normalized_cpu_indices = _normalize_indices(cpu_indices, name="cpu_indices")
+        if num_cpus != "all" and num_cpus != len(normalized_cpu_indices):
+            msg = (
+                f"num_cpus={num_cpus} does not match len(cpu_indices)={len(normalized_cpu_indices)}. "
+                "Set num_cpus='all' when using explicit cpu_indices."
+            )
+            raise ValueError(msg)
+        return normalized_cpu_indices
+
+    if num_cpus == "all":
+        inferred_cpus = os.cpu_count() or 1
+        return list(range(inferred_cpus))
+    if num_cpus < 1:
+        msg = "num_cpus must be >= 1."
+        raise ValueError(msg)
+    return list(range(num_cpus))
+
+
+def _resolve_gpu_indices(gpu_runtime: GpuRuntime, num_gpus: int, gpu_indices: list[int] | None) -> list[int]:
+    """Resolve scheduler GPU pool for one runtime from count/list configuration."""
+    if num_gpus < 0:
+        msg = f"num_{gpu_runtime}_gpus must be >= 0."
+        raise ValueError(msg)
+
+    if gpu_indices is not None:
+        normalized_gpu_indices = _normalize_indices(gpu_indices, name=f"{gpu_runtime}_gpu_indices")
+        if num_gpus != 0 and num_gpus != len(normalized_gpu_indices):
+            msg = (
+                f"num_{gpu_runtime}_gpus={num_gpus} does not match "
+                f"len({gpu_runtime}_gpu_indices)={len(normalized_gpu_indices)}. "
+                f"Set num_{gpu_runtime}_gpus=0 when using explicit {gpu_runtime}_gpu_indices."
+            )
+            raise ValueError(msg)
+        return normalized_gpu_indices
+
+    return list(range(num_gpus))
+
+
+def _normalize_indices(indices: list[int], name: str) -> list[int]:
+    if any(index < 0 for index in indices):
+        msg = f"{name} must contain non-negative indices."
+        raise ValueError(msg)
+    if len(set(indices)) != len(indices):
+        msg = f"{name} must not contain duplicates."
+        raise ValueError(msg)
+    return sorted(indices)

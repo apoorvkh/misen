@@ -65,10 +65,13 @@ class WorkUnit:
         from misen.task_properties import Resources
 
         _resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
-        gpu_vendors = sorted({r.gpu_vendor for r in _resource_list if r.gpu_vendor is not None})
-        if len(gpu_vendors) > 1:
-            msg = f"WorkUnit has incompatible gpu_vendor requirements: {gpu_vendors}"
+
+        gpu_runtimes = {r.gpu_runtime for r in _resource_list if r.gpus > 0}
+        if len(gpu_runtimes) > 1:
+            msg = f"WorkUnit has incompatible gpu_runtime requirements: {gpu_runtimes}"
             raise ValueError(msg)
+        gpu_runtime = gpu_runtimes[0] if gpu_runtimes else "cuda"
+
         self.resources = Resources(
             time=(
                 None
@@ -84,7 +87,7 @@ class WorkUnit:
                 if all(r.gpu_memory is None for r in _resource_list)
                 else max(r.gpu_memory for r in _resource_list if r.gpu_memory is not None)
             ),
-            gpu_vendor=(gpu_vendors[0] if gpu_vendors else None),
+            gpu_runtime=gpu_runtime,
         )
 
     def __hash__(self) -> int:

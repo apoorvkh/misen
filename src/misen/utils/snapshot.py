@@ -26,7 +26,7 @@ import uv
 from dotenv import load_dotenv
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator
 
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.work_unit import WorkUnit
@@ -46,7 +46,7 @@ class Snapshot(ABC):
         work_unit: WorkUnit,
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
-    ) -> tuple[str, list[str], Mapping[str, str]]:
+    ) -> tuple[str, list[str], dict[str, str]]:
         """Prepare command and environment for one work unit.
 
         Args:
@@ -70,7 +70,7 @@ class NullSnapshot(Snapshot):
         work_unit: WorkUnit,
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
-    ) -> tuple[str, list[str], Mapping[str, str]]:
+    ) -> tuple[str, list[str], dict[str, str]]:
         """Null snapshots don't prepare external commands."""
         _ = work_unit, workspace, assigned_resources_getter
         job_id = _token_base32(6)
@@ -99,7 +99,7 @@ class LocalSnapshot(Snapshot):
         work_unit: WorkUnit,
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
-    ) -> tuple[str, list[str], Mapping[str, str]]:
+    ) -> tuple[str, list[str], dict[str, str]]:
         """Prepare command/env overrides to execute serialized payload.
 
         Args:
