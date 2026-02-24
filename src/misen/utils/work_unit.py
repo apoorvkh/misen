@@ -20,8 +20,6 @@ from misen.utils.graph import DependencyGraph
 from misen.utils.task_utils import map_nested_leaves
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from misen.task_properties import Resources
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.workspace import Workspace
@@ -32,12 +30,13 @@ __all__ = ["WorkUnit", "build_task_dependency_graph", "build_work_graph"]
 class WorkUnit:
     """Cache-bounded unit of execution derived from a task DAG.
 
-    It corresponds to the sub-DAG of non-cacheable tasks reachable from `root`, truncated at downstream cacheable tasks
-    (which become separate WorkUnits, i.e. `dependencies`).
+    A WorkUnit contains the non-cacheable subgraph rooted at ``root`` and
+    bounded by downstream cacheable nodes. Those boundary nodes become separate
+    WorkUnits referenced via ``dependencies``.
 
-    Execution: Tasks in `graph` are executed sequentially in dependency order via `execute()`.
-
-    Specifies minimum resources to execute any Task in the DAG.
+    Tasks inside a WorkUnit execute sequentially in dependency order.
+    Scheduler-facing resources are aggregated conservatively across contained
+    tasks (max for CPU/memory/GPU counts; sum for finite runtime).
     """
 
     __slots__ = ("dependencies", "graph", "resources", "root")
@@ -57,11 +56,11 @@ class WorkUnit:
         self.root = root
         self.dependencies = dependencies
 
-        # Dependency graph of tasks.
-        # Truncated at caching boundaries since downstream cacheable nodes become WorkUnit dependencies.
+        # Exclude downstream cacheable tasks: they are represented as dependent
+        # WorkUnits instead of in-unit tasks.
         self.graph = build_task_dependency_graph(task=root, exclude_cacheable=True)
 
-        # Union of resources for all tasks in graph
+        # Compute one scheduler request that satisfies every task in the unit.
         from misen.task_properties import Resources
 
         _resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
@@ -111,7 +110,7 @@ class WorkUnit:
         graph: DependencyGraph[Task[Any]],
         workspace: Workspace,
         job_id: str,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
+        assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
     ) -> None:
         """Execute tasks in dependency order for a task graph.
 
@@ -119,13 +118,11 @@ class WorkUnit:
             graph: Task dependency graph to execute.
             workspace: Workspace used for cache/log/storage operations.
             job_id: Job identifier propagated into task log naming.
-            assigned_resources_getter: Callable returning runtime-assigned
-                resources for sentinel injection.
+            assigned_resources: Runtime-assigned resources for sentinel injection.
         """
         from misen.tasks import Task
 
         task_results: dict[Task[Any], Any] = {}
-        assigned_resources = assigned_resources_getter()
 
         def resolve_arg(arg: Any) -> Any:
             """Resolve non-cacheable task leaves from in-memory runtime results."""
@@ -139,13 +136,12 @@ class WorkUnit:
 
         ordered_tasks: list[Task[Any]] = list(graph)
         for i, task in enumerate(ordered_tasks):
-            # only keep task results needed by future dependents
+            # Keep only transient results still needed by future in-unit tasks.
             remaining_deps = {d for t in ordered_tasks[i:] for d in t.dependencies}
             task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
 
-            # execute task
-            # retrieving results of non-cacheable dependencies from `task_results`
-            # cacheable dependencies will be resolved from Workspace in `.result()`
+            # Rebuild the task with resolved in-unit non-cacheable dependencies.
+            # Cacheable dependencies are still loaded through Workspace in Task.result.
             task_results[task] = Task(
                 task.func,
                 *(resolve_arg(dep) for dep in task.args),
@@ -158,12 +154,7 @@ class WorkUnit:
                 _assigned_resources=assigned_resources,
             )
 
-    def as_payload(
-        self,
-        workspace: Workspace,
-        job_id: str,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
-    ) -> bytes:
+    def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
         """Serialize executable payload for backend dispatch.
 
         Args:
@@ -181,7 +172,6 @@ class WorkUnit:
                 graph=self.graph,
                 workspace=workspace,
                 job_id=job_id,
-                assigned_resources_getter=assigned_resources_getter,
             )
         )
 
@@ -195,17 +185,17 @@ def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
     Returns:
         Dependency graph of work units ready for executor submission.
     """
-    # Task dependency graph: an edge from A to B means A depends on B
+    # Edge convention: A -> B means A depends on B.
     union = Task((lambda *_: None), *tasks)
     task_graph: DependencyGraph[Task[Any]] = build_task_dependency_graph(task=union)
     task_graph.remove_node_by_value(union, cmp=is_, first=True)
 
-    # Retain only root and cachable tasks (and the induced graph minor)
+    # Keep only roots and cache boundaries, then retain induced connectivity.
     anchor_graph = task_graph.copy()
     anchors = [i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache]
     anchor_graph.coarsen_to_anchors(anchors=anchors)
 
-    # replace nodes with WorkUnit instances
+    # Materialize WorkUnit nodes preserving dependency topology.
     work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
     for i in work_graph.evaluation_order():
         work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))

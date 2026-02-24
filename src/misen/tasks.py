@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cas
 
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
 from misen.task_properties import Resources, TaskProperties, resolve_task_properties
-from misen.utils.auto import resolve_auto
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
 from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
@@ -137,7 +136,9 @@ class Task(FrozenMixin, Generic[R]):
         Returns:
             ``True`` if this task is cacheable and present in workspace cache.
         """
-        workspace = resolve_auto(workspace=workspace)
+        from misen.workspace import Workspace
+
+        workspace = Workspace.resolve_auto(workspace)
         return self.properties.cache and self in workspace.results
 
     def uncached_deps(self, workspace: Workspace | Literal["auto"] = "auto") -> Iterator[Task]:
@@ -160,7 +161,7 @@ class Task(FrozenMixin, Generic[R]):
         Returns:
             ``True`` when no immediate cacheable dependency is missing.
         """
-        return not any(self.uncached_deps(workspace=workspace))  # "if there are not any uncached deps"
+        return not any(self.uncached_deps(workspace=workspace))
 
     def done(self, workspace: Workspace) -> bool:
         """Return whether task completion metadata exists in the workspace.
@@ -185,14 +186,16 @@ class Task(FrozenMixin, Generic[R]):
 
         Returns:
             ``True`` when the cacheable task runtime lock is held.
+
+        Notes:
+            Non-cacheable tasks are never represented as "running" here because
+            they do not acquire workspace runtime locks.
         """
-        # For cacheable Tasks, if runtime lock (managed by Workspace) is unavailable.
-        # Non-cacheable Tasks always return False, since they can freely run concurrently.
-        # TODO: non-cacheable case?
         try:
             return self._runtime_lock(workspace=workspace).is_locked()
         except RuntimeError:
-            # raised if dependencies are not cached (pre-requisite to Task runtime)
+            # Raised when dependencies are unresolved and therefore the runtime
+            # lock key (resolved hash) cannot be computed yet.
             return False
 
     def result(
@@ -232,9 +235,11 @@ class Task(FrozenMixin, Generic[R]):
             ``@task(cleanup_work_dir=True)`` is set.
             Logs are captured to task logs and optionally mirrored to stdout.
         """
-        workspace = resolve_auto(workspace=workspace)
+        from misen.workspace import Workspace
 
-        # Retrieve result if cached
+        workspace = Workspace.resolve_auto(workspace)
+
+        # Fast path: return cached payload for cacheable tasks.
         if self.properties.cache:
             if (result := workspace.results.get(self)) is not None:
                 return result
@@ -243,7 +248,7 @@ class Task(FrozenMixin, Generic[R]):
                 msg = f"{self} is not cached."
                 raise RuntimeError(msg)
 
-        # Raise RuntimeError if dependencies are not cached and we don't want to compute them
+        # Guardrail: only recurse into dependencies when explicitly requested.
         if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
             uncached_deps = list(self.uncached_deps(workspace=workspace))
             msg = f"{self} has dependencies which must be computed and cached first: {uncached_deps}"
@@ -298,8 +303,11 @@ class Task(FrozenMixin, Generic[R]):
         Returns:
             Dependency graph of job handles for scheduled work units.
         """
-        executor = resolve_auto(executor=executor)
-        workspace = resolve_auto(workspace=workspace)
+        from misen.executor import Executor
+        from misen.workspace import Workspace
+
+        executor = Executor.resolve_auto(executor)
+        workspace = Workspace.resolve_auto(workspace)
         return executor.submit(tasks={self}, workspace=workspace)
 
     def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
@@ -311,7 +319,9 @@ class Task(FrozenMixin, Generic[R]):
         Returns:
             Per-task workspace directory.
         """
-        workspace = resolve_auto(workspace=workspace)
+        from misen.workspace import Workspace
+
+        workspace = Workspace.resolve_auto(workspace)
         return workspace.get_work_dir(task=self)
 
     def task_hash(self) -> TaskHash:
@@ -388,7 +398,7 @@ class Task(FrozenMixin, Generic[R]):
             specific workspace and resolved task identity, only one runtime is
             active at a time.
         """
-        if not self.are_deps_cached(workspace=workspace):  # necessary to compute resolved_hash
+        if not self.are_deps_cached(workspace=workspace):
             msg = f"Dependencies of {self} must be run before acquiring runtime lock"
             raise RuntimeError(msg)
         return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).b32())

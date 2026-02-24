@@ -1,3 +1,10 @@
+# API Reference
+
+The sections below document the stable user-facing surface.
+
+Internal modules under `misen.utils.*` are implementation details and may
+change without notice.
+
 # Task
 
 ::: misen.tasks.Task

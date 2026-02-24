@@ -93,11 +93,11 @@ class Workspace(FromSettingsABC):
             result_hash_cache: Persistent cache for task result hashes.
             result_store: Store mapping result hashes to on-disk directories.
         """
-        # session-only (non-persistent) caches
+        # Session-local hot caches reduce repeated backend lookups.
         self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
         self._result_hashes: dict[TaskHash, ResultHash] = {}
 
-        # workspace caches
+        # Persistent caches/stores are backend-specific (e.g., LMDB + disk).
         self._resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash] = resolved_hash_cache
         self._result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash] = result_hash_cache
         self._result_map = ResultMap(result_store=result_store, workspace=self)
@@ -112,13 +112,13 @@ class Workspace(FromSettingsABC):
             Resolved hash if present, otherwise ``None``.
         """
         task_hash = task.task_hash()
-        # fast (session-only) cache
+        # Fast path: in-memory session cache.
         resolved_hash = self._resolved_hashes.get(task_hash)
         if resolved_hash is not None:
             return resolved_hash
-        # slower (persistent) cache
+        # Slow path: persistent workspace cache.
         resolved_hash = self._resolved_hash_cache.get(task_hash)
-        # update fast cache if possible
+        # Promote to session cache after a persistent hit.
         if resolved_hash is not None:
             self._resolved_hashes[task_hash] = resolved_hash
         return resolved_hash
@@ -140,18 +140,18 @@ class Workspace(FromSettingsABC):
         Raises:
             RuntimeError: If the task has not been computed yet.
         """
-        # fast (session-only) cache
+        # Fast path: in-memory session cache.
         task_hash = task.task_hash()
         result_hash = self._result_hashes.get(task_hash)
         if result_hash is not None:
             return result_hash
-        # slower (persistent) cache
+        # Slow path: persistent workspace cache by resolved task identity.
         resolved_hash = task.resolved_hash(workspace=self)
         result_hash = self._result_hash_cache.get(resolved_hash)
         if result_hash is None:
             msg = f"Task {task} must be computed first."
             raise RuntimeError(msg)
-        # update fast cache
+        # Promote to session cache after a persistent hit.
         self._result_hashes[task_hash] = result_hash
         return result_hash
 
@@ -265,7 +265,7 @@ class Workspace(FromSettingsABC):
             return log_dir.iterdir()
 
         work_unit_prefix = work_unit.root.task_hash().b32()
-        return (log_dir / f"{work_unit_prefix}_*.log").iterdir()
+        return log_dir.glob(f"{work_unit_prefix}_*.log")
 
 
 R = TypeVar("R")

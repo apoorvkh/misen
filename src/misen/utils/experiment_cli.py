@@ -16,6 +16,10 @@ def experiment_cli(experiment_cls: type[Any]) -> None:
 
     Args:
         experiment_cls: Experiment class type to expose on CLI.
+
+    Notes:
+        Parsing happens in two phases so executor/workspace concrete argument
+        schemas can be selected dynamically from ``*_type`` flags.
     """
     from misen.executor import Executor, ExecutorType
     from misen.workspace import Workspace, WorkspaceType
@@ -52,3 +56,5 @@ def experiment_cli(experiment_cls: type[Any]) -> None:
     match args.command:
         case "run":
             args.experiment.run(executor=executor, workspace=workspace)
+        case "count":
+            print(len(args.experiment.tasks()))

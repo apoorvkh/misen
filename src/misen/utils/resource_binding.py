@@ -11,8 +11,6 @@ import psutil
 from misen.utils.assigned_resources import (
     AssignedResources,
     AssignedResourcesPerNode,
-    get_assigned_resources_from_env,
-    get_gpu_runtime_from_env,
     select_local_assigned_resources,
 )
 
@@ -21,7 +19,7 @@ if TYPE_CHECKING:
 
     from misen.task_properties import GpuRuntime
 
-__all__ = ["apply_resource_binding", "apply_resource_binding_from_env", "binding_env_overrides"]
+__all__ = ["apply_resource_binding"]
 
 _GPU_MASK_VARS: Mapping[GpuRuntime, tuple[str, ...]] = {
     "cuda": ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"),
@@ -46,20 +44,12 @@ _DYNAMIC_THREAD_DISABLE_ENV = {
 }
 
 
-def apply_resource_binding_from_env() -> None:
-    """Apply resource binding from executor-provided process environment."""
-    gpu_runtime = get_gpu_runtime_from_env()
-    assigned_resources = get_assigned_resources_from_env()
-    apply_resource_binding(assigned_resources=assigned_resources, gpu_runtime=gpu_runtime)
-
-
 def apply_resource_binding(
-    assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
-    gpu_runtime: GpuRuntime,
+    assigned_resources: AssignedResources | AssignedResourcesPerNode | None, gpu_runtime: GpuRuntime
 ) -> None:
     """Bind current process to assigned resources (CPU/GPU/threading)."""
     local_resources = select_local_assigned_resources(assigned_resources)
-    env_overrides = binding_env_overrides(local_resources=local_resources, gpu_runtime=gpu_runtime)
+    env_overrides = _binding_env_overrides(local_resources=local_resources, gpu_runtime=gpu_runtime)
 
     for key, value in env_overrides.items():
         os.environ[key] = value
@@ -68,7 +58,7 @@ def apply_resource_binding(
         _apply_cpu_affinity(local_resources["cpu_indices"])
 
 
-def binding_env_overrides(local_resources: AssignedResources | None, gpu_runtime: GpuRuntime) -> dict[str, str]:
+def _binding_env_overrides(local_resources: AssignedResources | None, gpu_runtime: GpuRuntime) -> dict[str, str]:
     """Compute process-environment overrides for assigned resources."""
     env = dict(_DYNAMIC_THREAD_DISABLE_ENV)
     if local_resources is None:

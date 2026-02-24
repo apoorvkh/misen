@@ -33,7 +33,11 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
             Single-node job graph (or empty graph when no tasks were submitted).
         """
         null_work_unit = WorkUnit(root=Task(lambda: None), dependencies=set())
-        job_id, _, _ = self._make_snapshot(workspace=workspace).prepare_job(null_work_unit, workspace=workspace)
+        job_id, _, _ = self._make_snapshot(workspace=workspace).prepare_job(
+            null_work_unit,
+            workspace=workspace,
+            assigned_resources_getter=lambda: None,
+        )
 
         union = Task((lambda *_: None), *tasks)
         task_graph = build_task_dependency_graph(task=union)

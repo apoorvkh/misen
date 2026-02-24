@@ -63,7 +63,7 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
             Dependency graph of job handles keyed to work-unit topology.
         """
         work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
-        work_units = list(work_graph)  # dependency order
+        work_units = list(work_graph)
 
         jobs: dict[WorkUnit, CompletedJob | JobT] = {
             w: CompletedJob(work_unit=w) for w in work_units if w.done(workspace=workspace)
@@ -73,8 +73,6 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         num_dispatch = len(work_units) - num_complete
         executor_name = self.__class__.__name__
 
-        # dispatch work units and collect job handles
-
         if num_dispatch > 0:
             started_at = time.perf_counter()
             try:
@@ -83,7 +81,7 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
             except Exception:
                 elapsed_s = time.perf_counter() - started_at
                 runtime_event(
-                    f"Failed to create a snapshot of the project environment in {elapsed_s:.2f}s)", style="bold red"
+                    f"Failed to create a snapshot of the project environment in {elapsed_s:.2f}s", style="bold red"
                 )
                 raise
             elapsed_s = time.perf_counter() - started_at
@@ -119,8 +117,7 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
             style="green bold",
         )
 
-        # return job graph corresponding to work graph
-
+        # Keep graph topology and replace each WorkUnit node with its job handle.
         job_graph = cast("DependencyGraph[CompletedJob | JobT]", work_graph.copy())
         for i in job_graph.node_indices():
             job_graph[i] = jobs[work_graph[i]]
@@ -153,8 +150,6 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         Returns:
             A Job handle that can be queried for execution state.
         """
-
-    # Below: FromSettingsABC implementation. Permits initializing an Executor class from TOML settings or CLI.
 
     @staticmethod
     def _settings_key() -> str:

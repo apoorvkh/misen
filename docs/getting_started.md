@@ -2,31 +2,71 @@
 icon: lucide/rocket
 ---
 
-# Project Setup
+# Getting Started
 
-To get started, we expect your research project to be structured as a Python [**package**](https://packaging.python.org). Among other things, this allows your project to be `import`-able and `pip` installable, so that it can be used by other projects downstream!
+## Project Setup
 
-The best way to initialize a new project is to [install uv](https://docs.astral.sh/uv/#installation) and:
+Initialize your project as a Python package (recommended):
 
 ```bash
 uv init my-project --package --python 3.13
 cd my-project
 uv sync
-uv add numpy  # or other dependencies
+uv add misen
 ```
 
-This will create the following file structure. You can put your code in `src/my_project`!
+## Define Tasks and an Experiment
 
+```python
+from misen import Experiment, Task, task
+
+
+@task(id="load", cache=True)
+def load(n: int) -> list[int]:
+    return list(range(n))
+
+
+@task(id="sum", cache=True)
+def sum_values(values: list[int]) -> int:
+    return sum(values)
+
+
+class MyExperiment(Experiment):
+    n: int = 100
+
+    def tasks(self) -> dict[str, Task[int]]:
+        values = Task(load, self.n)
+        total = Task(sum_values, values.T)
+        return {"total": total}
 ```
-my-project
-├── pyproject.toml
-├── README.md
-├── src
-│   └── my_project
-│       └── __init__.py
-└── uv.lock
+
+## Run It
+
+```bash
+uv run -m my_project.experiment
 ```
 
-You can then `import my_project`. And you should run your code as *modules*: for example `uv run -m my_project.__init__`, rather than `python src/my_project/__init__.py`.
+or:
 
-Note about end-users. Note about system packages.
+```python
+MyExperiment(n=1000).run()
+```
+
+## Optional Configuration (`misen.toml`)
+
+`"auto"` workspace/executor resolution uses `misen.toml` in the working dir.
+
+```toml
+executor_type = "local"
+executor_kwargs = { num_cpus = "all", max_memory = "all" }
+
+workspace_type = "disk"
+workspace_kwargs = { directory = ".misen" }
+```
+
+## Mental Model
+
+- Build tasks lazily with `Task(...)`.
+- Cache behavior is controlled on `@task(...)`.
+- `Workspace` stores hashes/results and locks.
+- `Executor` schedules work units derived from cache boundaries.

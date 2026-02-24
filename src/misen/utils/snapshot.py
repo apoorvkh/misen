@@ -5,7 +5,7 @@ subprocesses or on remote schedulers:
 
 - isolated virtual environment
 - copied env files
-- serialized callable payloads
+- serialized callable payloads and assigned-resource getters
 """
 
 from __future__ import annotations
@@ -22,12 +22,14 @@ from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import cloudpickle
 import uv
 from dotenv import load_dotenv
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from misen.task_properties import GpuRuntime
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
@@ -45,7 +47,8 @@ class Snapshot(ABC):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
+        gpu_runtime: GpuRuntime,
     ) -> tuple[str, list[str], dict[str, str]]:
         """Prepare command and environment for one work unit.
 
@@ -53,7 +56,8 @@ class Snapshot(ABC):
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log paths.
             assigned_resources_getter: Callable returning runtime resources for
-                sentinel injection.
+                sentinel injection and worker CPU/GPU binding.
+            gpu_runtime: Runtime environment for GPU resources.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides)``.
@@ -69,10 +73,11 @@ class NullSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
+        gpu_runtime: GpuRuntime,
     ) -> tuple[str, list[str], dict[str, str]]:
         """Null snapshots don't prepare external commands."""
-        _ = work_unit, workspace, assigned_resources_getter
+        _ = work_unit, workspace, assigned_resources_getter, gpu_runtime
         job_id = _token_base32(6)
         return job_id, [], {}
 
@@ -98,14 +103,17 @@ class LocalSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None] = lambda: None,
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
+        gpu_runtime: GpuRuntime,
     ) -> tuple[str, list[str], dict[str, str]]:
         """Prepare command/env overrides to execute serialized payload.
 
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log paths.
-            assigned_resources_getter: Callable returning runtime resources.
+            assigned_resources_getter: Callable returning runtime resources for
+                task sentinel injection and worker binding.
+            gpu_runtime: Runtime environment for GPU resources.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides)``.
@@ -114,13 +122,8 @@ class LocalSnapshot(Snapshot):
         payload_dir = self.snapshot_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
         payload_path = payload_dir / f"{_token_base32(6)}.pkl"
-        payload_path.write_bytes(
-            work_unit.as_payload(
-                workspace=workspace,
-                job_id=job_id,
-                assigned_resources_getter=assigned_resources_getter,
-            )
-        )
+        payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
+        encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
         argv: list[str] = [
             self.uv_bin,
             "run",
@@ -130,6 +133,10 @@ class LocalSnapshot(Snapshot):
             "misen.utils.execute",
             "--payload",
             str(payload_path),
+            "--assigned-resources-getter",
+            encoded_getter,
+            "--gpu-runtime",
+            gpu_runtime,
         ]
         env_overrides: dict[str, str] = {"VIRTUAL_ENV": str(self.venv_dir)}
         return job_id, argv, env_overrides
@@ -148,8 +155,9 @@ class LocalSnapshot(Snapshot):
         """
         env = os.environ.copy() | {"UV_PROJECT_ENVIRONMENT": str(venv_dir)}
 
-        # `uv sync --no-editable` would use cached, but outdated, copies of (local) workspace members
-        # instead we can install (1) non-workspace deps with caching then (2) workspace members without caching
+        # Use a two-step sync to avoid stale cached editable installs:
+        # 1) install non-workspace dependencies (cacheable)
+        # 2) install workspace members non-editably without cache
         try:
             subprocess.run(  # noqa: S603
                 [self.uv_bin, "sync", "--no-install-workspace"], check=True, capture_output=True, text=True, env=env
@@ -181,7 +189,7 @@ class LocalSnapshot(Snapshot):
             dst = snapshot_dir / src.name
             shutil.copy(src, dst)
             env_files.append(dst)
-            # owner-only permissions for .env.local (may contain secrets)
+            # Restrict local override file permissions (likely to contain secrets).
             if src.name == ".env.local":
                 with contextlib.suppress(OSError):
                     dst.chmod(0o600)
@@ -194,10 +202,6 @@ def apply_env_files_temporarily() -> Iterator[None]:
 
     Later files override earlier ones. Modified keys are restored after exiting
     the context.
-
-    Args:
-        env_files: Optional explicit env-file list. Defaults to
-            :func:`discover_env_files` for the current working directory.
     """
     initial_environ = os.environ.copy()
     for f in _discover_env_files():
@@ -235,3 +239,8 @@ def _token_base32(nbytes: int) -> str:
         Base32 token without padding.
     """
     return base64.b32encode(secrets.token_bytes(nbytes)).decode("ascii").rstrip("=")
+
+
+def _encode_cli_blob(payload: bytes) -> str:
+    """Encode binary payload for safe CLI transport."""
+    return base64.urlsafe_b64encode(payload).decode("ascii")

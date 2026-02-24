@@ -1,3 +1,5 @@
+"""Built-in canonical-hash handlers for core Python value types."""
+
 import dataclasses
 import datetime
 import decimal
@@ -242,6 +244,8 @@ builtin_handlers = [
     DataclassHandler,
 ]
 
+# Exact-type fast-path cache. Subclasses or duck-typed objects still go through
+# handler ``match`` checks in order.
 builtin_handlers_by_type: dict[type[Any], Handler] = {
     None.__class__: NoneHandler,
     enum.Enum: EnumHandler,

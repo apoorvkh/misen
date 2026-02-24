@@ -21,7 +21,7 @@ class Hash(int):
         Returns:
             ``Hash`` subclass wrapping a 64-bit digest.
         """
-        # canonical_hash uses xxh3_64_intdigest -> returns int in [0, 2**64)
+        # canonical_hash returns unsigned xxh3-64 int digests.
         return cls(canonical_hash(obj))
 
     def encode(self) -> bytes:

@@ -99,7 +99,7 @@ def task(
     versions: dict[str, dict[Any, int]] | None = None,
     index_by: Literal["task", "result"] = "result",
     resources: Callable[..., Resources] | Resources | None = None,
-    serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: typing
+    serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: tighten generic serializer typing
     cleanup_work_dir: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Attach :class:`TaskProperties` metadata to a function.
@@ -131,6 +131,7 @@ def task(
     if resources is None:
         resources = Resources()
     if isinstance(resources, Resources):
+        # Normalize static resources into the callable shape expected by TaskProperties.
         resources = lambda r=resources, *_, **__: r  # noqa: E731
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
@@ -142,6 +143,7 @@ def task(
         Returns:
             The same function, now carrying ``__task_properties__``.
         """
+        # Function objects are extended at runtime with metadata consumed by Task().
         func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
             id=id,
             cache=cache,

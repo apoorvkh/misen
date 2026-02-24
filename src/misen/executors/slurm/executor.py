@@ -1,12 +1,4 @@
-"""SLURM-backed executor implementation.
-
-This backend delegates scheduling and dependency coordination to SLURM itself.
-The misen side is responsible for:
-
-- packaging work-unit payloads via snapshots
-- translating resource requests into ``sbatch`` arguments
-- mapping SLURM state strings to generic job states
-"""
+"""SLURM-backed executor implementation."""
 
 from __future__ import annotations
 
@@ -15,16 +7,13 @@ import shlex
 import shutil
 import subprocess
 from functools import cache
-from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import msgspec
 
 from misen.executor import Executor, Job
-from misen.utils.assigned_resources import (
-    build_assigned_resources_env,
-    get_assigned_resources_slurm,
-    get_assigned_resources_slurm_per_node,
-)
+from misen.executors.slurm.parsing import get_assigned_resources_slurm, get_assigned_resources_slurm_per_node
+from misen.executors.slurm.rules import ResourceCondition, ResourceKey, ResourcePredicate, SetValue, SlurmRule
 from misen.utils.runtime_events import runtime_event, work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
@@ -106,23 +95,18 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         self.default_flags = msgspec.convert(self.default_flags, type=dict[str, SetValue])
         self.rules = msgspec.convert(self.rules, type=list[SlurmRule])
 
+    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
+        """Return a cached ``LocalSnapshot`` rooted at workspace snapshots dir.
+
+        Executors that launch subprocess payloads can reuse this helper to keep snapshot policy consistent.
+        """
+        return self._cached_local_snapshot(snapshots_dir=(workspace.get_temp_dir() / "snapshots").resolve())
+
     @classmethod
     @cache
-    def _cached_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
-        """Return cached snapshot instance for a snapshot directory."""
+    def _cached_local_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
+        """Return cached :class:`LocalSnapshot` for a snapshots directory."""
         return LocalSnapshot(snapshots_dir=snapshots_dir)
-
-    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Create or reuse snapshot for SLURM submission.
-
-        Args:
-            workspace: Workspace used to locate snapshots directory.
-
-        Returns:
-            Snapshot instance.
-        """
-        snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
-        return SlurmExecutor._cached_snapshot(snapshots_dir=snapshots_dir)
 
     def _dispatch(
         self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, snapshot: LocalSnapshot
@@ -177,21 +161,17 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         job_id, argv, env_overrides = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,
-            assigned_resources_getter=get_assigned_resources_slurm_per_node
-            if resources.nodes > 1
-            else get_assigned_resources_slurm,
-        )
-        assigned_resources_env = build_assigned_resources_env(
-            assigned_resources=None,
+            assigned_resources_getter=(
+                get_assigned_resources_slurm_per_node if resources.nodes > 1 else get_assigned_resources_slurm
+            ),
             gpu_runtime=resources.gpu_runtime,
-            source=("slurm_per_node" if resources.nodes > 1 else "slurm"),
         )
 
         job_log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         sbatch_cmd.extend(["--output", str(job_log_path)])
 
-        env_prefix = ["env", *[f"{k}={v}" for k, v in (env_overrides | assigned_resources_env).items()]]
         sbatch_cmd.extend(["--export", "ALL"])
+        env_prefix = ["env", *[f"{k}={v}" for k, v in env_overrides.items()]]
         sbatch_cmd.extend(["--wrap", shlex.join([*env_prefix, *argv])])
 
         try:
@@ -210,28 +190,6 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             style="green",
         )
         return SlurmJob(work_unit=work_unit, job_id=job_id, slurm_job_id=slurm_job_id, log_path=job_log_path)
-
-
-ResourceKey: TypeAlias = Literal["time", "nodes", "memory", "cpus", "gpus", "gpu_memory", "gpu_runtime"]
-OperatorName: TypeAlias = Literal["eq", "ne", "lt", "le", "gt", "ge", "contains", "is_", "is_not"]
-
-
-class ResourcePredicate(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True):
-    """One predicate against a resource value."""
-
-    op: OperatorName
-    value: int | str | list[int | str] | None = None
-
-
-ResourceCondition: TypeAlias = int | str | None | ResourcePredicate | list[ResourcePredicate]
-SetValue: TypeAlias = str | int | float | bool | None | list[str]
-
-
-class SlurmRule(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True):
-    """One conditional sbatch-flag override rule."""
-
-    when: dict[ResourceKey, ResourceCondition] = {}
-    set: dict[str, SetValue] = {}
 
 
 def _resolve_dynamic_sbatch_flags(
@@ -274,24 +232,24 @@ def _resolve_dynamic_sbatch_flags(
 
 def _rule_matches(resources: Resources, when: dict[ResourceKey, ResourceCondition]) -> bool:
     for key, cond in when.items():
-        v = getattr(resources, key)
-        if not _match_condition(v, cond):
+        value = getattr(resources, key)
+        if not _match_condition(value, cond):
             return False
     return True
 
 
-def _match_condition(v: int | str | None, cond: ResourceCondition) -> bool:
+def _match_condition(value: int | str | None, cond: ResourceCondition) -> bool:
     if isinstance(cond, list):
         cond = cast("list[ResourcePredicate]", cond)
-        return all(_match_predicate(v, pred) for pred in cond)
+        return all(_match_predicate(value, pred) for pred in cond)
     if isinstance(cond, ResourcePredicate):
-        return _match_predicate(v, cond)
+        return _match_predicate(value, cond)
     if cond is None:
-        return operator.is_(v, None)
-    return operator.eq(v, cond)
+        return operator.is_(value, None)
+    return operator.eq(value, cond)
 
 
-def _match_predicate(v: int | str | None, pred: ResourcePredicate) -> bool:
+def _match_predicate(value: int | str | None, pred: ResourcePredicate) -> bool:
     op = getattr(operator, pred.op)
     rhs = pred.value
 
@@ -299,34 +257,33 @@ def _match_predicate(v: int | str | None, pred: ResourcePredicate) -> bool:
         if not isinstance(rhs, list):
             msg = "Predicate op='contains' expects `value` to be a list."
             raise TypeError(msg)
-        return False if v is None else bool(op(rhs, v))
+        return False if value is None else bool(op(rhs, value))
 
     if pred.op in {"eq", "ne"}:
         if not isinstance(rhs, (int, str)):
             msg = f"Predicate op={pred.op!r} expects `value` to be an integer or string."
             raise TypeError(msg)
-        return False if v is None else bool(op(v, rhs))
+        return False if value is None else bool(op(value, rhs))
 
     if pred.op in {"lt", "le", "gt", "ge"}:
         if not isinstance(rhs, int):
             msg = f"Predicate op={pred.op!r} expects `value` to be an integer."
             raise TypeError(msg)
-        return False if not isinstance(v, int) else bool(op(v, rhs))
+        return False if not isinstance(value, int) else bool(op(value, rhs))
 
     if isinstance(rhs, list):
         msg = f"Predicate op={pred.op!r} does not accept list `value`."
         raise TypeError(msg)
-    return bool(op(v, rhs))
+    return bool(op(value, rhs))
 
 
 def _render_flags(flags: dict[str, SetValue]) -> list[str]:
     """Turn a {flag: value} map into sbatch CLI args."""
     argv: list[str] = []
-    local_flags = dict(flags)
 
     # Stable output for reproducibility.
-    for flag in sorted(local_flags.keys()):
-        val = local_flags[flag]
+    for flag in sorted(flags.keys()):
+        val = flags[flag]
 
         # None => omit entirely
         if val is None:

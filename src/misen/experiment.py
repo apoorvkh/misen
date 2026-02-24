@@ -16,17 +16,14 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import cache
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from msgspec import Struct
 
+from misen.executor import Executor
 from misen.tasks import Task
-from misen.utils.auto import resolve_auto
 from misen.utils.experiment_cli import experiment_cli
-
-if TYPE_CHECKING:
-    from misen.executor import Executor
-    from misen.workspace import Workspace
+from misen.workspace import Workspace
 
 __all__ = ["Experiment"]
 
@@ -57,7 +54,8 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
             **kwargs: Standard subclass construction kwargs.
         """
         super().__init_subclass__(**kwargs)
-        # @cache downstream implementations of `tasks()`
+        # Memoize tasks() per experiment instance so DAG construction is deterministic
+        # and repeated access (run/result/CLI) does not rebuild task objects.
         setattr(cls, "tasks", cache(cls.tasks))  # noqa: B010
 
     def __getitem__(self, key: str) -> Task:
@@ -97,8 +95,8 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
             executor: Executor instance, or ``"auto"`` to resolve from
                 settings/defaults.
         """
-        workspace = resolve_auto(workspace=workspace)
-        executor = resolve_auto(executor=executor)
+        workspace = Workspace.resolve_auto(workspace)
+        executor = Executor.resolve_auto(executor)
         executor.submit(tasks=set(self.tasks().values()), workspace=workspace)
 
     @classmethod

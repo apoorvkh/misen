@@ -12,7 +12,7 @@ from collections.abc import Callable
 from functools import cache, cached_property
 from importlib import import_module
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import msgspec
 from msgspec import Struct
@@ -141,6 +141,13 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
             msg = f"Invalid kwargs for {key} in {settings.file}: expected table/dict."
             raise TypeError(msg)
         return class_type(**class_kwargs)
+
+    @classmethod
+    def resolve_auto(cls, /, obj: Self | Literal["auto"] = "auto") -> Self:
+        """Resolve ``"auto"`` value."""
+        if obj == "auto":
+            return cls.auto()
+        return obj
 
     def __reduce__(self) -> tuple[Callable[[type[msgspec.Struct], bytes], msgspec.Struct], tuple[type[Self], bytes]]:
         """Support pickling by reconstructing from msgpack bytes."""
