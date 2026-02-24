@@ -258,6 +258,38 @@ def test_stable_hash_falls_back_to_dill_handler() -> None:
     assert isinstance(stable_hash(_Custom()), int)
 
 
+def test_stable_hash_supports_recursive_list() -> None:
+    left: list[object] = []
+    left.append(left)
+
+    right: list[object] = []
+    right.append(right)
+
+    assert stable_hash(left) == stable_hash(right)
+
+
+def test_stable_hash_supports_recursive_dict() -> None:
+    left: dict[str, object] = {}
+    left["self"] = left
+
+    right: dict[str, object] = {}
+    right["self"] = right
+
+    assert stable_hash(left) == stable_hash(right)
+
+
+def test_recursive_dict_hash_is_order_independent() -> None:
+    left: dict[str, object] = {}
+    left["a"] = 1
+    left["self"] = left
+
+    right: dict[str, object] = {}
+    right["self"] = right
+    right["a"] = 1
+
+    assert stable_hash(left) == stable_hash(right)
+
+
 def test_dict_hash_is_order_independent_with_nested_unhashables() -> None:
     left = {"a": [1, 2], "b": {"c": 3}}
     right = {"b": {"c": 3}, "a": [1, 2]}
