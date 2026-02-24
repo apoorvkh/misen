@@ -30,7 +30,7 @@ if importlib.util.find_spec("sklearn") is not None:
         def elements(obj: Any) -> list[Any]:
             params = obj.get_params(deep=True)
             state = {key: value for key, value in vars(obj).items() if key.endswith("_") and not key.startswith("__")}
-            return [obj.__class__.__module__, obj.__class__.__qualname__, params, state]
+            return [params, state]
 
     sklearn_handlers = [SklearnEstimatorHandler]
     sklearn_handlers_by_type = {"sklearn.base.BaseEstimator": SklearnEstimatorHandler}

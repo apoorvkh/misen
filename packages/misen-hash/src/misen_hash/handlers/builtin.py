@@ -6,6 +6,8 @@ import datetime
 import decimal
 import enum
 import fractions
+import functools
+import ipaddress
 import math
 import pathlib
 import re
@@ -26,6 +28,10 @@ from misen_hash.handler_base import (
 from misen_hash.hash import hash_msgspec
 
 __all__ = ["builtin_handlers", "builtin_handlers_by_type"]
+
+_DICT_KEYS_TYPE = type({}.keys())
+_DICT_VALUES_TYPE = type({}.values())
+_DICT_ITEMS_TYPE = type({}.items())
 
 
 def _normalized_float(value: float) -> float | str:
@@ -302,6 +308,26 @@ class PatternHandler(PrimitiveHandler):
         return hash_msgspec((obj.pattern, obj.flags))
 
 
+class IPAddressHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(
+            obj,
+            (
+                ipaddress.IPv4Address,
+                ipaddress.IPv6Address,
+                ipaddress.IPv4Network,
+                ipaddress.IPv6Network,
+                ipaddress.IPv4Interface,
+                ipaddress.IPv6Interface,
+            ),
+        )
+
+    @staticmethod
+    def digest(obj: Any) -> int:
+        return hash_msgspec(str(obj))
+
+
 class ArrayHandler(PrimitiveHandler):
     @staticmethod
     def match(obj: Any) -> bool:
@@ -311,6 +337,27 @@ class ArrayHandler(PrimitiveHandler):
     def digest(obj: Any) -> int:
         value = array.array(obj.typecode, obj)
         return hash_msgspec((value.typecode, value.tolist()))
+
+
+class PartialHandler(Handler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, functools.partial)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int:
+        if element_hash is None:
+            msg = "PartialHandler requires element_hash."
+            raise ValueError(msg)
+
+        return hash_msgspec(
+            (
+                element_hash(obj.func),
+                [element_hash(arg) for arg in obj.args],
+                _digest_mapping_items((obj.keywords or {}).items(), element_hash=element_hash),
+                _digest_mapping_items(vars(obj).items(), element_hash=element_hash),
+            )
+        )
 
 
 class SimpleNamespaceHandler(Handler):
@@ -398,6 +445,36 @@ class DictHandler(Handler):
         return _digest_mapping_items(obj.items(), element_hash=element_hash)
 
 
+class DictKeysViewHandler(CollectionHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, _DICT_KEYS_TYPE)
+
+    @staticmethod
+    def elements(obj: Any) -> set[Any]:
+        return set(obj)
+
+
+class DictValuesViewHandler(CollectionHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, _DICT_VALUES_TYPE)
+
+    @staticmethod
+    def elements(obj: Any) -> list[Any]:
+        return list(obj)
+
+
+class DictItemsViewHandler(Handler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, _DICT_ITEMS_TYPE)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int:
+        return _digest_mapping_items(obj, element_hash=element_hash)
+
+
 class ChainMapHandler(Handler):
     @staticmethod
     def match(obj: Any) -> bool:
@@ -450,7 +527,9 @@ builtin_handlers: HandlerTypeList = [
     SliceHandler,
     PathHandler,
     PatternHandler,
+    IPAddressHandler,
     ArrayHandler,
+    PartialHandler,
     SimpleNamespaceHandler,
     ListHandler,
     DequeHandler,
@@ -458,6 +537,9 @@ builtin_handlers: HandlerTypeList = [
     DefaultDictHandler,
     CounterHandler,
     DictHandler,
+    DictKeysViewHandler,
+    DictValuesViewHandler,
+    DictItemsViewHandler,
     ChainMapHandler,
     MappingProxyHandler,
     DataclassHandler,
@@ -493,7 +575,14 @@ _builtin_handlers_by_type: dict[type[Any], type[Handler]] = {
     pathlib.PosixPath: PathHandler,
     pathlib.WindowsPath: PathHandler,
     re.Pattern: PatternHandler,
+    ipaddress.IPv4Address: IPAddressHandler,
+    ipaddress.IPv6Address: IPAddressHandler,
+    ipaddress.IPv4Network: IPAddressHandler,
+    ipaddress.IPv6Network: IPAddressHandler,
+    ipaddress.IPv4Interface: IPAddressHandler,
+    ipaddress.IPv6Interface: IPAddressHandler,
     array.array: ArrayHandler,
+    functools.partial: PartialHandler,
     types.SimpleNamespace: SimpleNamespaceHandler,
     list: ListHandler,
     tuple: ListHandler,
@@ -504,6 +593,9 @@ _builtin_handlers_by_type: dict[type[Any], type[Handler]] = {
     defaultdict: DefaultDictHandler,
     Counter: CounterHandler,
     dict: DictHandler,
+    _DICT_KEYS_TYPE: DictKeysViewHandler,
+    _DICT_VALUES_TYPE: DictValuesViewHandler,
+    _DICT_ITEMS_TYPE: DictItemsViewHandler,
     ChainMap: ChainMapHandler,
     types.MappingProxyType: MappingProxyHandler,
 }
