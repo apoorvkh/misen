@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest==8.3.3", "ruff==0.14.14", "ty==0.0.13"]
+dev = ["pytest==8.3.3", "ruff==0.15.2", "ty==0.0.18"]
 docs = ["mkdocstrings-python==2.0.1", "zensical==0.0.17"]
 
 [build-system]
@@ -50,6 +50,12 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[[tool.ty.overrides]]
+include = ["packages/misen-hash/src/misen_hash/handlers/optional/**"]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
 
 [tool.uv.sources]
 misen-hash = { workspace = true }
