@@ -59,3 +59,17 @@ if __name__ == "__main__":
 - [Architecture and design](docs/index.md)
 - [Getting started guide](docs/getting_started.md)
 - [API reference](docs/api.md)
+
+## CLI Utilities
+
+Generate missing task ids in a project:
+
+```bash
+misen fill
+```
+
+Pass one or more positional paths (Python files and/or project directories):
+
+```bash
+misen fill src/misen docs/examples.py
+```
