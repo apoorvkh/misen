@@ -8,6 +8,7 @@ from typing import Any, Literal, cast
 
 import tyro
 
+from misen.utils import tui
 from misen.utils.settings import DEFAULT_SETTINGS_FILE, Settings
 
 
@@ -55,6 +56,6 @@ def experiment_cli(experiment_cls: type[Any]) -> None:
 
     match args.command:
         case "run":
-            args.experiment.run(executor=executor, workspace=workspace)
+            tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
         case "count":
             print(len(args.experiment.tasks()))
