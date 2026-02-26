@@ -38,12 +38,22 @@ class MyExperiment(Experiment):
         values = Task(load, self.n)
         total = Task(sum_values, values.T)
         return {"total": total}
+
+
+if __name__ == "__main__":
+    MyExperiment.cli()
 ```
 
 ## Run It
 
 ```bash
 uv run -m my_project.experiment
+```
+
+or:
+
+```bash
+misen experiment my_project.experiment:MyExperiment run
 ```
 
 or:

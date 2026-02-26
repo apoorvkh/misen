@@ -2,24 +2,39 @@
 
 from __future__ import annotations
 
-from dataclasses import make_dataclass
+import contextlib
+import importlib
+import sys
+from dataclasses import dataclass, field, make_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast, get_args
 
+import cloudpickle
 import tyro
 from rich.console import Console
 from rich.markup import escape
 from rich.pretty import Pretty
 from rich.tree import Tree
 
-from misen.utils import tui
+from misen.executor import ExecutorType
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import DEFAULT_SETTINGS_FILE, Settings
+from misen.workspace import WorkspaceType
+
+from . import tui
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from misen import Experiment
     from misen.tasks import Task
+
+
+__all__ = [
+    "experiment",
+    "experiment_cli",
+    "resolve_experiment_class",
+]
 
 
 ExperimentCommand = Literal["run", "list", "tree", "count", "result", "incomplete"]
@@ -73,6 +88,126 @@ RunTuiArg = Annotated[
         help="Enable run TUI; disable with --no-tui to block until jobs terminate.",
     ),
 ]
+
+
+@dataclass(frozen=True)
+class _ExperimentEntryArgs:
+    reference: Annotated[
+        str,
+        tyro.conf.Positional,
+        tyro.conf.arg(
+            name="experiment-ref",
+            help="Experiment class reference in '<module>:<ExperimentClass>' format.",
+        ),
+    ]
+
+
+@dataclass(frozen=True)
+class _BootstrapArgs:
+    settings_file: Path = DEFAULT_SETTINGS_FILE
+    executor_type: ExecutorType | Literal["auto"] = "auto"
+    workspace_type: WorkspaceType | Literal["auto"] = "auto"
+
+
+@dataclass(frozen=True)
+class RunCommandArgs:
+    task: tyro.conf.Positional[str | None] = None
+    tui: RunTuiArg = True
+
+
+@dataclass(frozen=True)
+class ListCommandArgs:
+    cacheable_only: ListCacheableOnlyArg = False
+    incomplete: ListIncompleteArg = False
+
+
+@dataclass(frozen=True)
+class TreeCommandArgs:
+    all: TreeAllArg = False
+    max_depth: TreeDepthArg = None
+    cacheable_only: TreeCacheableOnlyArg = False
+    incomplete: TreeIncompleteArg = False
+
+
+@dataclass(frozen=True)
+class CountCommandArgs:
+    pass
+
+
+@dataclass(frozen=True)
+class ResultCommandArgs:
+    task: tyro.conf.Positional[str | None] = None
+
+
+@dataclass(frozen=True)
+class IncompleteCommandArgs:
+    all: TreeAllArg = False
+    max_depth: TreeDepthArg = None
+    cacheable_only: TreeCacheableOnlyArg = False
+
+
+ExperimentCommandArgs = tyro.conf.OmitSubcommandPrefixes[
+    Annotated[RunCommandArgs, tyro.conf.subcommand(name="run", prefix_name=False)]
+    | Annotated[ListCommandArgs, tyro.conf.subcommand(name="list", prefix_name=False)]
+    | Annotated[TreeCommandArgs, tyro.conf.subcommand(name="tree", prefix_name=False)]
+    | Annotated[CountCommandArgs, tyro.conf.subcommand(name="count", prefix_name=False)]
+    | Annotated[ResultCommandArgs, tyro.conf.subcommand(name="result", prefix_name=False)]
+    | Annotated[IncompleteCommandArgs, tyro.conf.subcommand(name="incomplete", prefix_name=False)]
+]
+
+
+def resolve_experiment_class(reference: str) -> type[Experiment]:
+    """Resolve an experiment class from ``module:Class`` reference text."""
+    module_name, class_name = reference.split(":", 1)
+    module = importlib.import_module(module_name)
+    with contextlib.suppress(ValueError):
+        # prefer value-based pickling of Experiment classes
+        # so runtime behavior of `misen experiment` is more similar to `python -c "Experiment.cli()"`
+        cloudpickle.register_pickle_by_value(module)
+
+    if not hasattr(module, class_name):
+        msg = f"Module {module_name!r} has no attribute {class_name!r}."
+        raise ValueError(msg)
+
+    experiment_cls = getattr(module, class_name)
+    if not isinstance(experiment_cls, type):
+        msg = f"Referenced symbol {reference!r} is not a class."
+        raise TypeError(msg)
+
+    from misen import Experiment
+
+    if not issubclass(experiment_cls, Experiment):
+        msg = f"Referenced class {reference!r} is not a misen.Experiment subclass."
+        raise TypeError(msg)
+
+    return experiment_cls
+
+
+def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
+    """Run an experiment CLI by resolving ``<module:ExperimentClass>``."""
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if not args_list or args_list[0] in {"-h", "--help"}:
+        try:
+            tyro.cli(_ExperimentEntryArgs, args=["--help"])
+        except SystemExit as exc:
+            return int(exc.code)
+        return 0
+
+    parsed, unknown_args = tyro.cli(
+        _ExperimentEntryArgs,
+        args=args_list,
+        return_unknown_args=True,
+        add_help=False,
+    )
+
+    try:
+        experiment_cls = resolve_experiment_class(parsed.reference)
+    except (ImportError, TypeError, ValueError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
+
+    experiment_cli(experiment_cls, argv=unknown_args)
+    return 0
 
 
 def _resolve_command_task(*, command: str, task_name: str | None) -> str:
@@ -304,21 +439,113 @@ def _resolve_executor(args: Any) -> Any:
     return Executor.auto(settings=settings) if args.executor_type == "auto" else args.executor
 
 
+def _command_name(command: object) -> ExperimentCommand:
+    """Normalize command value into a stable literal command name."""
+    if isinstance(command, str):
+        available_commands = set(get_args(ExperimentCommand))
+        if command in available_commands:
+            return cast("ExperimentCommand", command)
+        msg = f"Unknown command {command!r}. Expected one of: {sorted(available_commands)}."
+        raise ValueError(msg)
+
+    command_type_to_name: dict[type[object], ExperimentCommand] = {
+        RunCommandArgs: "run",
+        ListCommandArgs: "list",
+        TreeCommandArgs: "tree",
+        CountCommandArgs: "count",
+        ResultCommandArgs: "result",
+        IncompleteCommandArgs: "incomplete",
+    }
+    command_name = command_type_to_name.get(type(command))
+    if command_name is not None:
+        return command_name
+
+    msg = f"Unsupported command payload type: {type(command)!r}"
+    raise TypeError(msg)
+
+
+def _run_task(args: Any) -> str | None:
+    command = args.command
+    if isinstance(command, RunCommandArgs):
+        return command.task
+    return cast("str | None", getattr(args, "run_task", None))
+
+
+def _run_tui(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, RunCommandArgs):
+        return command.tui
+    return bool(getattr(args, "run_tui", True))
+
+
+def _tree_all(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, (TreeCommandArgs, IncompleteCommandArgs)):
+        return command.all
+    return bool(getattr(args, "tree_all", False))
+
+
+def _tree_max_depth(args: Any) -> int | None:
+    command = args.command
+    if isinstance(command, (TreeCommandArgs, IncompleteCommandArgs)):
+        return command.max_depth
+    return cast("int | None", getattr(args, "tree_max_depth", None))
+
+
+def _tree_cacheable_only(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, (TreeCommandArgs, IncompleteCommandArgs)):
+        return command.cacheable_only
+    return bool(getattr(args, "tree_cacheable_only", False))
+
+
+def _tree_incomplete(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, TreeCommandArgs):
+        return command.incomplete
+    if isinstance(command, IncompleteCommandArgs):
+        return True
+    return bool(getattr(args, "tree_incomplete", False))
+
+
+def _list_cacheable_only(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, ListCommandArgs):
+        return command.cacheable_only
+    return bool(getattr(args, "list_cacheable_only", False))
+
+
+def _list_incomplete(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, ListCommandArgs):
+        return command.incomplete
+    return bool(getattr(args, "list_incomplete", False))
+
+
+def _result_task(args: Any) -> str | None:
+    command = args.command
+    if isinstance(command, ResultCommandArgs):
+        return command.task
+    return cast("str | None", getattr(args, "result_task", None))
+
+
 def _execute_command(*, args: Any, console: Console) -> None:
     """Execute resolved experiment CLI command."""
-    match args.command:
+    command_name = _command_name(args.command)
+
+    match command_name:
         case "run":
             executor = _resolve_executor(args)
             workspace = _resolve_workspace(args)
-            run_task = args.run_task
-            run_tui = args.run_tui
+            run_task = _run_task(args)
+            run_tui = _run_tui(args)
             if run_task is None and run_tui:
                 tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
             elif run_task is None and not run_tui:
                 tasks = set(args.experiment.tasks().values())
                 executor.submit(tasks=tasks, workspace=workspace, blocking=True)
             else:
-                task_name = _resolve_command_task(command=args.command, task_name=run_task)
+                task_name = _resolve_command_task(command=command_name, task_name=run_task)
                 args.experiment[task_name].submit(executor=executor, workspace=workspace, blocking=True)
         case "count":
             workspace = _resolve_workspace(args)
@@ -327,7 +554,7 @@ def _execute_command(*, args: Any, console: Console) -> None:
         case "tree" | "incomplete":
             workspace = _resolve_workspace(args)
             complete_count, total_count = _count_completion(args.experiment.tasks(), workspace)
-            incomplete_only = args.command == "incomplete" or args.tree_incomplete
+            incomplete_only = command_name == "incomplete" or _tree_incomplete(args)
             if incomplete_only and complete_count == total_count:
                 console.print("[green]No incomplete tasks.[/green]")
                 return
@@ -335,29 +562,28 @@ def _execute_command(*, args: Any, console: Console) -> None:
                 args.experiment.tasks(),
                 workspace,
                 title="Incomplete Tasks" if incomplete_only else "Tasks",
-                show_all=args.tree_all,
-                max_depth=args.tree_max_depth,
-                cacheable_only=args.tree_cacheable_only,
+                show_all=_tree_all(args),
+                max_depth=_tree_max_depth(args),
+                cacheable_only=_tree_cacheable_only(args),
                 incomplete_only=incomplete_only,
             )
-            console.print(
-                tree
-            )
+            console.print(tree)
             if has_shared_dependencies:
                 console.print("[dim](*) Dependencies already listed.[/dim]")
         case "list":
             workspace = _resolve_workspace(args)
             complete_count, total_count = _count_completion(args.experiment.tasks(), workspace)
-            if args.list_incomplete and complete_count == total_count:
+            list_incomplete = _list_incomplete(args)
+            if list_incomplete and complete_count == total_count:
                 console.print("[green]No incomplete tasks.[/green]")
                 return
 
-            title = "Incomplete Tasks" if args.list_incomplete else "Tasks"
+            title = "Incomplete Tasks" if list_incomplete else "Tasks"
             lines = _build_task_list_lines(
                 args.experiment.tasks(),
                 workspace,
-                cacheable_only=args.list_cacheable_only,
-                incomplete_only=args.list_incomplete,
+                cacheable_only=_list_cacheable_only(args),
+                incomplete_only=list_incomplete,
             )
 
             if not lines:
@@ -369,7 +595,7 @@ def _execute_command(*, args: Any, console: Console) -> None:
                 console.print(line)
         case "result":
             workspace = _resolve_workspace(args)
-            task_key = _resolve_command_task(command=args.command, task_name=args.result_task)
+            task_key = _resolve_command_task(command=command_name, task_name=_result_task(args))
             console.print(Pretty(args.experiment.result(task_key, workspace=workspace)))
 
 
@@ -391,88 +617,44 @@ def _resolve_command(*, command_token: str | None, unknown_args: list[str]) -> E
     return "run"
 
 
-def _command_specific_fields(command: ExperimentCommand) -> list[tuple[Any, ...]]:
-    """Return command-specific CLI fields to inject on second parse."""
-    match command:
-        case "run":
-            return [
-                ("run_task", tyro.conf.Positional[str | None], None),
-                ("run_tui", RunTuiArg, True),
-            ]
-        case "tree":
-            return [
-                ("tree_all", TreeAllArg, False),
-                ("tree_max_depth", TreeDepthArg, None),
-                ("tree_cacheable_only", TreeCacheableOnlyArg, False),
-                ("tree_incomplete", TreeIncompleteArg, False),
-            ]
-        case "list":
-            return [
-                ("list_cacheable_only", ListCacheableOnlyArg, False),
-                ("list_incomplete", ListIncompleteArg, False),
-            ]
-        case "incomplete":
-            return [
-                ("tree_all", TreeAllArg, False),
-                ("tree_max_depth", TreeDepthArg, None),
-                ("tree_cacheable_only", TreeCacheableOnlyArg, False),
-                ("tree_incomplete", TreeIncompleteArg, True),
-            ]
-        case "result":
-            return [("result_task", tyro.conf.Positional[str | None], None)]
-        case _:
-            return []
-
-
-def experiment_cli(experiment_cls: type[Any]) -> None:
+def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] | None = None) -> None:
     """Parse CLI args and execute experiment command.
 
     Args:
         experiment_cls: Experiment class type to expose on CLI.
+        argv: Optional command tokens; defaults to ``sys.argv[1:]`` when ``None``.
 
     Notes:
         Parsing happens in two phases so executor/workspace concrete argument
         schemas can be selected dynamically from ``*_type`` flags.
     """
-    from misen.executor import Executor, ExecutorType
-    from misen.workspace import Workspace, WorkspaceType
+    from misen.executor import Executor
+    from misen.workspace import Workspace
 
-    console = Console()
-
-    fields_without_defaults: list[tuple[Any, ...]] = []
-    fields_with_defaults = [
-        ("command", tyro.conf.Positional[str | None], None),
-        ("settings_file", Path, DEFAULT_SETTINGS_FILE),
-        ("executor_type", ExecutorType | Literal["auto"], "auto"),
-        ("workspace_type", WorkspaceType | Literal["auto"], "auto"),
-    ]
-
-    args, unknown_args = tyro.cli(
-        make_dataclass("", fields_without_defaults + fields_with_defaults),
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    bootstrap_args, _ = tyro.cli(
+        _BootstrapArgs,
         add_help=False,
         return_unknown_args=True,
+        args=args_list,
     )
-    args = cast("Any", args)
-    command = _resolve_command(command_token=args.command, unknown_args=unknown_args)
 
-    if args.executor_type != "auto":
-        fields_without_defaults.append(("executor", Executor.resolve_type(args.executor_type)))
-    if args.workspace_type != "auto":
-        fields_without_defaults.append(("workspace", Workspace.resolve_type(args.workspace_type)))
-
-    command_specific_fields = _command_specific_fields(command)
-
-    fields_without_defaults.append(("experiment", tyro.conf.OmitArgPrefixes[experiment_cls]))  # ty:ignore[invalid-type-form]
-    second_pass_fields = [
-        *fields_without_defaults,
-        ("command", tyro.conf.Positional[ExperimentCommand], command),
-        *command_specific_fields,
-        ("settings_file", Path, DEFAULT_SETTINGS_FILE),
-        ("executor_type", ExecutorType | Literal["auto"], "auto"),
-        ("workspace_type", WorkspaceType | Literal["auto"], "auto"),
+    cli_fields: list[tuple[Any, ...]] = [
+        ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls]),  # ty:ignore[invalid-type-form]
     ]
+    if bootstrap_args.executor_type != "auto":
+        cli_fields.append(("executor", Executor.resolve_type(bootstrap_args.executor_type)))
+    if bootstrap_args.workspace_type != "auto":
+        cli_fields.append(("workspace", Workspace.resolve_type(bootstrap_args.workspace_type)))
+    cli_fields.extend(
+        [
+            ("command", ExperimentCommandArgs, field(default_factory=RunCommandArgs)),
+            ("settings_file", Path, bootstrap_args.settings_file),
+            ("executor_type", ExecutorType | Literal["auto"], bootstrap_args.executor_type),
+            ("workspace_type", WorkspaceType | Literal["auto"], bootstrap_args.workspace_type),
+        ]
+    )
 
-    args = tyro.cli(make_dataclass("", second_pass_fields))
-    args = cast("Any", args)
-
-    _execute_command(args=args, console=console)
+    console = Console()
+    parsed = tyro.cli(make_dataclass("", cli_fields), args=args_list)
+    _execute_command(args=cast("Any", parsed), console=console)

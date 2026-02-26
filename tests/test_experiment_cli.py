@@ -7,10 +7,12 @@ from typing import Literal, cast
 import pytest
 import tyro
 
-import misen.utils.tui as tui_module
+import misen.cli as misen_cli
+import misen.utils.cli.experiment as experiment_module
+import misen.utils.cli.tui as tui_module
 from misen import Experiment, Task, task
 from misen.executor import Executor, Job
-from misen.utils.experiment_cli import _resolve_command, experiment_cli
+from misen.utils.cli.experiment import _resolve_command, experiment, experiment_cli
 from misen.utils.graph import DependencyGraph
 from misen.utils.runtime_events import RuntimeJobSummary, runtime_job_summary_lines, task_label, work_unit_label
 from misen.utils.work_unit import WorkUnit
@@ -68,6 +70,100 @@ class CachedExperiment(Experiment):
 
     def tasks(self) -> dict[str, Task[int]]:
         return {"cached": Task(cached_only, x=self.value)}
+
+
+def test_experiment_command_resolves_reference_and_forwards_argv(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_experiment_cli(experiment_cls: type[object], argv: list[str] | tuple[str, ...] | None = None) -> None:
+        seen["experiment_cls"] = experiment_cls
+        seen["argv"] = argv
+
+    monkeypatch.setattr(experiment_module, "experiment_cli", fake_experiment_cli)
+    exit_code = experiment(["tests.test_experiment_cli:CliExperiment", "tree", "--max-depth", "1"])
+
+    assert exit_code == 0
+    assert seen["experiment_cls"] is CliExperiment
+    assert seen["argv"] == ["tree", "--max-depth", "1"]
+
+
+def test_experiment_command_reports_invalid_reference(capsys) -> None:
+    exit_code = experiment(["bad-reference"])
+
+    assert exit_code == 2
+    assert "Invalid experiment reference." in capsys.readouterr().err
+
+
+def test_resolve_experiment_class_prefers_local_src_module(monkeypatch, tmp_path) -> None:
+    project_src = tmp_path / "src" / "demo_pkg"
+    project_src.mkdir(parents=True)
+    (project_src / "__init__.py").write_text("", encoding="utf-8")
+    (project_src / "demo.py").write_text(
+        (
+            "from misen import Experiment, Task, task\n\n"
+            "@task(id='demo_task', cache=False)\n"
+            "def demo_task(x: int) -> int:\n"
+            "    return x\n\n"
+            "class DemoExperiment(Experiment):\n"
+            "    marker = 'local'\n\n"
+            "    def tasks(self):\n"
+            "        return {'task': Task(demo_task, x=1)}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    installed_pkg = tmp_path / "site" / "demo_pkg"
+    installed_pkg.mkdir(parents=True)
+    (installed_pkg / "__init__.py").write_text("", encoding="utf-8")
+    (installed_pkg / "demo.py").write_text(
+        (
+            "from misen import Experiment, Task, task\n\n"
+            "@task(id='demo_task', cache=False)\n"
+            "def demo_task(x: int) -> int:\n"
+            "    return x\n\n"
+            "class DemoExperiment(Experiment):\n"
+            "    marker = 'site'\n\n"
+            "    def tasks(self):\n"
+            "        return {'task': Task(demo_task, x=2)}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+    monkeypatch.chdir(tmp_path)
+    sys.modules.pop("demo_pkg", None)
+    sys.modules.pop("demo_pkg.demo", None)
+
+    resolved = experiment_module.resolve_experiment_class("demo_pkg.demo:DemoExperiment")
+
+    assert getattr(resolved, "marker") == "local"
+    assert Path(sys.modules["demo_pkg.demo"].__file__).resolve() == (project_src / "demo.py").resolve()
+
+
+def test_resolve_experiment_class_registers_module_for_value_pickling(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_register(module: object) -> None:
+        seen["module"] = module
+
+    monkeypatch.setattr(experiment_module, "_register_module_pickle_by_value", fake_register)
+    resolved = experiment_module.resolve_experiment_class("tests.test_experiment_cli:CliExperiment")
+
+    assert resolved is CliExperiment
+    assert getattr(cast("object", seen["module"]), "__name__", None) == "tests.test_experiment_cli"
+
+
+def test_misen_main_dispatches_experiment(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_experiment(*, argv: list[str] | None = None) -> int:
+        seen["argv"] = argv
+        return 7
+
+    monkeypatch.setattr(misen_cli, "experiment", fake_experiment)
+
+    assert misen_cli.main(["experiment", "tests.test_experiment_cli:CliExperiment", "list"]) == 7
+    assert seen["argv"] == ["tests.test_experiment_cli:CliExperiment", "list"]
 
 
 class _StatusWorkspace:
