@@ -99,7 +99,10 @@ class WorkUnit:
 
     def __repr__(self) -> str:
         """Return compact debug representation."""
-        return f"WorkUnit(hash={self.root.task_hash().short_b32()})"
+        root_repr = repr(self.root).removesuffix(" [C]")
+        if root_repr.startswith("Task(") and root_repr.endswith(")"):
+            root_repr = root_repr[len("Task(") : -1]
+        return f"WorkUnit({root_repr})"
 
     def done(self, workspace: Workspace) -> bool:
         """Return whether work unit has been completed."""

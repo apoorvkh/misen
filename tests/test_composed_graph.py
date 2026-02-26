@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 
 from misen import ASSIGNED_RESOURCES, Experiment, Task, task
 from misen.utils.assigned_resources import AssignedResources
@@ -92,4 +91,3 @@ class MyExperiment(Experiment):
 
 if __name__ == "__main__":
     MyExperiment.cli()
-    time.sleep(5)

@@ -113,10 +113,39 @@ class Task(FrozenMixin, Generic[R]):
 
     def __repr__(self) -> str:
         """Return compact debug representation."""
-        return (
-            f"Task({self.func.__module__}.{self.func.__qualname__}, "
-            f"hash={self.task_hash().short_b32()}){' [C]' if self.properties.cache else ''}"
-        )
+        argument_items = self._repr_argument_items()
+        label = self.properties.id
+        if argument_items:
+            label = f"{label}({', '.join(argument_items)})"
+        label = f"{label} [{self.task_hash().short_b32()}]"
+        return f"Task({label}){' [C]' if self.properties.cache else ''}"
+
+    @staticmethod
+    def _contains_task_reference(value: Any) -> bool:
+        """Return whether a value contains nested task references."""
+        if isinstance(value, Task):
+            return True
+        if type(value) is dict:
+            return any(Task._contains_task_reference(k) for k in value) or any(
+                Task._contains_task_reference(v) for v in value.values()
+            )
+        if type(value) in {list, tuple, set, frozenset}:
+            return any(Task._contains_task_reference(v) for v in value)
+        return False
+
+    def _repr_argument_items(self) -> list[str]:
+        """Return argument fragments included in ``Task.__repr__``."""
+        bound = self._signature.bind_partial(*self.args, **self.kwargs)
+        items: list[str] = []
+
+        for name, value in bound.arguments.items():
+            if name in self.properties.exclude:
+                continue
+            if Task._contains_task_reference(value):
+                continue
+            items.append(f"{name}={value!r}")
+
+        return items
 
     @property
     def T(self) -> R:  # noqa: N802

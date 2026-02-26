@@ -16,9 +16,10 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import cache
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal
 
 from msgspec import Struct
+from typing_extensions import TypeVar
 
 from misen.executor import Executor
 from misen.tasks import Task
@@ -28,7 +29,7 @@ from misen.workspace import Workspace
 __all__ = ["Experiment"]
 
 
-TasksT = TypeVar("TasksT", bound=Mapping[str, Task])
+TasksT = TypeVar("TasksT", bound=Mapping[str, Task], default=Mapping[str, Task[Any]])
 
 
 class Experiment(Struct, Generic[TasksT], frozen=True):
