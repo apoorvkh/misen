@@ -34,9 +34,7 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         """
         null_work_unit = WorkUnit(root=Task(lambda: None), dependencies=set())
         job_id, _, _ = self._make_snapshot(workspace=workspace).prepare_job(
-            null_work_unit,
-            workspace=workspace,
-            assigned_resources_getter=lambda: None,
+            null_work_unit, workspace=workspace, assigned_resources_getter=lambda: None, gpu_runtime="cuda"
         )
 
         union = Task((lambda *_: None), *tasks)
@@ -44,12 +42,7 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         task_graph.remove_node_by_value(union, cmp=is_, first=True)
 
         with apply_env_files_temporarily():
-            WorkUnit.execute(
-                graph=task_graph,
-                workspace=workspace,
-                job_id=job_id,
-                assigned_resources_getter=lambda: None,
-            )
+            WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id, assigned_resources=None)
 
         return DependencyGraph()
 

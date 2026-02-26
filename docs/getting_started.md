@@ -64,6 +64,20 @@ workspace_type = "disk"
 workspace_kwargs = { directory = ".misen" }
 ```
 
+## Fill Missing Task IDs
+
+If you have legacy `@task` decorators missing `id`, you can auto-fill them:
+
+```bash
+misen fill
+```
+
+Pass one or more positional paths (Python files and/or project directories):
+
+```bash
+misen fill src/my_project scripts/fixup.py
+```
+
 ## Mental Model
 
 - Build tasks lazily with `Task(...)`.

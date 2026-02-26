@@ -3,9 +3,9 @@
 from typing import Any
 
 import dill
-from xxhash import xxh3_64_intdigest
 
-from misen_hash import PrimitiveHandler
+from misen_hash.handler_base import PrimitiveHandler
+from misen_hash.hash import incremental_hash
 
 __all__ = ["DillHandler"]
 
@@ -20,7 +20,6 @@ class DillHandler(PrimitiveHandler):
         return True
 
     @staticmethod
-    def digest(obj: Any, element_hash: None = None) -> int:
+    def digest(obj: Any) -> int:
         """Hash dill-serialized object bytes."""
-        _ = element_hash
-        return xxh3_64_intdigest(dill.dumps(obj), seed=0)
+        return incremental_hash(lambda sink: dill.dump(obj, sink))
