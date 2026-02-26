@@ -1,13 +1,18 @@
+import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal, cast
 
 import pytest
 import tyro
 
+import misen.utils.tui as tui_module
 from misen import Experiment, Task, task
-from misen.executor import Executor
+from misen.executor import Executor, Job
 from misen.utils.experiment_cli import _resolve_command, experiment_cli
-from misen.utils.runtime_events import task_label, work_unit_label
+from misen.utils.graph import DependencyGraph
+from misen.utils.runtime_events import RuntimeJobSummary, runtime_job_summary_lines, task_label, work_unit_label
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
 
@@ -160,7 +165,9 @@ def test_experiment_cli_count_command(monkeypatch, capsys, tmp_path) -> None:
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -188,7 +195,9 @@ def test_experiment_cli_tree_command_prints_tree(monkeypatch, capsys, tmp_path) 
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -224,7 +233,9 @@ def test_experiment_cli_tree_command_max_depth(monkeypatch, capsys, tmp_path) ->
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -255,7 +266,9 @@ def test_experiment_cli_tree_command_cacheable_only(monkeypatch, capsys, tmp_pat
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -283,7 +296,9 @@ def test_experiment_cli_tree_command_all_expands_shared_dependencies(monkeypatch
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(SharedDepsExperiment)
 
@@ -314,7 +329,9 @@ def test_experiment_cli_tree_command_collapses_shared_dependencies_by_default(mo
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(SharedDepsExperiment)
 
@@ -343,7 +360,9 @@ def test_experiment_cli_list_command_prints_flat_tasks(monkeypatch, capsys, tmp_
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -407,7 +426,9 @@ def test_experiment_cli_list_command_cacheable_only(monkeypatch, capsys, tmp_pat
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -433,7 +454,9 @@ def test_experiment_cli_list_command_incomplete_filter(monkeypatch, capsys, tmp_
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -464,7 +487,9 @@ def test_experiment_cli_tree_command_incomplete_filter_prints_missing_tasks(monk
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -496,7 +521,9 @@ def test_experiment_cli_incomplete_command_alias_prints_missing_tasks(monkeypatc
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -546,7 +573,8 @@ def test_experiment_cli_run_command_runs_full_experiment(monkeypatch, tmp_path) 
     workspace = object()
     calls: dict[str, object] = {}
 
-    def fake_run(*, executor: object, workspace: object) -> None:
+    def fake_submit_and_watch_jobs(*, experiment: object, executor: object, workspace: object) -> None:
+        calls["experiment"] = experiment
         calls["executor"] = executor
         calls["workspace"] = workspace
 
@@ -559,30 +587,34 @@ def test_experiment_cli_run_command_runs_full_experiment(monkeypatch, tmp_path) 
     second_args = SimpleNamespace(
         command="run",
         run_task=None,
+        run_tui=True,
         settings_file=settings_file,
         executor_type="auto",
         workspace_type="auto",
-        experiment=SimpleNamespace(run=fake_run),
+        experiment=SimpleNamespace(tasks=lambda: {}),
     )
 
     _mock_cli(monkeypatch, first_args, second_args)
+    monkeypatch.setattr(tui_module, "submit_and_watch_jobs", fake_submit_and_watch_jobs)
     monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: executor))
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
 
     experiment_cli(CliExperiment)
 
-    assert calls == {"executor": executor, "workspace": workspace}
+    assert calls["experiment"] is second_args.experiment
+    assert calls["executor"] is executor
+    assert calls["workspace"] is workspace
 
 
 def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> None:
     settings_file = tmp_path / "misen.toml"
     executor = object()
     workspace = object()
-    submit_calls: list[tuple[object, object]] = []
+    submit_calls: list[tuple[object, object, bool]] = []
 
     class StubTask:
-        def submit(self, *, executor: object, workspace: object) -> None:
-            submit_calls.append((executor, workspace))
+        def submit(self, *, executor: object, workspace: object, blocking: bool = False) -> None:
+            submit_calls.append((executor, workspace, blocking))
 
     class StubExperiment:
         def __init__(self, task: StubTask) -> None:
@@ -601,6 +633,7 @@ def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> Non
     second_args = SimpleNamespace(
         command="run",
         run_task="task",
+        run_tui=True,
         settings_file=settings_file,
         executor_type="auto",
         workspace_type="auto",
@@ -613,16 +646,62 @@ def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> Non
 
     experiment_cli(CliExperiment)
 
-    assert submit_calls == [(executor, workspace)]
+    assert submit_calls == [(executor, workspace, True)]
+
+
+def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tmp_path) -> None:
+    settings_file = tmp_path / "misen.toml"
+    workspace = object()
+    submit_calls: list[tuple[set[Task[int]], object, bool]] = []
+
+    class StubExecutor:
+        def submit(self, *, tasks: set[Task[int]], workspace: object, blocking: bool = False) -> None:
+            submit_calls.append((tasks, workspace, blocking))
+
+    class StubExperiment:
+        def tasks(self) -> dict[str, Task[int]]:
+            return {"task": Task(source, x=1)}
+
+    first_args = SimpleNamespace(
+        command="run",
+        settings_file=settings_file,
+        executor_type="auto",
+        workspace_type="auto",
+    )
+    second_args = SimpleNamespace(
+        command="run",
+        run_task=None,
+        run_tui=False,
+        settings_file=settings_file,
+        executor_type="auto",
+        workspace_type="auto",
+        experiment=StubExperiment(),
+    )
+
+    def fail_tui(**_kwargs: object) -> None:
+        msg = "TUI should be bypassed with --no-tui"
+        raise AssertionError(msg)
+
+    _mock_cli(monkeypatch, first_args, second_args)
+    monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: StubExecutor()))
+    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
+    monkeypatch.setattr(tui_module, "submit_and_watch_jobs", fail_tui)
+
+    experiment_cli(CliExperiment)
+
+    assert len(submit_calls) == 1
+    assert len(submit_calls[0][0]) == 1
+    assert submit_calls[0][1] is workspace
+    assert submit_calls[0][2] is True
 
 
 def test_experiment_cli_parses_positional_run_command(monkeypatch) -> None:
-    submit_calls: list[tuple[set[object], object]] = []
+    submit_calls: list[tuple[set[object], object, bool]] = []
     workspace = object()
 
     class StubExecutor:
-        def submit(self, *, tasks: set[object], workspace: object) -> None:
-            submit_calls.append((tasks, workspace))
+        def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> None:
+            submit_calls.append((tasks, workspace, blocking))
 
     monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: StubExecutor()))
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
@@ -633,6 +712,32 @@ def test_experiment_cli_parses_positional_run_command(monkeypatch) -> None:
     assert len(submit_calls) == 1
     assert len(submit_calls[0][0]) == 1
     assert submit_calls[0][1] is workspace
+    assert submit_calls[0][2] is True
+
+
+def test_experiment_cli_parses_run_no_tui_flag(monkeypatch) -> None:
+    submit_calls: list[tuple[set[object], object, bool]] = []
+    workspace = object()
+
+    class StubExecutor:
+        def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> None:
+            submit_calls.append((tasks, workspace, blocking))
+
+    def fail_tui(**_kwargs: object) -> None:
+        msg = "TUI should be bypassed with --no-tui"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: StubExecutor()))
+    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
+    monkeypatch.setattr(tui_module, "submit_and_watch_jobs", fail_tui)
+    monkeypatch.setattr(sys, "argv", ["prog", "run", "--no-tui"])
+
+    experiment_cli(CliExperiment)
+
+    assert len(submit_calls) == 1
+    assert len(submit_calls[0][0]) == 1
+    assert submit_calls[0][1] is workspace
+    assert submit_calls[0][2] is True
 
 
 def test_experiment_cli_parses_tree_short_depth_flag(monkeypatch, capsys) -> None:
@@ -646,7 +751,9 @@ def test_experiment_cli_parses_tree_short_depth_flag(monkeypatch, capsys) -> Non
 
 def test_experiment_cli_parses_tree_incomplete_flag(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["prog", "tree", "--incomplete"])
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -658,7 +765,9 @@ def test_experiment_cli_parses_tree_incomplete_flag(monkeypatch, capsys) -> None
 
 def test_experiment_cli_parses_positional_incomplete_command(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["prog", "incomplete"])
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -670,7 +779,9 @@ def test_experiment_cli_parses_positional_incomplete_command(monkeypatch, capsys
 
 def test_experiment_cli_parses_list_incomplete_flag(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["prog", "list", "--incomplete"])
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"})))
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids={"source"}))
+    )
 
     experiment_cli(CliExperiment)
 
@@ -737,3 +848,184 @@ def test_experiment_cli_result_command_requires_task_selector(monkeypatch, tmp_p
 
     with pytest.raises(ValueError, match=r"requires a task name"):
         experiment_cli(CliExperiment)
+
+
+class FakeJob(Job):
+    """Simple state-sequence job for TUI tests."""
+
+    def __init__(
+        self,
+        *,
+        work_unit: WorkUnit,
+        states: list[Literal["pending", "running", "done", "failed", "unknown"]],
+        job_id: str | None = None,
+        log_path: Path | None = None,
+    ) -> None:
+        super().__init__(work_unit=work_unit, job_id=job_id, log_path=log_path)
+        self._states = states
+        self.state_calls = 0
+
+    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
+        idx = min(self.state_calls, len(self._states) - 1)
+        self.state_calls += 1
+        return self._states[idx]
+
+
+def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> None:
+    graph: DependencyGraph[Job] = DependencyGraph()
+    graph.add_node(FakeJob(work_unit=WorkUnit(root=Task(source, x=1), dependencies=set()), states=["done"]))
+    submit_args: dict[str, object] = {}
+
+    class StubExecutor:
+        def submit(
+            self,
+            tasks: set[Task[int]],
+            workspace: object,
+            *,
+            blocking: bool = False,
+        ) -> DependencyGraph[Job]:
+            submit_args["tasks"] = tasks
+            submit_args["workspace"] = workspace
+            submit_args["blocking"] = blocking
+            return graph
+
+    class StubExperiment:
+        def tasks(self) -> dict[str, Task[int]]:
+            return {"task": Task(source, x=1)}
+
+    seen: dict[str, object] = {}
+
+    def fake_watch(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[tui_module.JobSnapshot]:
+        seen["job_graph"] = job_graph
+        seen["poll_interval_s"] = poll_interval_s
+        return []
+
+    workspace = object()
+    monkeypatch.setattr(tui_module, "watch_job_graph", fake_watch)
+    tui_module.submit_and_watch_jobs(experiment=StubExperiment(), executor=StubExecutor(), workspace=workspace)
+
+    assert submit_args["blocking"] is False
+    assert submit_args["workspace"] is workspace
+    assert len(cast("set[Task[int]]", submit_args["tasks"])) == 1
+    assert seen["job_graph"] is graph
+
+
+def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monkeypatch) -> None:
+    graph: DependencyGraph[Job] = DependencyGraph()
+    graph.add_node(FakeJob(work_unit=WorkUnit(root=Task(source, x=1), dependencies=set()), states=["done"]))
+    seen: dict[str, str | None] = {}
+
+    class StubExecutor:
+        def submit(
+            self,
+            tasks: set[Task[int]],
+            workspace: object,
+            *,
+            blocking: bool = False,
+        ) -> DependencyGraph[Job]:
+            _ = tasks, workspace, blocking
+            seen["during_submit"] = os.environ.get("MISEN_RUNTIME_EVENTS")
+            seen["during_submit_job_board"] = os.environ.get("MISEN_RUNTIME_JOB_BOARD")
+            return graph
+
+    class StubExperiment:
+        def tasks(self) -> dict[str, Task[int]]:
+            return {"task": Task(source, x=1)}
+
+    def fake_watch(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[tui_module.JobSnapshot]:
+        _ = job_graph, poll_interval_s
+        seen["during_watch"] = os.environ.get("MISEN_RUNTIME_EVENTS")
+        seen["during_watch_job_board"] = os.environ.get("MISEN_RUNTIME_JOB_BOARD")
+        return []
+
+    monkeypatch.delenv("MISEN_RUNTIME_EVENTS", raising=False)
+    monkeypatch.delenv("MISEN_RUNTIME_JOB_BOARD", raising=False)
+    monkeypatch.setattr(tui_module, "watch_job_graph", fake_watch)
+    tui_module.submit_and_watch_jobs(experiment=StubExperiment(), executor=StubExecutor(), workspace=object())
+
+    assert seen["during_submit"] is None
+    assert seen["during_submit_job_board"] == "0"
+    assert seen["during_watch"] == "0"
+    assert seen["during_watch_job_board"] == "0"
+    assert os.environ.get("MISEN_RUNTIME_EVENTS") is None
+    assert os.environ.get("MISEN_RUNTIME_JOB_BOARD") is None
+
+
+def test_snapshot_jobs_captures_dependencies_and_log_path() -> None:
+    dep_wu = WorkUnit(root=Task(source, x=1), dependencies=set())
+    parent_wu = WorkUnit(root=Task(sink, x=2), dependencies={dep_wu})
+    dep_job = FakeJob(work_unit=dep_wu, states=["running"], job_id="dep-1", log_path=Path("/tmp/dep.log"))
+    parent_job = FakeJob(work_unit=parent_wu, states=["pending"], job_id=None, log_path=None)
+
+    graph: DependencyGraph[Job] = DependencyGraph()
+    parent_idx = graph.add_node(parent_job)
+    dep_idx = graph.add_node(dep_job)
+    graph.add_edge(parent_idx, dep_idx, None)
+
+    snapshots, dependency_indices, done = tui_module.snapshot_jobs(graph)
+    snapshots_by_index = {snapshot.index: snapshot for snapshot in snapshots}
+
+    assert done is False
+    assert dependency_indices[parent_idx] == [dep_idx]
+    assert snapshots_by_index[parent_idx].dependencies == (snapshots_by_index[dep_idx].label,)
+    assert snapshots_by_index[dep_idx].log_file == "/tmp/dep.log"
+
+
+def test_final_summary_lines_include_job_id_and_pid() -> None:
+    done_job = FakeJob(
+        work_unit=WorkUnit(root=Task(source, x=1), dependencies=set()),
+        states=["done"],
+        job_id="DONE1",
+    )
+    failed_job = FakeJob(
+        work_unit=WorkUnit(root=Task(sink, x=2), dependencies=set()),
+        states=["failed"],
+        job_id="FAIL1",
+    )
+    done_job.pid = 12345
+    failed_job.pid = 67890
+
+    graph: DependencyGraph[Job] = DependencyGraph()
+    graph.add_node(done_job)
+    graph.add_node(failed_job)
+
+    snapshots, _, _ = tui_module.snapshot_jobs(graph)
+    lines = runtime_job_summary_lines(
+        [
+            RuntimeJobSummary(
+                label=snapshot.summary_label,
+                state=snapshot.state,
+                job_id=None if snapshot.job_id == "-" else snapshot.job_id,
+                pid=snapshot.pid,
+            )
+            for snapshot in snapshots
+        ]
+    )
+
+    assert lines
+    assert lines[0].startswith("complete ")
+    assert any("job_id=DONE1" in line and "pid=12345" in line for line in lines)
+    assert any(line.startswith("failed") and "job_id=FAIL1" in line and "pid=67890" in line for line in lines)
+
+
+def test_watch_job_graph_uses_textual_runner(monkeypatch) -> None:
+    graph: DependencyGraph[Job] = DependencyGraph()
+    work_unit = WorkUnit(root=Task(source, x=3), dependencies=set())
+    graph.add_node(FakeJob(work_unit=work_unit, states=["done"]))
+
+    seen: dict[str, object] = {}
+
+    def fake_run_textual(job_graph: DependencyGraph[Job], poll_interval_s: float) -> list[tui_module.JobSnapshot]:
+        seen["job_graph"] = job_graph
+        seen["poll_interval_s"] = poll_interval_s
+        snapshots, _, _ = tui_module.snapshot_jobs(job_graph)
+        return snapshots
+
+    monkeypatch.setattr(tui_module, "_run_textual_job_monitor", fake_run_textual)
+
+    snapshots = tui_module.watch_job_graph(graph, poll_interval_s=0.0)
+
+    assert snapshots
+    assert snapshots[0].state == "done"
+    assert seen["job_graph"] is graph
+    assert seen["poll_interval_s"] == 0.0

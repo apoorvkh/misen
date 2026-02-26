@@ -48,7 +48,13 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
     circuiting.
     """
 
-    def submit(self, tasks: set[Task], workspace: Workspace) -> DependencyGraph[CompletedJob | JobT]:
+    def submit(
+        self,
+        tasks: set[Task],
+        workspace: Workspace,
+        *,
+        blocking: bool = False,
+    ) -> DependencyGraph[CompletedJob | JobT]:
         """Submit tasks for execution on this backend.
 
         The method first converts task DAGs into a work-unit DAG. Work units
@@ -58,6 +64,8 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         Args:
             tasks: Root tasks requested by the caller.
             workspace: Workspace used for cache inspection and artifact access.
+            blocking: Whether to wait until all submitted jobs reach a
+                terminal state before returning.
 
         Returns:
             Dependency graph of job handles keyed to work-unit topology.
@@ -121,6 +129,10 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         job_graph = cast("DependencyGraph[CompletedJob | JobT]", work_graph.copy())
         for i in job_graph.node_indices():
             job_graph[i] = jobs[work_graph[i]]
+
+        if blocking:
+            for job in set(job_graph.nodes()):
+                job.wait()
 
         return job_graph
 

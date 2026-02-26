@@ -18,10 +18,7 @@ if TYPE_CHECKING:
     from io import FileIO
     from pathlib import Path
 
-    from misen.executor import CompletedJob
     from misen.task_properties import GpuRuntime, Resources
-    from misen.tasks import Task
-    from misen.utils.graph import DependencyGraph
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -204,14 +201,6 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
         runtime_job_pending(id(job), label=work_unit_label(work_unit))
         self._scheduler.submit(job)
         return job
-
-    # TEMPORARY
-    def submit(self, tasks: set[Task], workspace: Workspace) -> DependencyGraph[CompletedJob | LocalJob]:
-        submission_graph = super().submit(tasks=tasks, workspace=workspace)
-        import time
-
-        time.sleep(2)
-        return submission_graph
 
 
 def _infer_total_memory_gb() -> int:

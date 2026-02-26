@@ -80,7 +80,7 @@ class Workspace(FromSettingsABC):
                     assert_never(type_name)
         return super()._resolve_type(type_name)
 
-    def __post_init__(
+    def _post_init(
         self,
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],
         result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash],
@@ -202,7 +202,6 @@ class Workspace(FromSettingsABC):
     def get_temp_dir(self) -> Path:
         """Return temporary directory used for workspace operations."""
 
-    @abstractmethod
     def get_work_dir(self, task: Task) -> Path:
         """Return a per-task working directory for cacheable tasks.
 
@@ -218,6 +217,10 @@ class Workspace(FromSettingsABC):
         if not task.properties.cache:
             msg = f"{task} cannot use workspace work_dir unless Task.properties.cache == True."
             raise RuntimeError(msg)
+        return self._get_work_dir(task)
+
+    @abstractmethod
+    def _get_work_dir(self, task: Task) -> Path: ...
 
     @abstractmethod
     def open_task_log(

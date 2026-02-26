@@ -20,7 +20,7 @@ from misen.utils.graph import DependencyGraph
 from misen.utils.task_utils import map_nested_leaves
 
 if TYPE_CHECKING:
-    from misen.task_properties import Resources
+    from misen.task_properties import GpuRuntime, Resources
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.workspace import Workspace
 
@@ -65,11 +65,16 @@ class WorkUnit:
 
         _resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
 
-        gpu_runtimes = {r.gpu_runtime for r in _resource_list if r.gpus > 0}
-        if len(gpu_runtimes) > 1:
-            msg = f"WorkUnit has incompatible gpu_runtime requirements: {gpu_runtimes}"
-            raise ValueError(msg)
-        gpu_runtime = gpu_runtimes[0] if gpu_runtimes else "cuda"
+        gpu_runtimes = cast("set[GpuRuntime]", {r.gpu_runtime for r in _resource_list if r.gpus > 0})
+
+        match len(gpu_runtimes):
+            case 0:
+                gpu_runtime = "cuda"
+            case 1:
+                (gpu_runtime,) = gpu_runtimes
+            case _:
+                msg = f"WorkUnit has incompatible gpu_runtime requirements: {gpu_runtimes}"
+                raise ValueError(msg)
 
         self.resources = Resources(
             time=(

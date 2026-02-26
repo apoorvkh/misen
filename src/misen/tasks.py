@@ -35,7 +35,7 @@ from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
     from pathlib import Path
     from types import FunctionType
 
@@ -91,7 +91,7 @@ class Task(FrozenMixin, Generic[R]):
 
         self.func: FunctionType = func
         self.args: P.args = args
-        self.kwargs: P.kwargs = MappingProxyType(kwargs)
+        self.kwargs: Mapping[str, Any] = MappingProxyType(kwargs)
         self._signature: Signature = signature(func)
 
         self.properties: TaskProperties = resolve_task_properties(func)
@@ -322,12 +322,15 @@ class Task(FrozenMixin, Generic[R]):
         *,
         workspace: Workspace | Literal["auto"] = "auto",
         executor: Executor | Literal["auto"] = "auto",
+        blocking: bool = False,
     ) -> DependencyGraph[Job]:
         """Submit this task DAG to an executor for deferred execution.
 
         Args:
             workspace: Workspace instance or ``"auto"``.
             executor: Executor instance or ``"auto"``.
+            blocking: Whether to wait for all submitted jobs to terminate
+                before returning.
 
         Returns:
             Dependency graph of job handles for scheduled work units.
@@ -337,7 +340,7 @@ class Task(FrozenMixin, Generic[R]):
 
         executor = Executor.resolve_auto(executor)
         workspace = Workspace.resolve_auto(workspace)
-        return executor.submit(tasks={self}, workspace=workspace)
+        return executor.submit(tasks={self}, workspace=workspace, blocking=blocking)
 
     def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
         """Return this task's working directory.

@@ -64,7 +64,7 @@ def _join_until(th: threading.Thread, deadline: float) -> None:
 
 
 @contextlib.contextmanager
-def capture_all_output(  # noqa: PLR0912, PLR0915
+def capture_all_output(  # noqa: PLR0915
     target: TextIO,
     timeout: float = 10.0,
     *,

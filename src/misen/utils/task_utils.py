@@ -106,7 +106,7 @@ def hash_task_arguments(
     *,
     signature: Signature,
     args: tuple[Any, ...],
-    kwargs: dict[str, Any],
+    kwargs: Mapping[str, Any],
     properties: TaskProperties,
     hash_task_by_result: bool = False,
     workspace: Workspace | Literal["auto"] = "auto",

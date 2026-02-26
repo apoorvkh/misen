@@ -30,12 +30,14 @@ if TYPE_CHECKING:
     from misen.utils.work_unit import WorkUnit
 
 __all__ = [
+    "RuntimeJobSummary",
     "runtime_activity",
     "runtime_event",
     "runtime_job_done",
     "runtime_job_failed",
     "runtime_job_pending",
     "runtime_job_running",
+    "runtime_job_summary_lines",
     "runtime_progress",
     "task_label",
     "work_unit_label",
@@ -44,14 +46,26 @@ __all__ = [
 _FALSEY = frozenset({"0", "false", "no", "off"})
 _LIVE_CONTEXT: dict[str, int] = {"depth": 0}
 _LIVE_CONTEXT_LOCK = threading.Lock()
+_JOB_BOARD_ENV = "MISEN_RUNTIME_JOB_BOARD"
 
 _JobState = Literal["pending", "running", "done", "failed"]
+RuntimeJobState = Literal["pending", "running", "done", "failed", "unknown"]
 
 
 @dataclass
 class _JobStatusLine:
     label: str
     state: _JobState = "pending"
+    job_id: str | None = None
+    pid: int | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeJobSummary:
+    """Final one-line summary row for a job."""
+
+    label: str
+    state: RuntimeJobState
     job_id: str | None = None
     pid: int | None = None
 
@@ -157,13 +171,7 @@ class _RuntimeJobBoard:
                 case "failed":
                     indicator = Text("failed", style="bold red")
 
-            details = []
-            if line.job_id is not None:
-                details.append(f"job_id={line.job_id}")
-            if line.pid is not None:
-                details.append(f"pid={line.pid}")
-
-            detail_suffix = f" ({', '.join(details)})" if details else ""
+            detail_suffix = _job_detail_suffix(job_id=line.job_id, pid=line.pid)
             table.add_row(indicator, Text(f"{line.label}{detail_suffix}"))
 
         return table
@@ -261,30 +269,49 @@ def runtime_progress(description: str, *, total: int) -> Iterator[Callable[[int]
 
 def runtime_job_pending(job_key: int, label: str) -> None:
     """Register one pending local job in the live status board."""
-    if not _events_enabled():
+    if not _events_enabled() or not _job_board_enabled():
         return
     _JOB_BOARD.pending(job_key, label=label)
 
 
 def runtime_job_running(job_key: int, *, job_id: str | None, pid: int | None) -> None:
     """Mark one local job as running in the live status board."""
-    if not _events_enabled():
+    if not _events_enabled() or not _job_board_enabled():
         return
     _JOB_BOARD.running(job_key, job_id=job_id, pid=pid)
 
 
 def runtime_job_done(job_key: int) -> None:
     """Mark one local job as complete in the live status board."""
-    if not _events_enabled():
+    if not _events_enabled() or not _job_board_enabled():
         return
     _JOB_BOARD.done(job_key)
 
 
 def runtime_job_failed(job_key: int) -> None:
     """Mark one local job as failed in the live status board."""
-    if not _events_enabled():
+    if not _events_enabled() or not _job_board_enabled():
         return
     _JOB_BOARD.failed(job_key)
+
+
+def runtime_job_summary_lines(rows: list[RuntimeJobSummary]) -> list[str]:
+    """Format final job summary rows for terminal output."""
+    state_order = {
+        "done": 0,
+        "failed": 1,
+        "running": 2,
+        "pending": 3,
+        "unknown": 4,
+    }
+    ordered_rows = sorted(rows, key=lambda row: (state_order.get(row.state, 99), row.label))
+
+    lines: list[str] = []
+    for row in ordered_rows:
+        state_text = "complete" if row.state == "done" else row.state
+        detail_suffix = _job_detail_suffix(job_id=row.job_id, pid=row.pid)
+        lines.append(f"{state_text:<8} {row.label}{detail_suffix}")
+    return lines
 
 
 def task_label(
@@ -353,6 +380,20 @@ def _split_hash_suffix(label: str) -> tuple[str, str | None]:
 def _events_enabled() -> bool:
     value = os.getenv("MISEN_RUNTIME_EVENTS", "1").strip().lower()
     return value not in _FALSEY
+
+
+def _job_board_enabled() -> bool:
+    value = os.getenv(_JOB_BOARD_ENV, "1").strip().lower()
+    return value not in _FALSEY
+
+
+def _job_detail_suffix(*, job_id: str | None, pid: int | None) -> str:
+    details: list[str] = []
+    if job_id is not None:
+        details.append(f"job_id={job_id}")
+    if pid is not None:
+        details.append(f"pid={pid}")
+    return f" ({', '.join(details)})" if details else ""
 
 
 def _live_context_active() -> bool:

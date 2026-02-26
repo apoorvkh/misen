@@ -22,16 +22,25 @@ if TYPE_CHECKING:
 class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
     """Executor that runs the full task DAG in dependency order in-process."""
 
-    def submit(self, tasks: set[Task], workspace: Workspace) -> DependencyGraph[CompletedJob]:
+    def submit(
+        self,
+        tasks: set[Task],
+        workspace: Workspace,
+        *,
+        blocking: bool = False,
+    ) -> DependencyGraph[CompletedJob]:
         """Execute submitted tasks synchronously in dependency order.
 
         Args:
             tasks: Root tasks requested by the caller.
             workspace: Workspace used for cache inspection and task execution.
+            blocking: Unused for this executor because execution is already
+                synchronous.
 
         Returns:
             Single-node job graph (or empty graph when no tasks were submitted).
         """
+        _ = blocking
         null_work_unit = WorkUnit(root=Task(lambda: None), dependencies=set())
         job_id, _, _ = self._make_snapshot(workspace=workspace).prepare_job(
             null_work_unit, workspace=workspace, assigned_resources_getter=lambda: None, gpu_runtime="cuda"

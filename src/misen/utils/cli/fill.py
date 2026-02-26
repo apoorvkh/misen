@@ -7,7 +7,6 @@ import fnmatch
 import os
 import secrets
 import sys
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast

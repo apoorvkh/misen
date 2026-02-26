@@ -263,7 +263,7 @@ class DiskWorkspace(Workspace):
         (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
 
-        super().__post_init__(
+        super()._post_init(
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self._directory / "resolved_hash_cache.mdb"),
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self._directory / "result_hash_cache.mdb"),
             result_store=DiskResultStore(self._directory / "results"),
@@ -293,7 +293,7 @@ class DiskWorkspace(Workspace):
         """Return workspace temporary directory path."""
         return Path(self._directory) / "tmp"
 
-    def get_work_dir(self, task: Task) -> Path:
+    def _get_work_dir(self, task: Task) -> Path:
         """Return stable working directory for a task.
 
         Args:

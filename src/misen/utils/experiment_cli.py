@@ -12,6 +12,7 @@ from rich.markup import escape
 from rich.pretty import Pretty
 from rich.tree import Tree
 
+from misen.utils import tui
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import DEFAULT_SETTINGS_FILE, Settings
 
@@ -63,6 +64,13 @@ ListIncompleteArg = Annotated[
     tyro.conf.arg(
         name="incomplete",
         help="Show only incomplete tasks in the list.",
+    ),
+]
+RunTuiArg = Annotated[
+    bool,
+    tyro.conf.arg(
+        name="tui",
+        help="Enable run TUI; disable with --no-tui to block until jobs terminate.",
     ),
 ]
 
@@ -303,11 +311,15 @@ def _execute_command(*, args: Any, console: Console) -> None:
             executor = _resolve_executor(args)
             workspace = _resolve_workspace(args)
             run_task = args.run_task
-            if run_task is None:
-                args.experiment.run(executor=executor, workspace=workspace)
+            run_tui = args.run_tui
+            if run_task is None and run_tui:
+                tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
+            elif run_task is None and not run_tui:
+                tasks = set(args.experiment.tasks().values())
+                executor.submit(tasks=tasks, workspace=workspace, blocking=True)
             else:
                 task_name = _resolve_command_task(command=args.command, task_name=run_task)
-                args.experiment[task_name].submit(executor=executor, workspace=workspace)
+                args.experiment[task_name].submit(executor=executor, workspace=workspace, blocking=True)
         case "count":
             workspace = _resolve_workspace(args)
             complete_count, total_count = _count_completion(args.experiment.tasks(), workspace)
@@ -383,7 +395,10 @@ def _command_specific_fields(command: ExperimentCommand) -> list[tuple[Any, ...]
     """Return command-specific CLI fields to inject on second parse."""
     match command:
         case "run":
-            return [("run_task", tyro.conf.Positional[str | None], None)]
+            return [
+                ("run_task", tyro.conf.Positional[str | None], None),
+                ("run_tui", RunTuiArg, True),
+            ]
         case "tree":
             return [
                 ("tree_all", TreeAllArg, False),
