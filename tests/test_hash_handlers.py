@@ -5,6 +5,7 @@ import ipaddress
 import pathlib
 import re
 import types
+import warnings
 from collections import ChainMap, Counter, defaultdict, deque
 from fractions import Fraction
 from typing import Any
@@ -255,7 +256,22 @@ def test_rustworkx_handlers_are_registered_as_optional() -> None:
 
 
 def test_stable_hash_falls_back_to_dill_handler() -> None:
-    assert isinstance(stable_hash(_Custom()), int)
+    with pytest.warns(UserWarning, match="fell back to dill serialization"):
+        assert isinstance(stable_hash(_Custom()), int)
+
+
+def test_stable_hash_fallback_warning_is_emitted_once_per_type() -> None:
+    class _WarnOnce:
+        pass
+
+    with pytest.warns(UserWarning, match="fell back to dill serialization"):
+        stable_hash(_WarnOnce())
+
+    with warnings.catch_warnings(record=True) as recorded_warnings:
+        warnings.simplefilter("always")
+        stable_hash(_WarnOnce())
+
+    assert len(recorded_warnings) == 0
 
 
 def test_stable_hash_supports_recursive_list() -> None:
