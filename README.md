@@ -44,7 +44,7 @@ class Demo(Experiment):
 
 
 if __name__ == "__main__":
-    Demo(n=1000).run()
+    Demo.cli()
 ```
 
 ## Design Invariants
@@ -61,6 +61,18 @@ if __name__ == "__main__":
 - [API reference](docs/api.md)
 
 ## CLI Utilities
+
+Run an experiment CLI by module path:
+
+```bash
+misen experiment my_project.demo:Demo run
+```
+
+If your module has `if __name__ == "__main__": Demo.cli()`, you can also run:
+
+```bash
+uv run -m my_project.demo run
+```
 
 Generate missing task ids in a project:
 

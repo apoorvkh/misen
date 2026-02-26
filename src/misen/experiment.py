@@ -23,7 +23,7 @@ from typing_extensions import TypeVar
 
 from misen.executor import Executor
 from misen.tasks import Task
-from misen.utils.experiment_cli import experiment_cli
+from misen.utils.cli.experiment import experiment_cli
 from misen.workspace import Workspace
 
 __all__ = ["Experiment"]
