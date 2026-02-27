@@ -17,13 +17,14 @@ def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -
     calls: list[dict[str, object]] = []
     payload_marker = tmp_path / "payload-ran.txt"
 
-    def fake_apply_resource_binding(*, assigned_resources: object) -> None:
-        calls.append({"assigned_resources": assigned_resources})
+    def fake_apply_resource_binding(*, assigned_resources: object, gpu_runtime: str) -> None:
+        calls.append({"assigned_resources": assigned_resources, "gpu_runtime": gpu_runtime})
 
     monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
     monkeypatch.setenv("MISEN_TEST_GETTER", "1")
 
-    def payload_fn() -> None:
+    def payload_fn(*, assigned_resources: object) -> None:
+        assert assigned_resources == expected
         payload_marker.write_text("ran", encoding="utf-8")
 
     def getter() -> object:
@@ -39,7 +40,7 @@ def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -
 
     execute_mod.execute(payload=payload_path, assigned_resources_getter=encoded_getter)
 
-    assert calls == [{"assigned_resources": expected}]
+    assert calls == [{"assigned_resources": expected, "gpu_runtime": "cuda"}]
     assert payload_marker.read_text(encoding="utf-8") == "ran"
 
 

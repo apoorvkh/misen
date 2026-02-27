@@ -183,6 +183,19 @@ def resolve_experiment_class(reference: str) -> type[Experiment]:
     return experiment_cls
 
 
+def _system_exit_code(exc: SystemExit) -> int:
+    """Normalize ``SystemExit.code`` into a stable integer exit code."""
+    code = exc.code
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    try:
+        return int(code)
+    except (TypeError, ValueError):
+        return 1
+
+
 def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
     """Run an experiment CLI by resolving ``<module:ExperimentClass>``."""
     args_list = list(sys.argv[1:] if argv is None else argv)
@@ -190,7 +203,7 @@ def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
         try:
             tyro.cli(_ExperimentEntryArgs, args=["--help"])
         except SystemExit as exc:
-            return int(exc.code)
+            return _system_exit_code(exc)
         return 0
 
     parsed, unknown_args = tyro.cli(

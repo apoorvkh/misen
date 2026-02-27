@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import tyro
 
@@ -54,21 +54,37 @@ TopLevelCommand = (
 )
 
 
+def _system_exit_code(exc: SystemExit) -> int:
+    """Normalize ``SystemExit.code`` into a stable integer exit code."""
+    code = exc.code
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    try:
+        return int(code)
+    except (TypeError, ValueError):
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Execute the ``misen`` CLI."""
     args_list = list(sys.argv[1:] if argv is None else argv)
     if not args_list or args_list[0] in {"-h", "--help"}:
         try:
-            tyro.cli(TopLevelCommand, args=["--help"])
+            tyro.cli(cast(Any, TopLevelCommand), args=["--help"])
         except SystemExit as exc:
-            return int(exc.code)
+            return _system_exit_code(exc)
         return 0
 
-    parsed, unknown_args = tyro.cli(
-        TopLevelCommand,
-        args=args_list,
-        return_unknown_args=True,
-        add_help=False,
+    parsed, unknown_args = cast(
+        tuple[object, list[str]],
+        tyro.cli(
+            cast(Any, TopLevelCommand),
+            args=args_list,
+            return_unknown_args=True,
+            add_help=False,
+        ),
     )
 
     if isinstance(parsed, _ExperimentSelection):

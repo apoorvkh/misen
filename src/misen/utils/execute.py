@@ -16,14 +16,15 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-def execute(payload: Path, assigned_resources_getter: str, gpu_runtime: GpuRuntime) -> None:
+def execute(payload: Path, assigned_resources_getter: str, gpu_runtime: GpuRuntime = "cuda") -> None:
     """Execute a cloudpickle payload file.
 
     Args:
         payload: Path to payload bytes representing a zero-argument callable.
         assigned_resources_getter: URL-safe base64 string containing a
             cloudpickled assigned-resources getter callable.
-        gpu_runtime: Expected runtime for GPU resources (if any).
+        gpu_runtime: Expected runtime for GPU resources (if any). Defaults
+            to ``"cuda"`` for backward compatibility with older payload runners.
     """
     assigned_resources: AssignedResources | AssignedResourcesPerNode | None = _get_assigned_resources(
         encoded_getter=assigned_resources_getter
