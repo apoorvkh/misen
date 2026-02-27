@@ -1,8 +1,12 @@
+import logging
 import os
 import sys
 
 from misen import ASSIGNED_RESOURCES, Experiment, Task, task
 from misen.utils.assigned_resources import AssignedResources
+
+logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s %(message)s")
+logging.getLogger("misen").setLevel(logging.DEBUG)
 
 
 @task(id="add", cache=False, exclude={"x"})
