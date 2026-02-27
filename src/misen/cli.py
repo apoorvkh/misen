@@ -39,7 +39,7 @@ def _select_experiment(
         tyro.conf.Positional,
         tyro.conf.arg(
             name="experiment-ref",
-            help="Experiment class reference in '<module>:<ExperimentClass>' format.",
+            help="Experiment class reference in '<module>:<ExperimentClass>' or '<path.py>:<ExperimentClass>' format.",
         ),
     ],
 ) -> _ExperimentSelection:

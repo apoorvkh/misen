@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import importlib.util
 import sys
 from dataclasses import dataclass, field, make_dataclass
+from hashlib import sha1
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast, get_args
 
 import cloudpickle
@@ -24,7 +27,7 @@ from misen.workspace import WorkspaceType
 from . import tui
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
 
     from misen import Experiment
     from misen.tasks import Task
@@ -97,7 +100,7 @@ class _ExperimentEntryArgs:
         tyro.conf.Positional,
         tyro.conf.arg(
             name="experiment-ref",
-            help="Experiment class reference in '<module>:<ExperimentClass>' format.",
+            help="Experiment class reference in '<module>:<ExperimentClass>' or '<path.py>:<ExperimentClass>' format.",
         ),
     ]
 
@@ -156,17 +159,118 @@ ExperimentCommandArgs = tyro.conf.OmitSubcommandPrefixes[
 ]
 
 
-def resolve_experiment_class(reference: str) -> type[Experiment]:
-    """Resolve an experiment class from ``module:Class`` reference text."""
-    module_name, class_name = reference.split(":", 1)
-    module = importlib.import_module(module_name)
+def _parse_experiment_reference(reference: str) -> tuple[str, str]:
+    """Split and validate ``<module-or-file>:<ExperimentClass>`` reference text."""
+    module_name, separator, class_name = reference.rpartition(":")
+    if not separator or not module_name or not class_name:
+        msg = "Invalid experiment reference. Expected '<module-or-file>:<ExperimentClass>'."
+        raise ValueError(msg)
+    return module_name, class_name
+
+
+@contextlib.contextmanager
+def _prefer_local_src_path() -> Iterator[None]:
+    """Temporarily prioritize ``./src`` on ``sys.path`` when it exists."""
+    src_dir = (Path.cwd() / "src").resolve()
+    if not src_dir.is_dir():
+        yield
+        return
+
+    src_path = str(src_dir)
+    original_index = next((index for index, value in enumerate(sys.path) if value == src_path), None)
+    if original_index is not None:
+        sys.path.pop(original_index)
+    sys.path.insert(0, src_path)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.path.remove(src_path)
+        if original_index is not None:
+            sys.path.insert(min(original_index, len(sys.path)), src_path)
+
+
+def _register_module_pickle_by_value(module: object) -> None:
+    """Register module for value pickling when supported by cloudpickle."""
     with contextlib.suppress(ValueError):
         # prefer value-based pickling of Experiment classes
         # so runtime behavior of `misen experiment` is more similar to `python -c "Experiment.cli()"`
         cloudpickle.register_pickle_by_value(module)
 
+
+def _is_python_file_reference(reference: str) -> bool:
+    """Return whether a reference token points to a Python source file."""
+    return reference.endswith(".py") or "/" in reference or "\\" in reference
+
+
+def _resolve_reference_path(reference: str) -> Path:
+    """Resolve a file reference into an absolute Python file path."""
+    path = Path(reference).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path = path.resolve()
+    if not path.is_file() or path.suffix != ".py":
+        msg = f"Experiment module file {reference!r} does not exist or is not a .py file."
+        raise ValueError(msg)
+    return path
+
+
+def _module_name_from_local_src(file_path: Path) -> str | None:
+    """Infer importable module path for files inside ``./src``."""
+    src_dir = (Path.cwd() / "src").resolve()
+    if not src_dir.is_dir() or not file_path.is_relative_to(src_dir):
+        return None
+    rel_path = file_path.relative_to(src_dir)
+    if rel_path.name == "__init__.py":
+        return ".".join(rel_path.parent.parts) if rel_path.parent.parts else None
+    return ".".join(rel_path.with_suffix("").parts)
+
+
+def _import_module_from_file(file_path: Path) -> ModuleType:
+    """Import a Python module from an explicit file path."""
+    module_hash = sha1(str(file_path).encode("utf-8"), usedforsecurity=False).hexdigest()
+    module_name = f"_misen_experiment_{module_hash}"
+    existing = sys.modules.get(module_name)
+    if isinstance(existing, ModuleType):
+        return existing
+
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        msg = f"Unable to load module from {str(file_path)!r}."
+        raise ImportError(msg)
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _resolve_experiment_module(module_reference: str) -> ModuleType:
+    """Resolve module by module path or explicit Python file reference."""
+    if not _is_python_file_reference(module_reference):
+        with _prefer_local_src_path():
+            return importlib.import_module(module_reference)
+
+    file_path = _resolve_reference_path(module_reference)
+    local_module_name = _module_name_from_local_src(file_path)
+    if local_module_name is not None:
+        with _prefer_local_src_path():
+            return importlib.import_module(local_module_name)
+    return _import_module_from_file(file_path)
+
+
+def resolve_experiment_class(reference: str) -> type[Experiment]:
+    """Resolve an experiment class from ``module:Class`` or ``path.py:Class`` reference text."""
+    module_reference, class_name = _parse_experiment_reference(reference)
+    module = _resolve_experiment_module(module_reference)
+    _register_module_pickle_by_value(module)
+
     if not hasattr(module, class_name):
-        msg = f"Module {module_name!r} has no attribute {class_name!r}."
+        msg = f"Module {module_reference!r} has no attribute {class_name!r}."
         raise ValueError(msg)
 
     experiment_cls = getattr(module, class_name)
@@ -645,12 +749,21 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
     from misen.workspace import Workspace
 
     args_list = list(sys.argv[1:] if argv is None else argv)
-    bootstrap_args, _ = tyro.cli(
+    bootstrap_args, unknown_args = tyro.cli(
         _BootstrapArgs,
         add_help=False,
         return_unknown_args=True,
         args=args_list,
     )
+    command_default_factories: dict[ExperimentCommand, type[object]] = {
+        "run": RunCommandArgs,
+        "list": ListCommandArgs,
+        "tree": TreeCommandArgs,
+        "count": CountCommandArgs,
+        "result": ResultCommandArgs,
+        "incomplete": IncompleteCommandArgs,
+    }
+    resolved_command = _resolve_command(command_token=None, unknown_args=unknown_args)
 
     cli_fields: list[tuple[Any, ...]] = [
         ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls]),  # ty:ignore[invalid-type-form]
@@ -661,7 +774,7 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
         cli_fields.append(("workspace", Workspace.resolve_type(bootstrap_args.workspace_type)))
     cli_fields.extend(
         [
-            ("command", ExperimentCommandArgs, field(default_factory=RunCommandArgs)),
+            ("command", ExperimentCommandArgs, field(default_factory=command_default_factories[resolved_command])),
             ("settings_file", Path, bootstrap_args.settings_file),
             ("executor_type", ExecutorType | Literal["auto"], bootstrap_args.executor_type),
             ("workspace_type", WorkspaceType | Literal["auto"], bootstrap_args.workspace_type),

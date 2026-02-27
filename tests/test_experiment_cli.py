@@ -87,6 +87,42 @@ def test_experiment_command_resolves_reference_and_forwards_argv(monkeypatch) ->
     assert seen["argv"] == ["tree", "--max-depth", "1"]
 
 
+def test_experiment_command_accepts_src_file_reference(monkeypatch, tmp_path) -> None:
+    project_src = tmp_path / "src" / "demo_pkg"
+    project_src.mkdir(parents=True)
+    (project_src / "__init__.py").write_text("", encoding="utf-8")
+    (project_src / "demo.py").write_text(
+        (
+            "from misen import Experiment, Task, task\n\n"
+            "@task(id='demo_task', cache=False)\n"
+            "def demo_task(x: int) -> int:\n"
+            "    return x\n\n"
+            "class DemoExperiment(Experiment):\n"
+            "    marker = 'local'\n\n"
+            "    def tasks(self):\n"
+            "        return {'task': Task(demo_task, x=1)}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    seen: dict[str, object] = {}
+
+    def fake_experiment_cli(experiment_cls: type[object], argv: list[str] | tuple[str, ...] | None = None) -> None:
+        seen["experiment_cls"] = experiment_cls
+        seen["argv"] = argv
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(experiment_module, "experiment_cli", fake_experiment_cli)
+    sys.modules.pop("demo_pkg", None)
+    sys.modules.pop("demo_pkg.demo", None)
+
+    exit_code = experiment(["src/demo_pkg/demo.py:DemoExperiment", "list"])
+
+    assert exit_code == 0
+    assert getattr(cast("object", seen["experiment_cls"]), "marker", None) == "local"
+    assert seen["argv"] == ["list"]
+
+
 def test_experiment_command_reports_invalid_reference(capsys) -> None:
     exit_code = experiment(["bad-reference"])
 
@@ -135,6 +171,34 @@ def test_resolve_experiment_class_prefers_local_src_module(monkeypatch, tmp_path
     sys.modules.pop("demo_pkg.demo", None)
 
     resolved = experiment_module.resolve_experiment_class("demo_pkg.demo:DemoExperiment")
+
+    assert getattr(resolved, "marker") == "local"
+    assert Path(sys.modules["demo_pkg.demo"].__file__).resolve() == (project_src / "demo.py").resolve()
+
+
+def test_resolve_experiment_class_accepts_src_file_reference(monkeypatch, tmp_path) -> None:
+    project_src = tmp_path / "src" / "demo_pkg"
+    project_src.mkdir(parents=True)
+    (project_src / "__init__.py").write_text("", encoding="utf-8")
+    (project_src / "demo.py").write_text(
+        (
+            "from misen import Experiment, Task, task\n\n"
+            "@task(id='demo_task', cache=False)\n"
+            "def demo_task(x: int) -> int:\n"
+            "    return x\n\n"
+            "class DemoExperiment(Experiment):\n"
+            "    marker = 'local'\n\n"
+            "    def tasks(self):\n"
+            "        return {'task': Task(demo_task, x=1)}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    sys.modules.pop("demo_pkg", None)
+    sys.modules.pop("demo_pkg.demo", None)
+
+    resolved = experiment_module.resolve_experiment_class("src/demo_pkg/demo.py:DemoExperiment")
 
     assert getattr(resolved, "marker") == "local"
     assert Path(sys.modules["demo_pkg.demo"].__file__).resolve() == (project_src / "demo.py").resolve()
