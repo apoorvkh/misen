@@ -316,13 +316,14 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         """
         result_hash = key.result_hash(workspace=self.workspace)
         with self.workspace.lock(namespace="result", key=result_hash.b32()).context(blocking=True, timeout=None):
-            if result_hash not in self.result_store:
-                tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                key.properties.serializer.save(value, tmp_dir)
-                self.result_store[result_hash] = tmp_dir
-                with contextlib.suppress(FileNotFoundError):
-                    shutil.rmtree(tmp_dir)
+            if result_hash in self.result_store:
+                return
+            tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            key.properties.serializer.save(value, tmp_dir)
+            self.result_store[result_hash] = tmp_dir
+            with contextlib.suppress(FileNotFoundError):
+                shutil.rmtree(tmp_dir)
 
     def __delitem__(self, key: Task[R], /) -> None:
         """Remove a cached result for a task.

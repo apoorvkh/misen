@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import threading
-from functools import cache
 from typing import TYPE_CHECKING, Literal
 
 from misen.executor import Executor, Job
@@ -16,7 +15,6 @@ from misen.utils.snapshot import LocalSnapshot
 if TYPE_CHECKING:
     import subprocess
     from io import FileIO
-    from pathlib import Path
 
     from misen.task_properties import GpuRuntime, Resources
     from misen.utils.work_unit import WorkUnit
@@ -159,17 +157,8 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
         )
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Return a cached ``LocalSnapshot`` rooted at workspace snapshots dir.
-
-        Executors that launch subprocess payloads can reuse this helper to keep snapshot policy consistent.
-        """
-        return self._cached_local_snapshot(snapshots_dir=(workspace.get_temp_dir() / "snapshots").resolve())
-
-    @classmethod
-    @cache
-    def _cached_local_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
-        """Return cached :class:`LocalSnapshot` for a snapshots directory."""
-        return LocalSnapshot(snapshots_dir=snapshots_dir)
+        """Return cached ``LocalSnapshot`` rooted at workspace snapshots dir."""
+        return self._make_local_snapshot(workspace=workspace)
 
     def _dispatch(
         self,

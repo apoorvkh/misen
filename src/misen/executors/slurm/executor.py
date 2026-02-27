@@ -24,6 +24,30 @@ if TYPE_CHECKING:
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
+_SLURM_STATE_MAP: dict[str, Literal["pending", "running", "failed", "done"]] = {
+    **dict.fromkeys(
+        ("PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED", "REQUEUED_HOLD", "STAGE_OUT"),
+        "pending",
+    ),
+    **dict.fromkeys(("RUNNING", "COMPLETING"), "running"),
+    **dict.fromkeys(
+        (
+            "BOOT_FAIL",
+            "CANCELLED",
+            "DEADLINE",
+            "FAILED",
+            "NODE_FAIL",
+            "OUT_OF_MEMORY",
+            "PREEMPTED",
+            "TIMEOUT",
+            "TIMEOUT_SIGNAL",
+            "SPECIAL_EXIT",
+        ),
+        "failed",
+    ),
+    "COMPLETED": "done",
+}
+
 
 class SlurmJob(Job):
     """Job handle that maps SLURM command output to misen job states."""
@@ -49,35 +73,11 @@ class SlurmJob(Job):
             Generic job state derived from SLURM job state strings.
         """
         state = _query_slurm_state(self.slurm_job_id)
-
         if state is None:
             return "unknown"
 
-        state = state.strip().upper()
-        state = state.split("+", maxsplit=1)[0]
-        state = state.split(":", maxsplit=1)[0]
-
-        match state:
-            case "PENDING" | "CONFIGURING" | "SUSPENDED" | "REQUEUED" | "REQUEUED_HOLD" | "STAGE_OUT":
-                return "pending"
-            case "RUNNING" | "COMPLETING":
-                return "running"
-            case (
-                "BOOT_FAIL"
-                | "CANCELLED"
-                | "DEADLINE"
-                | "FAILED"
-                | "NODE_FAIL"
-                | "OUT_OF_MEMORY"
-                | "PREEMPTED"
-                | "TIMEOUT"
-                | "TIMEOUT_SIGNAL"
-                | "SPECIAL_EXIT"
-            ):
-                return "failed"
-            case "COMPLETED":
-                return "done"
-        return "unknown"
+        normalized_state = state.strip().upper().split("+", maxsplit=1)[0].split(":", maxsplit=1)[0]
+        return _SLURM_STATE_MAP.get(normalized_state, "unknown")
 
 
 class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
@@ -96,17 +96,8 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         self.rules = msgspec.convert(self.rules, type=list[SlurmRule])
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Return a cached ``LocalSnapshot`` rooted at workspace snapshots dir.
-
-        Executors that launch subprocess payloads can reuse this helper to keep snapshot policy consistent.
-        """
-        return self._cached_local_snapshot(snapshots_dir=(workspace.get_temp_dir() / "snapshots").resolve())
-
-    @classmethod
-    @cache
-    def _cached_local_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
-        """Return cached :class:`LocalSnapshot` for a snapshots directory."""
-        return LocalSnapshot(snapshots_dir=snapshots_dir)
+        """Return cached ``LocalSnapshot`` rooted at workspace snapshots dir."""
+        return self._make_local_snapshot(workspace=workspace)
 
     def _dispatch(
         self, work_unit: WorkUnit, dependencies: set[SlurmJob], workspace: Workspace, snapshot: LocalSnapshot
@@ -128,28 +119,38 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         work_unit_repr = work_unit.root.task_hash().short_b32()
         resources = work_unit.resources
 
-        sbatch_cmd: list[str] = [_resolve_slurm_cmd("sbatch"), "--parsable"]
-        sbatch_cmd.extend(["--job-name", f"misen-{work_unit_repr}"])
-        sbatch_cmd.extend(["--ntasks-per-node", "1"])
-        sbatch_cmd.extend(["--nodes", str(resources.nodes)])
-        sbatch_cmd.extend(["--cpus-per-task", str(resources.cpus)])
-        sbatch_cmd.extend(["--mem", f"{resources.memory}G"])
-        sbatch_cmd.extend(["--time", str(resources.time or 1)])
-
-        resolved_default_flags = dict(self.default_flags)
-        if self.partition is not None:
-            resolved_default_flags["partition"] = self.partition
-        if self.account is not None:
-            resolved_default_flags["account"] = self.account
-        if self.qos is not None:
-            resolved_default_flags["qos"] = self.qos
-        if self.constraint is not None:
-            resolved_default_flags["constraint"] = self.constraint
-
+        sbatch_cmd: list[str] = [
+            _resolve_slurm_cmd("sbatch"),
+            "--parsable",
+            "--job-name",
+            f"misen-{work_unit_repr}",
+            "--ntasks-per-node",
+            "1",
+            "--nodes",
+            str(resources.nodes),
+            "--cpus-per-task",
+            str(resources.cpus),
+            "--mem",
+            f"{resources.memory}G",
+            "--time",
+            str(resources.time or 1),
+        ]
         sbatch_cmd.extend(
             _resolve_dynamic_sbatch_flags(
                 resources=resources,
-                default_flags=resolved_default_flags,
+                default_flags={
+                    **self.default_flags,
+                    **{
+                        key: value
+                        for key, value in (
+                            ("partition", self.partition),
+                            ("account", self.account),
+                            ("qos", self.qos),
+                            ("constraint", self.constraint),
+                        )
+                        if value is not None
+                    },
+                },
                 rules=self.rules,
             )
         )
@@ -171,7 +172,7 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         sbatch_cmd.extend(["--output", str(job_log_path)])
 
         sbatch_cmd.extend(["--export", "ALL"])
-        env_prefix = ["env", *[f"{k}={v}" for k, v in env_overrides.items()]]
+        env_prefix = ["env", *(f"{key}={value}" for key, value in env_overrides.items())]
         sbatch_cmd.extend(["--wrap", shlex.join([*env_prefix, *argv])])
 
         try:

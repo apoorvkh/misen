@@ -117,7 +117,8 @@ class Task(FrozenMixin, Generic[R]):
         label = self.properties.id
         if argument_items:
             label = f"{label}({', '.join(argument_items)})"
-        label = f"{label} [{self.task_hash().short_b32()}]"
+        task_hash = self.task_hash()
+        label = f"{label} [{task_hash.short_b32()}]"
         return f"Task({label}){' [C]' if self.properties.cache else ''}"
 
     @staticmethod
@@ -179,7 +180,11 @@ class Task(FrozenMixin, Generic[R]):
         Yields:
             Immediate dependency tasks that need computation.
         """
-        return filter(lambda t: t.properties.cache and not t.is_cached(workspace=workspace), self.dependencies)
+        return (
+            dependency
+            for dependency in self.dependencies
+            if dependency.properties.cache and not dependency.is_cached(workspace=workspace)
+        )
 
     def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
         """Return whether all immediate cacheable dependencies are available.
@@ -308,11 +313,8 @@ class Task(FrozenMixin, Generic[R]):
             )
 
         save_task_result(task=self, result=result, workspace=workspace)
-        if (
-            (not self.properties.cache or self.properties.cleanup_work_dir)
-            and work_dir is not None
-            and work_dir.exists()
-        ):
+        should_cleanup = not self.properties.cache or self.properties.cleanup_work_dir
+        if should_cleanup and work_dir is not None and work_dir.exists():
             shutil.rmtree(work_dir)
 
         return result

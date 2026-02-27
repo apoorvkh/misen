@@ -462,18 +462,17 @@ def _build_task_tree(
 
         child_ancestry = set(ancestry)
         child_ancestry.add(task)
-        visible_dependencies: list[Task[Any]] = []
+        dependencies: list[Task[Any]] = []
         skipped_shared_dependency = False
         for dependency in sorted(task.dependencies, key=_task_sort_key):
             if not include_task(dependency):
                 continue
             if not show_all and dependency in rendered and dependency not in child_ancestry:
-                used_shared_marker = True
                 skipped_shared_dependency = True
                 continue
-            visible_dependencies.append(dependency)
-
+            dependencies.append(dependency)
         if skipped_shared_dependency:
+            used_shared_marker = True
             line = f"{line} [dim](*)[/dim]"
 
         rendered.add(task)
@@ -482,7 +481,7 @@ def _build_task_tree(
         if max_depth is not None and depth >= max_depth:
             return
 
-        for dependency in visible_dependencies:
+        for dependency in dependencies:
             add_task(
                 child_branch,
                 dependency,
@@ -520,7 +519,6 @@ def _build_task_list_lines(
         done = _task_done(task, workspace)
         if incomplete_only and done:
             continue
-
         lines.append(f"{_status_indicator(done=done)} {_task_display_label(task)}")
 
     return lines
@@ -649,7 +647,6 @@ def _result_task(args: Any) -> str | None:
 def _execute_command(*, args: Any, console: Console) -> None:
     """Execute resolved experiment CLI command."""
     command_name = _command_name(args.command)
-
     match command_name:
         case "run":
             executor = _resolve_executor(args)

@@ -269,30 +269,22 @@ def runtime_progress(description: str, *, total: int) -> Iterator[Callable[[int]
 
 def runtime_job_pending(job_key: int, label: str) -> None:
     """Register one pending local job in the live status board."""
-    if not _events_enabled() or not _job_board_enabled():
-        return
-    _JOB_BOARD.pending(job_key, label=label)
+    _job_board_action(_JOB_BOARD.pending, job_key, label=label)
 
 
 def runtime_job_running(job_key: int, *, job_id: str | None, pid: int | None) -> None:
     """Mark one local job as running in the live status board."""
-    if not _events_enabled() or not _job_board_enabled():
-        return
-    _JOB_BOARD.running(job_key, job_id=job_id, pid=pid)
+    _job_board_action(_JOB_BOARD.running, job_key, job_id=job_id, pid=pid)
 
 
 def runtime_job_done(job_key: int) -> None:
     """Mark one local job as complete in the live status board."""
-    if not _events_enabled() or not _job_board_enabled():
-        return
-    _JOB_BOARD.done(job_key)
+    _job_board_action(_JOB_BOARD.done, job_key)
 
 
 def runtime_job_failed(job_key: int) -> None:
     """Mark one local job as failed in the live status board."""
-    if not _events_enabled() or not _job_board_enabled():
-        return
-    _JOB_BOARD.failed(job_key)
+    _job_board_action(_JOB_BOARD.failed, job_key)
 
 
 def runtime_job_summary_lines(rows: list[RuntimeJobSummary]) -> list[str]:
@@ -378,13 +370,27 @@ def _split_hash_suffix(label: str) -> tuple[str, str | None]:
 
 
 def _events_enabled() -> bool:
-    value = os.getenv("MISEN_RUNTIME_EVENTS", "1").strip().lower()
-    return value not in _FALSEY
+    return _env_toggle_enabled("MISEN_RUNTIME_EVENTS")
 
 
 def _job_board_enabled() -> bool:
-    value = os.getenv(_JOB_BOARD_ENV, "1").strip().lower()
+    return _env_toggle_enabled(_JOB_BOARD_ENV)
+
+
+def _env_toggle_enabled(env_name: str, default: str = "1") -> bool:
+    value = os.getenv(env_name, default).strip().lower()
     return value not in _FALSEY
+
+
+def _job_board_action(
+    action: Callable[..., None],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    if not _events_enabled() or not _job_board_enabled():
+        return
+    action(*args, **kwargs)
 
 
 def _job_detail_suffix(*, job_id: str | None, pid: int | None) -> str:

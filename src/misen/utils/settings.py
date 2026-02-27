@@ -128,15 +128,19 @@ class FromSettingsABC(msgspec.Struct, dict=True, metaclass=FromSettingsMeta):
             Resolved component instance.
         """
         key = cls._settings_key()
+        toml_data = settings.toml_data
+        type_key = f"{key}_type"
+        kwargs_key = f"{key}_kwargs"
 
-        if f"{key}_type" not in settings.toml_data:
+        type_name = toml_data.get(type_key)
+        if type_name is None:
             return cls._default()
-        if not isinstance(settings.toml_data[f"{key}_type"], str):
+        if not isinstance(type_name, str):
             msg = f"Invalid type name for {key} in {settings.file}"
             raise TypeError(msg)
 
-        class_type = cls._resolve_type(settings.toml_data[f"{key}_type"])
-        class_kwargs = settings.toml_data.get(f"{key}_kwargs", {})
+        class_type = cls._resolve_type(type_name)
+        class_kwargs = toml_data.get(kwargs_key, {})
         if not isinstance(class_kwargs, dict):
             msg = f"Invalid kwargs for {key} in {settings.file}: expected table/dict."
             raise TypeError(msg)

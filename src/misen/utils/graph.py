@@ -134,25 +134,24 @@ class DependencyGraph(Generic[T]):
             """Write a line to the target stream."""
             stream.write(f"{text}\n")
 
-        def sort_key(x: T) -> str:
-            """Return a deterministic sort key for nodes."""
-            # Deterministic ordering even for unorderable node types
-            return str(x)
+        def sort_key(node: T) -> str:
+            """Return deterministic sort key for pretty-print ordering."""
+            # Deterministic ordering even for unorderable node types.
+            return str(node)
 
-        # Collect all nodes + dependencies
         all_nodes: list[T] = []
-        all_deps: set[T] = set()
+        all_dependencies: set[T] = set()
         adjacency: dict[T, list[T]] = {}
         for node_index in self._g.node_indices():
             node = self[node_index]
-            deps = list(self._g.successors(node_index))
-            adjacency[node] = deps
+            dependencies = list(self._g.successors(node_index))
+            adjacency[node] = dependencies
             all_nodes.append(node)
-            all_deps.update(deps)
+            all_dependencies.update(dependencies)
 
         if roots is None:
             # Roots are nodes that are not a dependency of any other node (no incoming edges)
-            roots = [n for n in all_nodes if n not in all_deps]
+            roots = [node for node in all_nodes if node not in all_dependencies]
             roots.sort(key=sort_key)
 
         printed: set[T] = set()

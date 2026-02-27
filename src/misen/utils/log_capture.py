@@ -63,6 +63,20 @@ def _join_until(th: threading.Thread, deadline: float) -> None:
     th.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
+def _validate_capture_target(target: TextIO, old_stdout: TextIO, old_stderr: TextIO) -> None:
+    """Validate capture target to avoid recursive stdout/stderr loops."""
+    if target is old_stdout or target is old_stderr:
+        msg = "capture_all_output: `target` must not be sys.stdout/sys.stderr (would recurse)"
+        raise ValueError(msg)
+
+    fileno = _try(getattr, target, "fileno")
+    if callable(fileno):
+        fd = _try(fileno)
+        if fd in (1, 2):
+            msg = "capture_all_output: `target` must not write to fd 1/2 (would recurse)"
+            raise ValueError(msg)
+
+
 @contextlib.contextmanager
 def capture_all_output(  # noqa: PLR0915
     target: TextIO,
@@ -93,21 +107,8 @@ def capture_all_output(  # noqa: PLR0915
     old_stdout, old_stderr = sys.stdout, sys.stderr
     lock = threading.Lock()
 
-    # --- guard against recursion / feedback loops ---
-    # Case 1: explicitly passing current stdout/stderr objects
-    if target is old_stdout or target is old_stderr:
-        msg = "capture_all_output: `target` must not be sys.stdout/sys.stderr (would recurse)"
-        raise ValueError(msg)
-
-    # Case 2: target ultimately writes to fd 1 or 2 (e.g. TextIOWrapper over stdout)
-    # Best-effort: if it quacks like a file descriptor and is 1/2, refuse.
-    fileno = _try(getattr, target, "fileno")
-    if callable(fileno):
-        fd = _try(fileno)
-        if fd in (1, 2):
-            msg = "capture_all_output: `target` must not write to fd 1/2 (would recurse)"
-            raise ValueError(msg)
-    # --- end guard ---
+    # Guard against recursion/feedback loops.
+    _validate_capture_target(target, old_stdout, old_stderr)
 
     # Flush before redirecting
     _try(old_stdout.flush)
@@ -203,16 +204,13 @@ def capture_all_output(  # noqa: PLR0915
         _join_until(t, deadline)
 
         if t.is_alive():
-            # Best-effort: drain what is available, then stop.
+            # Best-effort: drain what is currently available, then stop.
             _try(os.set_blocking, rfd, blocking=False)
-
             dec = _make_decoder(encoding)
             while time.monotonic() < deadline:
                 try:
                     chunk = os.read(rfd, 8192)
-                except BlockingIOError:
-                    break
-                except OSError:
+                except (BlockingIOError, OSError):
                     break
                 if not chunk:
                     break

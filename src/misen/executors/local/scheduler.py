@@ -112,8 +112,8 @@ class LocalScheduler(msgspec.Struct, dict=True):
             allocations = self._reserve_indices(job.resources)
             if allocations is None:
                 continue
-            cpu_indices, gpu_indices = allocations
 
+            cpu_indices, gpu_indices = allocations
             try:
                 self._launch_job(job, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
             except (OSError, RuntimeError, ValueError):

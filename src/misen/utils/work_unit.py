@@ -63,10 +63,11 @@ class WorkUnit:
         # Compute one scheduler request that satisfies every task in the unit.
         from misen.task_properties import Resources
 
-        _resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
-
-        gpu_runtimes = cast("set[GpuRuntime]", {r.gpu_runtime for r in _resource_list if r.gpus > 0})
-
+        resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
+        gpu_runtimes = cast(
+            "set[GpuRuntime]",
+            {resource.gpu_runtime for resource in resource_list if resource.gpus > 0},
+        )
         match len(gpu_runtimes):
             case 0:
                 gpu_runtime = "cuda"
@@ -79,17 +80,17 @@ class WorkUnit:
         self.resources = Resources(
             time=(
                 None
-                if any(r.time is None for r in _resource_list)
-                else sum(cast("int", r.time) for r in _resource_list)
+                if any(resource.time is None for resource in resource_list)
+                else sum(cast("int", resource.time) for resource in resource_list)
             ),
-            nodes=max(r.nodes for r in _resource_list),
-            memory=max(r.memory for r in _resource_list),
-            cpus=max(r.cpus for r in _resource_list),
-            gpus=max(r.gpus for r in _resource_list),
+            nodes=max(resource.nodes for resource in resource_list),
+            memory=max(resource.memory for resource in resource_list),
+            cpus=max(resource.cpus for resource in resource_list),
+            gpus=max(resource.gpus for resource in resource_list),
             gpu_memory=(
                 None
-                if all(r.gpu_memory is None for r in _resource_list)
-                else max(r.gpu_memory for r in _resource_list if r.gpu_memory is not None)
+                if all(resource.gpu_memory is None for resource in resource_list)
+                else max(resource.gpu_memory for resource in resource_list if resource.gpu_memory is not None)
             ),
             gpu_runtime=gpu_runtime,
         )
@@ -145,15 +146,19 @@ class WorkUnit:
         ordered_tasks: list[Task[Any]] = list(graph)
         for i, task in enumerate(ordered_tasks):
             # Keep only transient results still needed by future in-unit tasks.
-            remaining_deps = {d for t in ordered_tasks[i:] for d in t.dependencies}
+            remaining_deps = {
+                dependency
+                for remaining_task in ordered_tasks[i:]
+                for dependency in remaining_task.dependencies
+            }
             task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
 
             # Rebuild the task with resolved in-unit non-cacheable dependencies.
             # Cacheable dependencies are still loaded through Workspace in Task.result.
             task_results[task] = Task(
                 task.func,
-                *(resolve_arg(dep) for dep in task.args),
-                **{k: resolve_arg(dep) for k, dep in task.kwargs.items()},
+                *(resolve_arg(arg) for arg in task.args),
+                **{name: resolve_arg(arg) for name, arg in task.kwargs.items()},
             ).result(
                 workspace=workspace,
                 compute_if_uncached=True,

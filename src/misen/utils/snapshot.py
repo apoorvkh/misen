@@ -160,7 +160,11 @@ class LocalSnapshot(Snapshot):
         # 2) install workspace members non-editably without cache
         try:
             subprocess.run(  # noqa: S603
-                [self.uv_bin, "sync", "--no-install-workspace"], check=True, capture_output=True, text=True, env=env
+                [self.uv_bin, "sync", "--no-install-workspace"],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
             )
             subprocess.run(  # noqa: S603
                 [self.uv_bin, "sync", "--no-editable", "--no-cache"],

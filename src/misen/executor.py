@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from functools import cache
 from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast, get_args
 
 from typing_extensions import assert_never
 
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, work_unit_label
 from misen.utils.settings import FromSettingsABC
+from misen.utils.snapshot import LocalSnapshot
 from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
@@ -76,12 +78,13 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         jobs: dict[WorkUnit, CompletedJob | JobT] = {
             w: CompletedJob(work_unit=w) for w in work_units if w.done(workspace=workspace)
         }
+        pending_work_units = [work_unit for work_unit in work_units if work_unit not in jobs]
 
         num_complete = len(jobs)
-        num_dispatch = len(work_units) - num_complete
+        num_dispatch = len(pending_work_units)
         executor_name = self.__class__.__name__
 
-        if num_dispatch > 0:
+        if pending_work_units:
             started_at = time.perf_counter()
             try:
                 with runtime_activity("Creating a snapshot of the project environment", style="yellow"):
@@ -96,15 +99,16 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
             runtime_event(f"Created a snapshot of the project environment in {elapsed_s:.2f}s", style="green")
 
             with runtime_progress(f"Submitting work units to {executor_name}", total=num_dispatch) as progress_bar:
-                for w in work_units:
-                    if w in jobs:
-                        continue
-
+                for work_unit in pending_work_units:
                     started_at = time.perf_counter()
                     try:
-                        dependencies = {jobs[d] for d in w.dependencies if not isinstance(jobs[d], CompletedJob)}
-                        jobs[w] = self._dispatch(
-                            work_unit=w,
+                        dependencies = {
+                            jobs[dependency]
+                            for dependency in work_unit.dependencies
+                            if not isinstance(jobs[dependency], CompletedJob)
+                        }
+                        jobs[work_unit] = self._dispatch(
+                            work_unit=work_unit,
                             dependencies=dependencies,
                             workspace=workspace,
                             snapshot=snapshot,
@@ -112,7 +116,8 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
                     except Exception:
                         elapsed_s = time.perf_counter() - started_at
                         runtime_event(
-                            (f"Dispatch failed for {work_unit_label(w)} in {elapsed_s:.2f}s"), style="bold red"
+                            (f"Dispatch failed for {work_unit_label(work_unit)} in {elapsed_s:.2f}s"),
+                            style="bold red",
                         )
                         raise
                     progress_bar(1)
@@ -162,6 +167,17 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         Returns:
             A Job handle that can be queried for execution state.
         """
+
+    def _make_local_snapshot(self, workspace: Workspace) -> LocalSnapshot:
+        """Return cached :class:`LocalSnapshot` rooted at workspace temp dir."""
+        snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
+        return self._cached_local_snapshot(snapshots_dir=snapshots_dir)
+
+    @classmethod
+    @cache
+    def _cached_local_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
+        """Return cached local snapshot for one directory."""
+        return LocalSnapshot(snapshots_dir=snapshots_dir)
 
     @staticmethod
     def _settings_key() -> str:

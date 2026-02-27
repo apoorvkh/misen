@@ -72,15 +72,15 @@ def main(argv: list[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
     if not args_list or args_list[0] in {"-h", "--help"}:
         try:
-            tyro.cli(cast(Any, TopLevelCommand), args=["--help"])
+            tyro.cli(cast("Any", TopLevelCommand), args=["--help"])
         except SystemExit as exc:
             return _system_exit_code(exc)
         return 0
 
     parsed, unknown_args = cast(
-        tuple[object, list[str]],
+        "tuple[object, list[str]]",
         tyro.cli(
-            cast(Any, TopLevelCommand),
+            cast("Any", TopLevelCommand),
             args=args_list,
             return_unknown_args=True,
             add_help=False,
