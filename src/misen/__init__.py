@@ -10,6 +10,8 @@ This package is intentionally split into a small set of composable concepts:
 Most user code only needs the symbols re-exported here.
 """
 
+import logging
+
 from misen.executor import Executor
 from misen.experiment import Experiment
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
@@ -18,9 +20,17 @@ from misen.tasks import Task
 from misen.utils.settings import Settings
 from misen.workspace import Workspace
 
+TRACE_LEVEL = logging.DEBUG - 5
+
+if logging.getLevelName(TRACE_LEVEL) != "TRACE":
+    logging.addLevelName(TRACE_LEVEL, "TRACE")
+
+logging.getLogger("misen").addHandler(logging.NullHandler())
+
 __all__ = [
     "ASSIGNED_RESOURCES",
     "ASSIGNED_RESOURCES_PER_NODE",
+    "TRACE_LEVEL",
     "WORK_DIR",
     "Executor",
     "Experiment",

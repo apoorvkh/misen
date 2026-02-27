@@ -14,6 +14,7 @@ and lock-based safety for concurrent producers.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import shutil
 import tempfile
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
+logger = logging.getLogger(__name__)
 
 
 class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
@@ -268,6 +270,7 @@ class DiskWorkspace(Workspace):
             result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self._directory / "result_hash_cache.mdb"),
             result_store=DiskResultStore(self._directory / "results"),
         )
+        logger.info("Initialized DiskWorkspace at %s.", self._directory.resolve())
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
         """Return NFS-backed lock for task/result namespaces.
@@ -306,6 +309,7 @@ class DiskWorkspace(Workspace):
         key_str = task.resolved_hash(workspace=self).b32()
         d = Path(self._directory) / "work" / key_str[:2] / f"{key_str}"
         d.mkdir(parents=True, exist_ok=True)
+        logger.debug("Resolved work dir for task %s: %s.", task, d)
         return d
 
     def open_task_log(
@@ -350,7 +354,15 @@ class DiskWorkspace(Workspace):
                     raise FileNotFoundError(msg)
                 timestamp = "current"
 
-        job_id = job_id or "0"
-        timestamp = time_ns() if timestamp == "current" else timestamp
-
-        return (log_dir / f"{key_str}_{job_id}_{timestamp}.log").open(mode, buffering=1)
+        selected_job_id = job_id or "0"
+        selected_timestamp = time_ns() if timestamp == "current" else timestamp
+        log_path = log_dir / f"{key_str}_{selected_job_id}_{selected_timestamp}.log"
+        logger.debug(
+            "Opening task log for %s at %s (mode=%s, job_id=%s, timestamp=%s).",
+            task,
+            log_path,
+            mode,
+            selected_job_id,
+            selected_timestamp,
+        )
+        return log_path.open(mode, buffering=1)

@@ -14,6 +14,7 @@ behavior lives in backend modules under :mod:`misen.executors`.
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from functools import cache
@@ -40,6 +41,7 @@ __all__ = ["Executor", "Job"]
 ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
 JobT = TypeVar("JobT", bound="Job")
 SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
+logger = logging.getLogger(__name__)
 
 
 class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
@@ -74,6 +76,13 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
         """
         work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
         work_units = list(work_graph)
+        executor_name = self.__class__.__name__
+        logger.info(
+            "%s received %d root task(s); built %d work unit(s).",
+            executor_name,
+            len(tasks),
+            len(work_units),
+        )
 
         jobs: dict[WorkUnit, CompletedJob | JobT] = {
             w: CompletedJob(work_unit=w) for w in work_units if w.done(workspace=workspace)
@@ -82,20 +91,28 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
 
         num_complete = len(jobs)
         num_dispatch = len(pending_work_units)
-        executor_name = self.__class__.__name__
+        logger.debug(
+            "%s found %d complete work unit(s) and %d pending work unit(s).",
+            executor_name,
+            num_complete,
+            num_dispatch,
+        )
 
         if pending_work_units:
+            logger.info("%s creating snapshot for %d pending work unit(s).", executor_name, num_dispatch)
             started_at = time.perf_counter()
             try:
                 with runtime_activity("Creating a snapshot of the project environment", style="yellow"):
                     snapshot = self._make_snapshot(workspace=workspace)
             except Exception:
                 elapsed_s = time.perf_counter() - started_at
+                logger.exception("%s failed to create a snapshot after %.2fs.", executor_name, elapsed_s)
                 runtime_event(
                     f"Failed to create a snapshot of the project environment in {elapsed_s:.2f}s", style="bold red"
                 )
                 raise
             elapsed_s = time.perf_counter() - started_at
+            logger.info("%s created snapshot in %.2fs.", executor_name, elapsed_s)
             runtime_event(f"Created a snapshot of the project environment in {elapsed_s:.2f}s", style="green")
 
             with runtime_progress(f"Submitting work units to {executor_name}", total=num_dispatch) as progress_bar:
@@ -107,14 +124,34 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
                             for dependency in work_unit.dependencies
                             if not isinstance(jobs[dependency], CompletedJob)
                         }
-                        jobs[work_unit] = self._dispatch(
+                        logger.debug(
+                            "%s dispatching %s with %d dependency job(s).",
+                            executor_name,
+                            work_unit_label(work_unit),
+                            len(dependencies),
+                        )
+                        dispatched_job = self._dispatch(
                             work_unit=work_unit,
                             dependencies=dependencies,
                             workspace=workspace,
                             snapshot=snapshot,
                         )
+                        jobs[work_unit] = dispatched_job
+                        logger.debug(
+                            "%s dispatched %s (job_id=%s) in %.2fs.",
+                            executor_name,
+                            work_unit_label(work_unit),
+                            dispatched_job.job_id or "n/a",
+                            time.perf_counter() - started_at,
+                        )
                     except Exception:
                         elapsed_s = time.perf_counter() - started_at
+                        logger.exception(
+                            "%s failed to dispatch %s after %.2fs.",
+                            executor_name,
+                            work_unit_label(work_unit),
+                            elapsed_s,
+                        )
                         runtime_event(
                             (f"Dispatch failed for {work_unit_label(work_unit)} in {elapsed_s:.2f}s"),
                             style="bold red",
@@ -129,6 +166,12 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
             ),
             style="green bold",
         )
+        logger.info(
+            "%s submitted %d work unit(s) (%d already complete).",
+            executor_name,
+            num_dispatch,
+            num_complete,
+        )
 
         # Keep graph topology and replace each WorkUnit node with its job handle.
         job_graph = cast("DependencyGraph[CompletedJob | JobT]", work_graph.copy())
@@ -136,8 +179,17 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
             job_graph[i] = jobs[work_graph[i]]
 
         if blocking:
-            for job in set(job_graph.nodes()):
+            blocking_jobs = set(job_graph.nodes())
+            logger.info("%s waiting for %d job(s) to reach terminal states.", executor_name, len(blocking_jobs))
+            for job in blocking_jobs:
+                logger.debug(
+                    "%s waiting on %s (job_id=%s).",
+                    executor_name,
+                    work_unit_label(job.work_unit),
+                    job.job_id or "n/a",
+                )
                 job.wait()
+            logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
 
         return job_graph
 

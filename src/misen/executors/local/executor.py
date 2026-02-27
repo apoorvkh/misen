@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import TYPE_CHECKING, Literal
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 
 
 JobState = Literal["pending", "running", "done", "failed", "unknown"]
+logger = logging.getLogger(__name__)
 
 
 class LocalJob(Job):
@@ -81,6 +83,13 @@ class LocalJob(Job):
             self._close_log_fp_locked()
 
             self._state = "done" if rc == 0 else "failed"
+            logger.info(
+                "Local job %s for %s exited with code %d -> state=%s.",
+                self.job_id or "n/a",
+                work_unit_label(self.work_unit),
+                rc,
+                self._state,
+            )
             return self._state
 
     def set_process(self, process: subprocess.Popen[bytes], log_fp: FileIO) -> None:
@@ -89,12 +98,19 @@ class LocalJob(Job):
             self._process = process
             self._log_fp = log_fp
             self._state = "running"
+            logger.info(
+                "Local job %s for %s is running (pid=%d).",
+                self.job_id or "n/a",
+                work_unit_label(self.work_unit),
+                process.pid,
+            )
 
     def mark_failed(self) -> None:
         """Mark pending/running job as failed and close log handles."""
         with self._lock:
             self._close_log_fp_locked()
             self._state = "failed"
+            logger.error("Local job %s for %s marked failed.", self.job_id or "n/a", work_unit_label(self.work_unit))
 
     def _close_log_fp_locked(self) -> None:
         fp = self._log_fp
@@ -148,6 +164,17 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             rocm_gpus=len(rocm_gpu_indices),
             xpu_gpus=len(xpu_gpu_indices),
         )
+        logger.info(
+            (
+                "Initialized LocalExecutor budget: memory=%sGiB cpus=%d cuda_gpus=%d "
+                "rocm_gpus=%d xpu_gpus=%d."
+            ),
+            self._resource_budget.memory,
+            self._resource_budget.cpus,
+            self._resource_budget.cuda_gpus,
+            self._resource_budget.rocm_gpus,
+            self._resource_budget.xpu_gpus,
+        )
         self._scheduler = LocalScheduler(
             self._resource_budget,
             available_cpu_indices=cpu_indices,
@@ -186,6 +213,12 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             dependencies=dependencies,
             snapshot=snapshot,
             workspace=workspace,
+        )
+        logger.debug(
+            "Queued local work unit %s with resources=%s and %d dependency job(s).",
+            work_unit_label(work_unit),
+            resources,
+            len(dependencies),
         )
         runtime_job_pending(id(job), label=work_unit_label(work_unit))
         self._scheduler.submit(job)

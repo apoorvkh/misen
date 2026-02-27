@@ -21,6 +21,7 @@ executor for dependency-aware concurrent scheduling.
 from __future__ import annotations
 
 import itertools
+import logging
 import shutil
 from contextlib import nullcontext
 from inspect import Signature, signature
@@ -49,6 +50,8 @@ __all__ = ["Task"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
+TRACE_LEVEL = logging.DEBUG - 5
+logger = logging.getLogger(__name__)
 
 
 class Task(FrozenMixin, Generic[R]):
@@ -272,22 +275,40 @@ class Task(FrozenMixin, Generic[R]):
         from misen.workspace import Workspace
 
         workspace = Workspace.resolve_auto(workspace)
+        logger.debug(
+            "Resolving task result for %s (cache=%s, compute_if_uncached=%s, compute_uncached_deps=%s, job_id=%s).",
+            self,
+            self.properties.cache,
+            compute_if_uncached,
+            compute_uncached_deps,
+            _job_id or "n/a",
+        )
 
         # Fast path: return cached payload for cacheable tasks.
         if self.properties.cache:
             if (result := workspace.results.get(self)) is not None:
+                logger.log(TRACE_LEVEL, "Cache hit for %s.", self)
                 return result
 
+            logger.log(TRACE_LEVEL, "Cache miss for %s.", self)
             if not compute_if_uncached:
                 msg = f"{self} is not cached."
+                logger.warning("Task result requested without compute_if_uncached and cache is missing for %s.", self)
                 raise RuntimeError(msg)
 
         # Guardrail: only recurse into dependencies when explicitly requested.
         if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
             uncached_deps = list(self.uncached_deps(workspace=workspace))
+            logger.debug(
+                "Task %s has %d uncached dependency(ies) while compute_uncached_deps is disabled.",
+                self,
+                len(uncached_deps),
+            )
             msg = f"{self} has dependencies which must be computed and cached first: {uncached_deps}"
             raise RuntimeError(msg)
 
+        if self.dependencies:
+            logger.debug("Resolving %d dependency result(s) for %s.", len(self.dependencies), self)
         dependency_results: dict[Task[Any], Any] = {
             dependency: dependency.result(
                 workspace=workspace,
@@ -303,6 +324,8 @@ class Task(FrozenMixin, Generic[R]):
             self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
         )
 
+        if self.properties.cache:
+            logger.debug("Acquiring runtime lock for %s.", self)
         with lock_context:
             result, work_dir = execute_task(
                 task=self,
@@ -313,9 +336,11 @@ class Task(FrozenMixin, Generic[R]):
             )
 
         save_task_result(task=self, result=result, workspace=workspace)
+        logger.debug("Persisted task result metadata for %s.", self)
         should_cleanup = not self.properties.cache or self.properties.cleanup_work_dir
         if should_cleanup and work_dir is not None and work_dir.exists():
             shutil.rmtree(work_dir)
+            logger.debug("Removed work directory for %s at %s.", self, work_dir)
 
         return result
 

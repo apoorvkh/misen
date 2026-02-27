@@ -11,6 +11,7 @@ This module centralizes the mechanics used by :class:`misen.tasks.Task`:
 from __future__ import annotations
 
 import itertools
+import logging
 import tempfile
 import time
 from pathlib import Path
@@ -42,6 +43,7 @@ __all__ = [
 ]
 
 R = TypeVar("R")
+logger = logging.getLogger(__name__)
 
 
 def iter_nested_leaves(value: Any) -> Iterator[Any]:
@@ -192,6 +194,7 @@ def execute_task(
         Task result value plus the runtime work directory used (if any).
     """
     task_name = task_label(task)
+    logger.info("Task started: %s (job_id=%s).", task_name, job_id or "n/a")
     runtime_event(f"Task started: {task_name} (job_id={job_id or 'n/a'})", style="yellow")
     started_at = time.perf_counter()
 
@@ -209,12 +212,14 @@ def execute_task(
                 kwargs = {name: argument_resolver(value) for name, value in task.kwargs.items()}
                 result = task.func(*args, **kwargs)
     except Exception:
+        logger.exception("Task failed: %s after %.2fs.", task_name, time.perf_counter() - started_at)
         runtime_event(
             f"Task failed: {task_name} in {(time.perf_counter() - started_at):.2f}s",
             style="bold red",
         )
         raise
 
+    logger.info("Task finished: %s in %.2fs.", task_name, time.perf_counter() - started_at)
     runtime_event(f"Task finished: {task_name} in {(time.perf_counter() - started_at):.2f}s", style="green")
     return cast("R", result), work_directory
 
@@ -235,12 +240,14 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
         case _:
             assert_never(task.properties.index_by)
 
+    logger.debug("Persisting result hash for %s using index_by=%s.", task, task.properties.index_by)
     workspace.set_result_hash(task, ResultHash.from_object(index))
 
     if task.properties.cache:
         try:
             workspace.results[task] = result
         except Exception:
+            logger.exception("Failed while persisting cached result payload for %s; rolling back hash metadata.", task)
             del workspace.results[task]
             workspace.clear_result_hash(task=task)
             raise

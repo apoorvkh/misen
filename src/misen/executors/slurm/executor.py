@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import operator
 import shlex
 import shutil
@@ -47,6 +48,7 @@ _SLURM_STATE_MAP: dict[str, Literal["pending", "running", "failed", "done"]] = {
     ),
     "COMPLETED": "done",
 }
+logger = logging.getLogger(__name__)
 
 
 class SlurmJob(Job):
@@ -118,6 +120,11 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         """
         work_unit_repr = work_unit.root.task_hash().short_b32()
         resources = work_unit.resources
+        logger.info(
+            "Submitting SLURM work unit %s with %d dependency job(s).",
+            work_unit_label(work_unit),
+            len(dependencies),
+        )
 
         sbatch_cmd: list[str] = [
             _resolve_slurm_cmd("sbatch"),
@@ -174,18 +181,27 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         sbatch_cmd.extend(["--export", "ALL"])
         env_prefix = ["env", *(f"{key}={value}" for key, value in env_overrides.items())]
         sbatch_cmd.extend(["--wrap", shlex.join([*env_prefix, *argv])])
+        logger.debug("sbatch command for %s: %s", work_unit_label(work_unit), shlex.join(sbatch_cmd))
 
         try:
             result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603
         except subprocess.CalledProcessError as e:
+            logger.exception("sbatch failed while submitting %s.", work_unit_label(work_unit))
             msg = f"sbatch failed: {(e.stderr or e.stdout or '').strip()}"
             raise RuntimeError(msg) from e
 
         out = result.stdout.strip()
         slurm_job_id = out.split(";", 1)[0].split(None, 1)[0]
         if not slurm_job_id.isdigit():
+            logger.error("Unexpected sbatch output for %s: %s", work_unit_label(work_unit), out)
             msg = f"Unexpected sbatch output: {out!r}"
             raise RuntimeError(msg)
+        logger.info(
+            "Submitted SLURM work unit %s (job_id=%s, slurm_job_id=%s).",
+            work_unit_label(work_unit),
+            job_id,
+            slurm_job_id,
+        )
         runtime_event(
             (f"SLURM job submitted: {work_unit_label(work_unit)} (job_id={job_id}, slurm_job_id={slurm_job_id})"),
             style="green",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import threading
@@ -37,6 +38,7 @@ class LocalScheduler(msgspec.Struct, dict=True):
     available_cuda_gpu_indices: list[int]
     available_rocm_gpu_indices: list[int]
     available_xpu_gpu_indices: list[int]
+    _logger = logging.getLogger(__name__)
 
     def __post_init__(self) -> None:
         """Initialize the scheduler."""
@@ -45,11 +47,18 @@ class LocalScheduler(msgspec.Struct, dict=True):
         self._condition = threading.Condition()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        self._logger.info("Started LocalScheduler background thread.")
 
     def submit(self, job: LocalJob) -> None:
         """Queue a job for scheduling."""
         with self._condition:
             self._pending.append(job)
+            self._logger.debug(
+                "Queued job for %s (pending=%d, running=%d).",
+                job.work_unit,
+                len(self._pending),
+                len(self._running),
+            )
             self._condition.notify_all()
 
     def _run(self) -> None:
@@ -86,8 +95,10 @@ class LocalScheduler(msgspec.Struct, dict=True):
             self.available_budget = self.available_budget.add(job.resources)
             self._release_allocations(job.assigned_cpu_indices, job.resources.gpu_runtime, job.assigned_gpu_indices)
             if state == "done":
+                self._logger.info("LocalScheduler observed job completion for %s.", job.work_unit)
                 runtime_job_done(id(job))
             elif state == "failed":
+                self._logger.error("LocalScheduler observed job failure for %s.", job.work_unit)
                 runtime_job_failed(id(job))
 
         self._condition.notify_all()
@@ -132,6 +143,7 @@ class LocalScheduler(msgspec.Struct, dict=True):
         """Return whether all job dependencies are complete and successful."""
         states = {dep.state() for dep in job.dependencies}
         if "failed" in states:
+            self._logger.error("Dependency failed; marking pending job failed for %s.", job.work_unit)
             self._mark_pending_failed(job)
             return False
         return not states or states == {"done"}
@@ -154,6 +166,14 @@ class LocalScheduler(msgspec.Struct, dict=True):
 
         job.log_path = job.workspace.get_job_log(job_id=job.job_id, work_unit=job.work_unit)
         log_fp = job.log_path.open("ab", buffering=0)
+        self._logger.debug(
+            "Launching local subprocess for %s with job_id=%s cpu_indices=%s gpu_indices=%s log=%s.",
+            job.work_unit,
+            job.job_id,
+            cpu_indices,
+            gpu_indices,
+            job.log_path,
+        )
         try:
             process = subprocess.Popen(  # noqa: S603
                 argv,
@@ -169,6 +189,12 @@ class LocalScheduler(msgspec.Struct, dict=True):
         job.set_process(process, log_fp=log_fp)
         job.assigned_cpu_indices = cpu_indices
         job.assigned_gpu_indices = gpu_indices
+        self._logger.info(
+            "Launched local subprocess for %s (job_id=%s, pid=%d).",
+            job.work_unit,
+            job.job_id,
+            process.pid,
+        )
         runtime_job_running(id(job), job_id=job.job_id, pid=process.pid)
 
     def _reserve_indices(self, resources: Resources) -> tuple[list[int], list[int]] | None:
@@ -204,6 +230,7 @@ class LocalScheduler(msgspec.Struct, dict=True):
         job.mark_failed()
         if job in self._pending:
             self._pending.remove(job)
+        self._logger.error("Marked pending local job failed for %s.", job.work_unit)
         runtime_job_failed(id(job))
 
     def _gpu_index_pool(self, gpu_runtime: GpuRuntime) -> list[int]:

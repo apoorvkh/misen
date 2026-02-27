@@ -13,6 +13,7 @@ entry points (`run`, `result`, `cli`) for end users.
 
 from __future__ import annotations
 
+import logging
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import cache
@@ -30,6 +31,7 @@ __all__ = ["Experiment"]
 
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task], default=Mapping[str, Task[Any]])
+logger = logging.getLogger(__name__)
 
 
 class Experiment(Struct, Generic[TasksT], frozen=True):
@@ -98,7 +100,15 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
         """
         workspace = Workspace.resolve_auto(workspace)
         executor = Executor.resolve_auto(executor)
-        executor.submit(tasks=set(self.tasks().values()), workspace=workspace)
+        experiment_tasks = set(self.tasks().values())
+        logger.info(
+            "Running experiment %s with %d task(s) using executor=%s workspace=%s.",
+            self.__class__.__name__,
+            len(experiment_tasks),
+            executor.__class__.__name__,
+            workspace.__class__.__name__,
+        )
+        executor.submit(tasks=experiment_tasks, workspace=workspace)
 
     @classmethod
     def cli(cls) -> None:

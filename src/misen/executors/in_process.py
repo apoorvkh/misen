@@ -6,6 +6,7 @@ Python process (no subprocess spawn, no external scheduler).
 
 from __future__ import annotations
 
+import logging
 from operator import is_
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,8 @@ from misen.utils.work_unit import WorkUnit, build_task_dependency_graph
 
 if TYPE_CHECKING:
     from misen.workspace import Workspace
+
+logger = logging.getLogger(__name__)
 
 
 class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
@@ -41,6 +44,7 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
             Single-node job graph (or empty graph when no tasks were submitted).
         """
         _ = blocking
+        logger.info("InProcessExecutor executing %d root task(s) synchronously.", len(tasks))
         null_work_unit = WorkUnit(root=Task(lambda: None), dependencies=set())
         job_id, _, _ = self._make_snapshot(workspace=workspace).prepare_job(
             null_work_unit, workspace=workspace, assigned_resources_getter=lambda: None, gpu_runtime="cuda"
@@ -53,6 +57,7 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         with apply_env_files_temporarily():
             WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id, assigned_resources=None)
 
+        logger.info("InProcessExecutor finished executing %d task node(s).", len(list(task_graph.node_indices())))
         return DependencyGraph()
 
     def _make_snapshot(self, workspace: Workspace) -> NullSnapshot:

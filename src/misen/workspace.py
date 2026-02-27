@@ -16,6 +16,7 @@ consistent cache/locking contract.
 from __future__ import annotations
 
 import contextlib
+import logging
 import shutil
 from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
@@ -38,6 +39,8 @@ __all__ = ["Workspace"]
 
 
 WorkspaceType: TypeAlias = Literal["disk"]
+TRACE_LEVEL = logging.DEBUG - 5
+logger = logging.getLogger(__name__)
 
 
 class Workspace(FromSettingsABC):
@@ -115,12 +118,16 @@ class Workspace(FromSettingsABC):
         # Fast path: in-memory session cache.
         resolved_hash = self._resolved_hashes.get(task_hash)
         if resolved_hash is not None:
+            logger.log(TRACE_LEVEL, "Resolved-hash memory cache hit for task %s.", task)
             return resolved_hash
         # Slow path: persistent workspace cache.
         resolved_hash = self._resolved_hash_cache.get(task_hash)
         # Promote to session cache after a persistent hit.
         if resolved_hash is not None:
             self._resolved_hashes[task_hash] = resolved_hash
+            logger.log(TRACE_LEVEL, "Resolved-hash persistent cache hit for task %s.", task)
+        else:
+            logger.log(TRACE_LEVEL, "Resolved-hash cache miss for task %s.", task)
         return resolved_hash
 
     def set_resolved_hash(self, task: Task, resolved_hash: ResolvedTaskHash) -> None:
@@ -133,6 +140,7 @@ class Workspace(FromSettingsABC):
         task_hash = task.task_hash()
         self._resolved_hashes[task_hash] = resolved_hash
         self._resolved_hash_cache[task_hash] = resolved_hash
+        logger.debug("Stored resolved hash for task %s.", task)
 
     def get_result_hash(self, task: Task) -> ResultHash:
         """Return the result hash for a completed task.
@@ -144,15 +152,18 @@ class Workspace(FromSettingsABC):
         task_hash = task.task_hash()
         result_hash = self._result_hashes.get(task_hash)
         if result_hash is not None:
+            logger.log(TRACE_LEVEL, "Result-hash memory cache hit for task %s.", task)
             return result_hash
         # Slow path: persistent workspace cache by resolved task identity.
         resolved_hash = task.resolved_hash(workspace=self)
         result_hash = self._result_hash_cache.get(resolved_hash)
         if result_hash is None:
+            logger.log(TRACE_LEVEL, "Result-hash cache miss for task %s.", task)
             msg = f"Task {task} must be computed first."
             raise RuntimeError(msg)
         # Promote to session cache after a persistent hit.
         self._result_hashes[task_hash] = result_hash
+        logger.log(TRACE_LEVEL, "Result-hash persistent cache hit for task %s.", task)
         return result_hash
 
     def set_result_hash(self, task: Task, result_hash: ResultHash) -> None:
@@ -165,6 +176,7 @@ class Workspace(FromSettingsABC):
         self._result_hashes[task.task_hash()] = result_hash
         resolved_hash = task.resolved_hash(workspace=self)
         self._result_hash_cache[resolved_hash] = result_hash
+        logger.debug("Stored result hash for task %s.", task)
 
     def clear_result_hash(self, task: Task) -> None:
         """Remove persisted result-hash mapping for a task.
@@ -175,6 +187,7 @@ class Workspace(FromSettingsABC):
         del self._result_hashes[task.task_hash()]
         resolved_hash = task.resolved_hash(workspace=self)
         del self._result_hash_cache[resolved_hash]
+        logger.debug("Cleared result hash for task %s.", task)
 
     @property
     def results(self) -> ResultMap:
@@ -252,7 +265,9 @@ class Workspace(FromSettingsABC):
         log_dir = self.get_temp_dir() / "job_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         work_unit_prefix = work_unit.root.task_hash().b32()
-        return log_dir / f"{work_unit_prefix}_{job_id}.log"
+        path = log_dir / f"{work_unit_prefix}_{job_id}.log"
+        logger.debug("Resolved job log path for work unit %s: %s.", work_unit, path)
+        return path
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
         """Return iterator over job-log files.
@@ -265,9 +280,11 @@ class Workspace(FromSettingsABC):
         """
         log_dir = self.get_temp_dir() / "job_logs"
         if work_unit is None:
+            logger.debug("Iterating all job logs in %s.", log_dir)
             return log_dir.iterdir()
 
         work_unit_prefix = work_unit.root.task_hash().b32()
+        logger.debug("Iterating job logs in %s for work unit %s.", log_dir, work_unit)
         return log_dir.glob(f"{work_unit_prefix}_*.log")
 
 
@@ -305,6 +322,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         except Exception as e:
             msg = f"Result for task {key} not found in cache."
             raise KeyError(msg) from e
+        logger.debug("Loading cached result for task %s from %s.", key, directory)
         return key.properties.serializer.load(directory)
 
     def __setitem__(self, key: Task[R], value: R, /) -> None:
@@ -317,11 +335,13 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         result_hash = key.result_hash(workspace=self.workspace)
         with self.workspace.lock(namespace="result", key=result_hash.b32()).context(blocking=True, timeout=None):
             if result_hash in self.result_store:
+                logger.debug("Result store already has payload for task %s.", key)
                 return
             tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
             tmp_dir.mkdir(parents=True, exist_ok=True)
             key.properties.serializer.save(value, tmp_dir)
             self.result_store[result_hash] = tmp_dir
+            logger.debug("Stored cached result for task %s at %s.", key, tmp_dir)
             with contextlib.suppress(FileNotFoundError):
                 shutil.rmtree(tmp_dir)
 
@@ -334,6 +354,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         try:
             result_hash = key.result_hash(workspace=self.workspace)
             del self.result_store[result_hash]
+            logger.debug("Deleted cached result payload for task %s.", key)
         except Exception as e:
             msg = f"Result for task {key} not found in cache."
             raise KeyError(msg) from e
