@@ -3,7 +3,7 @@
 This module defines the stable metadata contract used by :class:`misen.tasks.Task`:
 
 - identity and cache behavior (`id`, `exclude`, `defaults`, `versions`)
-- storage strategy (`index_by`, `serializer`)
+- result persistence (`serializer`)
 - execution requirements (`resources`)
 
 The decorator writes this metadata onto function objects, while
@@ -47,7 +47,6 @@ class TaskProperties(Struct, frozen=True):
             when matching.
         versions: Per-argument hash-version overrides used to invalidate stale
             semantics without renaming the task.
-        index_by: How result hashes are derived.
         resources: Callable that computes resource requirements from arguments.
         serializer: Serializer type used to persist cached results.
         cleanup_work_dir: Whether to remove cacheable task work dirs after a
@@ -59,7 +58,6 @@ class TaskProperties(Struct, frozen=True):
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
     versions: dict[tuple[str, ResultHash], int] = {}
-    index_by: Literal["task", "result"] = "result"
     resources: Callable[..., Resources] = lambda *_, **__: Resources()
     serializer: type[Serializer] = DefaultSerializer
     cleanup_work_dir: bool = False
@@ -97,7 +95,6 @@ def task(
     exclude: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
     versions: dict[str, dict[Any, int]] | None = None,
-    index_by: Literal["task", "result"] = "result",
     resources: Callable[..., Resources] | Resources | None = None,
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: tighten generic serializer typing
     cleanup_work_dir: bool = False,
@@ -111,7 +108,6 @@ def task(
         defaults: Argument defaults excluded from task identity when equal.
         versions: Optional argument-value version map used to force hash
             changes for specific semantic revisions.
-        index_by: Hashing strategy for result identity.
         resources: Static resources object or callable from function args to
             resources.
         serializer: Serializer class used for cached results.
@@ -149,8 +145,7 @@ def task(
             cache=cache,
             exclude=(exclude or set()),
             defaults=(defaults or {}),
-            versions=_normalize_versions(versions),
-            index_by=index_by,
+            versions=_normalize_versions(versions=versions),
             resources=resources,
             serializer=serializer,
             cleanup_work_dir=cleanup_work_dir,

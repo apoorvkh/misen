@@ -1,9 +1,9 @@
-"""Handlers for pyarrow objects."""
+"""Handlers for declarative pyarrow schema objects."""
 
 import importlib.util
 from typing import Any
 
-from misen_hash.handler_base import CollectionHandler, HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler
+from misen_hash.handler_base import HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler
 from misen_hash.hash import hash_msgspec
 
 __all__ = ["pyarrow_handlers", "pyarrow_handlers_by_type"]
@@ -37,78 +37,7 @@ if importlib.util.find_spec("pyarrow") is not None:
             return hash_msgspec(_schema_payload(obj))
 
 
-    class PyArrowScalarHandler(CollectionHandler):
-        """Hash pyarrow Scalar objects."""
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            return _has_pyarrow_base(obj, "Scalar")
-
-        @staticmethod
-        def elements(obj: Any) -> list[Any]:
-            return [str(obj.type), obj.as_py()]
-
-
-    class PyArrowArrayHandler(CollectionHandler):
-        """Hash pyarrow Array objects."""
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            return _has_pyarrow_base(obj, "Array")
-
-        @staticmethod
-        def elements(obj: Any) -> list[Any]:
-            return [str(obj.type), obj.to_pylist()]
-
-
-    class PyArrowChunkedArrayHandler(CollectionHandler):
-        """Hash pyarrow ChunkedArray objects."""
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            return _has_pyarrow_base(obj, "ChunkedArray")
-
-        @staticmethod
-        def elements(obj: Any) -> list[Any]:
-            return [str(obj.type), [chunk.to_pylist() for chunk in obj.chunks]]
-
-
-    class PyArrowRecordBatchHandler(CollectionHandler):
-        """Hash pyarrow RecordBatch objects."""
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            return _has_pyarrow_base(obj, "RecordBatch")
-
-        @staticmethod
-        def elements(obj: Any) -> list[Any]:
-            return [_schema_payload(obj.schema), obj.to_pydict()]
-
-
-    class PyArrowTableHandler(CollectionHandler):
-        """Hash pyarrow Table objects."""
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            return _has_pyarrow_base(obj, "Table")
-
-        @staticmethod
-        def elements(obj: Any) -> list[Any]:
-            return [_schema_payload(obj.schema), obj.to_pydict()]
-
-    pyarrow_handlers = [
-        PyArrowSchemaHandler,
-        PyArrowScalarHandler,
-        PyArrowArrayHandler,
-        PyArrowChunkedArrayHandler,
-        PyArrowRecordBatchHandler,
-        PyArrowTableHandler,
-    ]
+    pyarrow_handlers = [PyArrowSchemaHandler]
     pyarrow_handlers_by_type = {
         "pyarrow.lib.Schema": PyArrowSchemaHandler,
-        "pyarrow.lib.Scalar": PyArrowScalarHandler,
-        "pyarrow.lib.Array": PyArrowArrayHandler,
-        "pyarrow.lib.ChunkedArray": PyArrowChunkedArrayHandler,
-        "pyarrow.lib.RecordBatch": PyArrowRecordBatchHandler,
-        "pyarrow.lib.Table": PyArrowTableHandler,
     }
