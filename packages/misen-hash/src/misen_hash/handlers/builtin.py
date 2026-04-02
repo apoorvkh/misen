@@ -6,14 +6,14 @@ import datetime
 import decimal
 import enum
 import fractions
-import functools
 import ipaddress
 import math
 import pathlib
 import re
 import types
 import uuid
-from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
+import zoneinfo
+from collections import ChainMap, Counter, OrderedDict, UserDict, UserList, UserString, defaultdict, deque
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -308,6 +308,20 @@ class PatternHandler(PrimitiveHandler):
         return hash_msgspec((obj.pattern, obj.flags))
 
 
+class ZoneInfoHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, zoneinfo.ZoneInfo)
+
+    @staticmethod
+    def digest(obj: Any) -> int:
+        key = getattr(obj, "key", None)
+        if key is None:
+            msg = "ZoneInfo objects must expose a stable key."
+            raise ValueError(msg)
+        return hash_msgspec(key)
+
+
 class IPAddressHandler(PrimitiveHandler):
     @staticmethod
     def match(obj: Any) -> bool:
@@ -339,27 +353,6 @@ class ArrayHandler(PrimitiveHandler):
         return hash_msgspec((value.typecode, value.tolist()))
 
 
-class PartialHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, functools.partial)
-
-    @staticmethod
-    def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int:
-        if element_hash is None:
-            msg = "PartialHandler requires element_hash."
-            raise ValueError(msg)
-
-        return hash_msgspec(
-            (
-                element_hash(obj.func),
-                [element_hash(arg) for arg in obj.args],
-                _digest_mapping_items((obj.keywords or {}).items(), element_hash=element_hash),
-                _digest_mapping_items(vars(obj).items(), element_hash=element_hash),
-            )
-        )
-
-
 class SimpleNamespaceHandler(Handler):
     @staticmethod
     def match(obj: Any) -> bool:
@@ -368,6 +361,36 @@ class SimpleNamespaceHandler(Handler):
     @staticmethod
     def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int:
         return _digest_mapping_items(vars(obj).items(), element_hash=element_hash)
+
+
+class UserDictHandler(Handler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, UserDict)
+
+    @staticmethod
+    def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int:
+        return _digest_mapping_items(obj.data.items(), element_hash=element_hash)
+
+
+class UserListHandler(CollectionHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, UserList)
+
+    @staticmethod
+    def elements(obj: Any) -> list[Any]:
+        return list(obj.data)
+
+
+class UserStringHandler(PrimitiveHandler):
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, UserString)
+
+    @staticmethod
+    def digest(obj: Any) -> int:
+        return hash_msgspec(str(obj))
 
 
 class ListHandler(CollectionHandler):
@@ -527,10 +550,13 @@ builtin_handlers: HandlerTypeList = [
     SliceHandler,
     PathHandler,
     PatternHandler,
+    ZoneInfoHandler,
     IPAddressHandler,
     ArrayHandler,
-    PartialHandler,
     SimpleNamespaceHandler,
+    UserDictHandler,
+    UserListHandler,
+    UserStringHandler,
     ListHandler,
     DequeHandler,
     OrderedDictHandler,
@@ -575,6 +601,7 @@ _builtin_handlers_by_type: dict[type[Any], type[Handler]] = {
     pathlib.PosixPath: PathHandler,
     pathlib.WindowsPath: PathHandler,
     re.Pattern: PatternHandler,
+    zoneinfo.ZoneInfo: ZoneInfoHandler,
     ipaddress.IPv4Address: IPAddressHandler,
     ipaddress.IPv6Address: IPAddressHandler,
     ipaddress.IPv4Network: IPAddressHandler,
@@ -582,8 +609,10 @@ _builtin_handlers_by_type: dict[type[Any], type[Handler]] = {
     ipaddress.IPv4Interface: IPAddressHandler,
     ipaddress.IPv6Interface: IPAddressHandler,
     array.array: ArrayHandler,
-    functools.partial: PartialHandler,
     types.SimpleNamespace: SimpleNamespaceHandler,
+    UserDict: UserDictHandler,
+    UserList: UserListHandler,
+    UserString: UserStringHandler,
     list: ListHandler,
     tuple: ListHandler,
     set: ListHandler,

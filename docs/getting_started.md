@@ -94,3 +94,8 @@ misen fill src/my_project scripts/fixup.py
 - Cache behavior is controlled on `@task(...)`.
 - `Workspace` stores hashes/results and locks.
 - `Executor` schedules work units derived from cache boundaries.
+
+Task arguments are hashed strictly with explicit handlers only. Prefer strings,
+enums, and `Literal[...]` values for experiment config, and resolve runtime
+objects inside task bodies. Use `exclude` or `versions` when a runtime-only
+argument should not participate directly in task identity.

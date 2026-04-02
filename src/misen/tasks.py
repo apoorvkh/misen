@@ -7,7 +7,8 @@ Core design decisions:
 - Identity is split into:
   - ``task_hash``: structural identity (before dependency resolution)
   - ``resolved_hash``: identity after dependency results are known
-  - ``result_hash``: identity of function result
+  - ``result_hash``: identity of function result when explicitly hashable,
+    otherwise resolved task identity
 - Runtime execution is workspace-driven so caching and locking semantics are
   consistent across local and distributed executors.
 - For a fixed workspace, cacheable tasks execute under a per-task runtime lock
@@ -388,7 +389,8 @@ class Task(FrozenMixin, Generic[R]):
 
         Returns:
             Hash derived from task id plus argument structure, where dependency
-            leaves are represented by dependency task hashes.
+            leaves are represented by dependency task hashes and non-Task
+            values must hash through explicit ``stable_hash`` handlers.
         """
         if hasattr(self, "_task_hash"):
             return self._task_hash
@@ -408,7 +410,8 @@ class Task(FrozenMixin, Generic[R]):
 
         Returns:
             Hash derived from task id plus argument values after dependency
-            resolution.
+            resolution, where dependency leaves are represented by dependency
+            result hashes.
         """
         resolved_hash: ResolvedTaskHash | None = workspace.get_resolved_hash(self)
 
@@ -433,7 +436,9 @@ class Task(FrozenMixin, Generic[R]):
             workspace: Workspace holding task completion metadata.
 
         Returns:
-            Result hash recorded for this task execution.
+            Result hash recorded for this task execution. This indexes by the
+            result value when it has an explicit stable-hash handler,
+            otherwise by the resolved task identity.
 
         Raises:
             RuntimeError: if the task has not been computed / recorded in the workspace.

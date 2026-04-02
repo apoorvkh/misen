@@ -1,4 +1,4 @@
-"""Handlers for nltk tree and grammar objects."""
+"""Handlers for declarative nltk grammar objects."""
 
 import importlib.util
 from typing import Any
@@ -12,19 +12,6 @@ nltk_handlers: HandlerTypeList = []
 nltk_handlers_by_type: HandlerTypeRegistry = {}
 
 if importlib.util.find_spec("nltk") is not None:
-
-    class NLTKTreeHandler(CollectionHandler):
-        """Hash nltk.Tree objects by label and recursive children."""
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            import nltk
-
-            return isinstance(obj, nltk.Tree)
-
-        @staticmethod
-        def elements(obj: Any) -> list[Any]:
-            return [obj.label(), list(obj)]
 
     class NLTKCFGHandler(CollectionHandler):
         """Hash nltk CFG objects by start symbol and productions."""
@@ -42,8 +29,7 @@ if importlib.util.find_spec("nltk") is not None:
                 sorted(str(production) for production in obj.productions()),
             ]
 
-    nltk_handlers = [NLTKTreeHandler, NLTKCFGHandler]
+    nltk_handlers = [NLTKCFGHandler]
     nltk_handlers_by_type = {
-        "nltk.tree.tree.Tree": NLTKTreeHandler,
         "nltk.grammar.CFG": NLTKCFGHandler,
     }

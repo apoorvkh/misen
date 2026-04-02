@@ -54,6 +54,10 @@ if __name__ == "__main__":
 - Cacheable task runtimes are serialized per resolved hash in a workspace.
 - Execution backends only schedule work; storage/locking stays in `Workspace`.
 
+Prefer declarative experiment config values such as strings, enums, and
+`Literal[...]` choices. Resolve runtime objects inside task bodies instead of
+passing them directly as task arguments.
+
 ## More Docs
 
 - [Architecture and design](docs/index.md)

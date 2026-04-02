@@ -25,7 +25,8 @@ Every task instance has three related identities:
 
 - `task_hash`: structure-level identity before dependency resolution.
 - `resolved_hash`: identity after dependency outputs are resolved.
-- `result_hash`: identity of the computed output/index strategy.
+- `result_hash`: identity of the computed output when an explicit stable-hash
+  handler exists, otherwise resolved task identity.
 
 This separation enables:
 
@@ -79,3 +80,7 @@ The model intentionally optimizes for:
 - explicit cache behavior,
 - backend portability,
 - minimal user-facing API complexity.
+
+Experiment parameters should stay declarative. Prefer strings, enums, and
+`Literal[...]` values for config choices, and resolve runtime objects inside
+task code.

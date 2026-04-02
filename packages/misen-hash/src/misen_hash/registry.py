@@ -3,11 +3,19 @@
 from typing import Any
 
 from misen_hash.handler_base import Handler, HandlerTypeList, HandlerTypeRegistry, qualified_type_name
-from misen_hash.handlers.builtin import builtin_handlers, builtin_handlers_by_type
-from misen_hash.handlers.fallback import DillHandler
-from misen_hash.handlers.optional import optional_handlers, optional_handlers_by_type
+from misen_hash.handlers import (
+    builtin_handlers,
+    builtin_handlers_by_type,
+    optional_handlers,
+    optional_handlers_by_type,
+)
 
-__all__ = ["lookup_handler"]
+__all__ = ["UnhashableTypeError", "lookup_handler"]
+
+
+class UnhashableTypeError(TypeError):
+    """Raised when ``stable_hash`` is asked to hash a type without an explicit handler."""
+
 
 _handlers_by_type_name: HandlerTypeRegistry = {**builtin_handlers_by_type, **optional_handlers_by_type}
 _handlers_type_cache: dict[type[Any], type[Handler]] = {}
@@ -33,5 +41,10 @@ def lookup_handler(obj: Any) -> type[Handler]:
             _handlers_type_cache[obj_type] = hash_cls
             return hash_cls
 
-    _handlers_type_cache[obj_type] = DillHandler
-    return DillHandler
+    msg = (
+        f"stable_hash does not support values of type {qualified_type_name(obj_type)}. "
+        "stable_hash only hashes values with explicit handlers. Register a stable_hash handler "
+        "or convert this value to a stable declarative identifier (for example a string, enum, "
+        "or Literal value)."
+    )
+    raise UnhashableTypeError(msg)
