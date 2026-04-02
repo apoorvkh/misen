@@ -5,8 +5,8 @@ import sys
 from misen import ASSIGNED_RESOURCES, Experiment, Task, task
 from misen.utils.assigned_resources import AssignedResources
 
-logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s %(message)s")
-logging.getLogger("misen").setLevel(logging.DEBUG)
+# logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s %(message)s")
+# logging.getLogger("misen").setLevel(logging.DEBUG)
 
 
 @task(id="add", cache=False, exclude={"x"})
@@ -15,6 +15,7 @@ def add(a: float, b: float, x: AssignedResources | None = None) -> float:
     print(f"{os.environ['MY_ENV_VAR']}")
     print(sys.executable)
     print("Assigned Resources:", x)
+    raise ValueError("Testing error handling")
     return a + b
 
 

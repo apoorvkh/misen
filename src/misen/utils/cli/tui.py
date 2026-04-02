@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TextIO
 
 from rich.console import Console
 from rich.text import Text
@@ -22,6 +24,8 @@ if TYPE_CHECKING:
 __all__ = [
     "JobSnapshot",
     "snapshot_jobs",
+    "stream_job_graph_logs",
+    "submit_and_stream_job_logs",
     "submit_and_watch_jobs",
     "watch_job_graph",
 ]
@@ -63,6 +67,20 @@ def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> 
     _print_final_summary(snapshots)
 
 
+def submit_and_stream_job_logs(
+    *,
+    tasks: set[Any],
+    executor: Any,
+    workspace: Any,
+    poll_interval_s: float = 0.2,
+    output: TextIO | None = None,
+) -> list[JobSnapshot]:
+    """Submit tasks without the TUI and stream appended job logs."""
+    with _runtime_job_board_suppressed():
+        job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
+        return stream_job_graph_logs(job_graph=job_graph, poll_interval_s=poll_interval_s, output=output)
+
+
 def watch_job_graph(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[JobSnapshot]:
     """Render the submitted job graph in a Textual app."""
     console = Console(stderr=True, soft_wrap=True)
@@ -71,6 +89,34 @@ def watch_job_graph(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.
         return []
 
     return _run_textual_job_monitor(job_graph=job_graph, poll_interval_s=poll_interval_s)
+
+
+def stream_job_graph_logs(
+    job_graph: DependencyGraph[Job],
+    poll_interval_s: float = 0.2,
+    output: TextIO | None = None,
+) -> list[JobSnapshot]:
+    """Poll the job graph and print newly appended job-log content."""
+    console = Console(stderr=True, soft_wrap=True)
+    if not job_graph.nodes():
+        console.print("[bold blue][misen][/bold blue] No work units were submitted.", style="dim")
+        return []
+
+    output = sys.stdout if output is None else output
+    offsets: dict[int, int] = {}
+
+    while True:
+        snapshots, _, done = snapshot_jobs(job_graph)
+        for snapshot in snapshots:
+            _drain_job_log(
+                job_key=snapshot.index,
+                job=job_graph[snapshot.index],
+                offsets=offsets,
+                output=output,
+            )
+        if done:
+            return snapshots
+        time.sleep(max(0.05, poll_interval_s))
 
 
 def snapshot_jobs(
@@ -302,6 +348,26 @@ def _safe_job_state(job: Job) -> JobState:
     except (FileNotFoundError, OSError, RuntimeError):
         return "unknown"
     return state if state in _STATE_STYLES else "unknown"
+
+
+def _drain_job_log(*, job_key: int, job: Job, offsets: dict[int, int], output: TextIO) -> None:
+    """Write any new bytes from one job log to the output stream."""
+    if job.log_path is None:
+        return
+
+    offset = offsets.get(job_key, 0)
+    try:
+        with job.log_path.open("r", encoding="utf-8", errors="replace") as log_file:
+            log_file.seek(offset)
+            chunk = log_file.read()
+            offsets[job_key] = log_file.tell()
+    except FileNotFoundError:
+        return
+
+    if not chunk:
+        return
+    output.write(chunk)
+    output.flush()
 
 
 @contextlib.contextmanager
