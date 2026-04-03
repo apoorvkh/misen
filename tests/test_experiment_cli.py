@@ -1,8 +1,5 @@
-import io
 import os
 import sys
-import threading
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -11,7 +8,6 @@ import pytest
 import tyro
 
 import misen.cli as misen_cli
-import misen.executors.local as local_executor_module
 import misen.utils.cli.experiment as experiment_module
 import misen.utils.cli.tui as tui_module
 from misen import Experiment, Task, task
@@ -859,57 +855,6 @@ def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tm
     assert submit_calls[0][2] is True
 
 
-def test_experiment_cli_run_command_without_tui_streams_logs_for_local_executor(monkeypatch, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
-    workspace = object()
-    stream_call: dict[str, object] = {}
-
-    class StubLocalExecutor:
-        pass
-
-    class StubExperiment:
-        def tasks(self) -> dict[str, Task[int]]:
-            return {"task": Task(source, x=1)}
-
-    first_args = SimpleNamespace(
-        command="run",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
-    )
-    second_args = SimpleNamespace(
-        command="run",
-        run_task=None,
-        run_tui=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
-        experiment=StubExperiment(),
-    )
-
-    def fail_tui(**_kwargs: object) -> None:
-        msg = "TUI should be bypassed with --no-tui"
-        raise AssertionError(msg)
-
-    def fake_stream_logs(*, tasks: set[Task[int]], executor: object, workspace: object) -> None:
-        stream_call["tasks"] = tasks
-        stream_call["executor"] = executor
-        stream_call["workspace"] = workspace
-
-    _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(local_executor_module, "LocalExecutor", StubLocalExecutor)
-    monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: StubLocalExecutor()))
-    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
-    monkeypatch.setattr(tui_module, "submit_and_watch_jobs", fail_tui)
-    monkeypatch.setattr(tui_module, "submit_and_stream_job_logs", fake_stream_logs)
-
-    experiment_cli(CliExperiment)
-
-    assert len(cast("set[Task[int]]", stream_call["tasks"])) == 1
-    assert isinstance(stream_call["executor"], StubLocalExecutor)
-    assert stream_call["workspace"] is workspace
-
-
 def test_experiment_cli_parses_positional_run_command(monkeypatch) -> None:
     submit_calls: list[tuple[set[object], object, bool]] = []
     workspace = object()
@@ -1164,79 +1109,6 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
     assert seen["during_watch_job_board"] == "0"
     assert os.environ.get("MISEN_RUNTIME_EVENTS") is None
     assert os.environ.get("MISEN_RUNTIME_JOB_BOARD") is None
-
-
-def test_submit_and_stream_job_logs_calls_submit_without_blocking(monkeypatch) -> None:
-    graph: DependencyGraph[Job] = DependencyGraph()
-    graph.add_node(FakeJob(work_unit=WorkUnit(root=Task(source, x=1), dependencies=set()), states=["done"]))
-    submit_args: dict[str, object] = {}
-
-    class StubExecutor:
-        def submit(
-            self,
-            tasks: set[Task[int]],
-            workspace: object,
-            *,
-            blocking: bool = False,
-        ) -> DependencyGraph[Job]:
-            submit_args["tasks"] = tasks
-            submit_args["workspace"] = workspace
-            submit_args["blocking"] = blocking
-            return graph
-
-    seen: dict[str, object] = {}
-
-    def fake_stream(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2, output: io.StringIO | None = None) -> list[tui_module.JobSnapshot]:
-        seen["job_graph"] = job_graph
-        seen["poll_interval_s"] = poll_interval_s
-        seen["output"] = output
-        return []
-
-    workspace = object()
-    tasks = {Task(source, x=1)}
-    monkeypatch.setattr(tui_module, "stream_job_graph_logs", fake_stream)
-    tui_module.submit_and_stream_job_logs(tasks=tasks, executor=StubExecutor(), workspace=workspace)
-
-    assert submit_args["blocking"] is False
-    assert submit_args["workspace"] is workspace
-    assert submit_args["tasks"] == tasks
-    assert seen["job_graph"] is graph
-
-
-def test_stream_job_graph_logs_prints_appended_output(tmp_path) -> None:
-    log_path = tmp_path / "job.log"
-    log_path.write_text("", encoding="utf-8")
-    finished = threading.Event()
-
-    class StreamingJob(Job):
-        def __init__(self, *, work_unit: WorkUnit, log_path: Path) -> None:
-            super().__init__(work_unit=work_unit, job_id="job-1", log_path=log_path)
-
-        def state(self) -> Literal["running", "done"]:
-            return "done" if finished.is_set() else "running"
-
-    graph: DependencyGraph[Job] = DependencyGraph()
-    graph.add_node(StreamingJob(work_unit=WorkUnit(root=Task(source, x=1), dependencies=set()), log_path=log_path))
-
-    def writer() -> None:
-        time.sleep(0.01)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write("first line\n")
-            handle.flush()
-            time.sleep(0.06)
-            handle.write("second line\n")
-            handle.flush()
-        finished.set()
-
-    output = io.StringIO()
-    writer_thread = threading.Thread(target=writer, daemon=True)
-    writer_thread.start()
-    snapshots = tui_module.stream_job_graph_logs(graph, poll_interval_s=0.0, output=output)
-    writer_thread.join(timeout=1)
-
-    assert writer_thread.is_alive() is False
-    assert output.getvalue() == "first line\nsecond line\n"
-    assert snapshots[0].state == "done"
 
 
 def test_snapshot_jobs_captures_dependencies_and_log_path() -> None:

@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import os
-import sys
-import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, TextIO
+from typing import TYPE_CHECKING, Any, Literal
 
 from rich.console import Console
 from rich.text import Text
@@ -24,8 +22,6 @@ if TYPE_CHECKING:
 __all__ = [
     "JobSnapshot",
     "snapshot_jobs",
-    "stream_job_graph_logs",
-    "submit_and_stream_job_logs",
     "submit_and_watch_jobs",
     "watch_job_graph",
 ]
@@ -67,20 +63,6 @@ def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> 
     _print_final_summary(snapshots)
 
 
-def submit_and_stream_job_logs(
-    *,
-    tasks: set[Any],
-    executor: Any,
-    workspace: Any,
-    poll_interval_s: float = 0.2,
-    output: TextIO | None = None,
-) -> list[JobSnapshot]:
-    """Submit tasks without the TUI and stream appended job logs."""
-    with _runtime_job_board_suppressed():
-        job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
-        return stream_job_graph_logs(job_graph=job_graph, poll_interval_s=poll_interval_s, output=output)
-
-
 def watch_job_graph(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[JobSnapshot]:
     """Render the submitted job graph in a Textual app."""
     console = Console(stderr=True, soft_wrap=True)
@@ -89,34 +71,6 @@ def watch_job_graph(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.
         return []
 
     return _run_textual_job_monitor(job_graph=job_graph, poll_interval_s=poll_interval_s)
-
-
-def stream_job_graph_logs(
-    job_graph: DependencyGraph[Job],
-    poll_interval_s: float = 0.2,
-    output: TextIO | None = None,
-) -> list[JobSnapshot]:
-    """Poll the job graph and print newly appended job-log content."""
-    console = Console(stderr=True, soft_wrap=True)
-    if not job_graph.nodes():
-        console.print("[bold blue][misen][/bold blue] No work units were submitted.", style="dim")
-        return []
-
-    output = sys.stdout if output is None else output
-    offsets: dict[int, int] = {}
-
-    while True:
-        snapshots, _, done = snapshot_jobs(job_graph)
-        for snapshot in snapshots:
-            _drain_job_log(
-                job_key=snapshot.index,
-                job=job_graph[snapshot.index],
-                offsets=offsets,
-                output=output,
-            )
-        if done:
-            return snapshots
-        time.sleep(max(0.05, poll_interval_s))
 
 
 def snapshot_jobs(
@@ -157,7 +111,8 @@ def snapshot_jobs(
 def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: float) -> list[JobSnapshot]:
     try:
         from textual.app import App, ComposeResult
-        from textual.widgets import DataTable, Footer, Header, Static, Tree
+        from textual.containers import Horizontal, Vertical
+        from textual.widgets import DataTable, Footer, Header, RichLog, Static, Tree
     except ModuleNotFoundError as e:
         msg = (
             "Textual is required for the run TUI but is not installed. "
@@ -178,6 +133,14 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
             padding: 0 1;
         }
 
+        #main-content {
+            height: 1fr;
+        }
+
+        #left-panel {
+            width: 1fr;
+        }
+
         #jobs {
             height: 1fr;
             min-height: 8;
@@ -187,18 +150,28 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
             height: 1fr;
             min-height: 8;
         }
+
+        #log-viewer {
+            width: 1fr;
+            border-left: solid green;
+        }
         """
 
         def __init__(self) -> None:
             super().__init__()
             self.snapshots: list[JobSnapshot] = []
-            self._exit_scheduled = False
+            self._selected_job_index: int | None = None
+            self._log_offset: int = 0
+            self._row_keys: list[Any] = []
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
             yield Static(id="summary")
-            yield DataTable(id="jobs")
-            yield Tree("Dependency Graph", id="dependency-graph")
+            with Horizontal(id="main-content"):
+                with Vertical(id="left-panel"):
+                    yield DataTable(id="jobs")
+                    yield Tree("Dependency Graph", id="dependency-graph")
+                yield RichLog(id="log-viewer", highlight=True, markup=False)
             yield Footer()
 
         def on_mount(self) -> None:
@@ -218,9 +191,7 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
             self._render_summary(snapshots)
             self._render_jobs_table(snapshots)
             self._render_dependency_tree(snapshots=snapshots, dependency_indices=dependency_indices)
-            if done and not self._exit_scheduled:
-                self._exit_scheduled = True
-                self.call_later(self.exit)
+            self._refresh_log_viewer()
 
         def _render_summary(self, snapshots: list[JobSnapshot]) -> None:
             summary_widget = self.query_one("#summary", Static)
@@ -228,15 +199,28 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
 
         def _render_jobs_table(self, snapshots: list[JobSnapshot]) -> None:
             table = self.query_one("#jobs", DataTable)
-            table.clear(columns=False)
-            for snapshot in snapshots:
-                table.add_row(
-                    snapshot.label,
-                    snapshot.state,
-                    snapshot.job_id,
-                    snapshot.log_file,
-                    ", ".join(snapshot.dependencies) if snapshot.dependencies else "-",
-                )
+            columns = list(table.columns.keys())
+            deps_str = lambda s: ", ".join(s.dependencies) if s.dependencies else "-"
+
+            if len(self._row_keys) == len(snapshots):
+                for row_idx, snapshot in enumerate(snapshots):
+                    row_key = self._row_keys[row_idx]
+                    for col_idx, value in enumerate(
+                        [snapshot.label, snapshot.state, snapshot.job_id, snapshot.log_file, deps_str(snapshot)]
+                    ):
+                        table.update_cell(row_key, columns[col_idx], value)
+            else:
+                table.clear(columns=False)
+                self._row_keys = []
+                for snapshot in snapshots:
+                    row_key = table.add_row(
+                        snapshot.label,
+                        snapshot.state,
+                        snapshot.job_id,
+                        snapshot.log_file,
+                        deps_str(snapshot),
+                    )
+                    self._row_keys.append(row_key)
 
         def _render_dependency_tree(
             self,
@@ -290,6 +274,33 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
                     dependency_indices=dependency_indices,
                     stack=next_stack,
                 )
+
+        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+            if event.cursor_row is None or event.cursor_row >= len(self.snapshots):
+                return
+            snapshot = self.snapshots[event.cursor_row]
+            if self._selected_job_index != snapshot.index:
+                self._selected_job_index = snapshot.index
+                self._log_offset = 0
+                log_viewer = self.query_one("#log-viewer", RichLog)
+                log_viewer.clear()
+
+        def _refresh_log_viewer(self) -> None:
+            if self._selected_job_index is None:
+                return
+            job = job_graph[self._selected_job_index]
+            if job.log_path is None:
+                return
+            try:
+                with job.log_path.open("r", encoding="utf-8", errors="replace") as f:
+                    f.seek(self._log_offset)
+                    chunk = f.read()
+                    self._log_offset = f.tell()
+            except FileNotFoundError:
+                return
+            if chunk:
+                log_viewer = self.query_one("#log-viewer", RichLog)
+                log_viewer.write(chunk.rstrip("\n"))
 
     app = _JobMonitorApp()
     app.run()
@@ -348,26 +359,6 @@ def _safe_job_state(job: Job) -> JobState:
     except (FileNotFoundError, OSError, RuntimeError):
         return "unknown"
     return state if state in _STATE_STYLES else "unknown"
-
-
-def _drain_job_log(*, job_key: int, job: Job, offsets: dict[int, int], output: TextIO) -> None:
-    """Write any new bytes from one job log to the output stream."""
-    if job.log_path is None:
-        return
-
-    offset = offsets.get(job_key, 0)
-    try:
-        with job.log_path.open("r", encoding="utf-8", errors="replace") as log_file:
-            log_file.seek(offset)
-            chunk = log_file.read()
-            offsets[job_key] = log_file.tell()
-    except FileNotFoundError:
-        return
-
-    if not chunk:
-        return
-    output.write(chunk)
-    output.flush()
 
 
 @contextlib.contextmanager

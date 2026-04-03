@@ -15,7 +15,6 @@ def add(a: float, b: float, x: AssignedResources | None = None) -> float:
     print(f"{os.environ['MY_ENV_VAR']}")
     print(sys.executable)
     print("Assigned Resources:", x)
-    raise ValueError("Testing error handling")
     return a + b
 
 

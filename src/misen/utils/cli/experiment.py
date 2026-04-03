@@ -657,12 +657,7 @@ def _execute_command(*, args: Any, console: Console) -> None:
                 tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
             elif run_task is None and not run_tui:
                 tasks = set(args.experiment.tasks().values())
-                from misen.executors.local import LocalExecutor
-
-                if isinstance(executor, LocalExecutor):
-                    tui.submit_and_stream_job_logs(tasks=tasks, executor=executor, workspace=workspace)
-                else:
-                    executor.submit(tasks=tasks, workspace=workspace, blocking=True)
+                executor.submit(tasks=tasks, workspace=workspace, blocking=True)
             else:
                 task_name = _resolve_command_task(command=command_name, task_name=run_task)
                 args.experiment[task_name].submit(executor=executor, workspace=workspace, blocking=True)
