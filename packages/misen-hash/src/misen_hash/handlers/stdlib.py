@@ -1,4 +1,4 @@
-"""Built-in canonical-hash handlers for core Python and stdlib value types."""
+"""Canonical-hash handlers for Python standard library value types."""
 
 import array
 import dataclasses
@@ -25,9 +25,9 @@ from misen_hash.handler_base import (
     PrimitiveHandler,
     qualified_type_name,
 )
-from misen_hash.hash import hash_msgspec
+from misen_hash.hash import canonical_hash
 
-__all__ = ["builtin_handlers", "builtin_handlers_by_type"]
+__all__ = ["stdlib_handlers", "stdlib_handlers_by_type"]
 
 _DICT_KEYS_TYPE = type({}.keys())
 _DICT_VALUES_TYPE = type({}.values())
@@ -45,9 +45,9 @@ def _digest_mapping_items(items: Iterable[tuple[Any, Any]], element_hash: Callab
         msg = "Mapping handlers require element_hash."
         raise ValueError(msg)
 
-    return hash_msgspec(
+    return canonical_hash(
         {
-            hash_msgspec(
+            canonical_hash(
                 (
                     element_hash(key),
                     element_hash(value),
@@ -65,17 +65,20 @@ class NoneHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(obj)
+        return canonical_hash(None)
 
 
-class EnumHandler(PrimitiveHandler):
+class EnumHandler(Handler):
     @staticmethod
     def match(obj: Any) -> bool:
         return isinstance(obj, enum.Enum)
 
     @staticmethod
-    def digest(obj: Any) -> int:
-        return hash_msgspec(obj.value)
+    def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int:
+        if element_hash is None:
+            msg = "EnumHandler requires element_hash."
+            raise ValueError(msg)
+        return element_hash(obj.value)
 
 
 class BoolHandler(PrimitiveHandler):
@@ -85,7 +88,7 @@ class BoolHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(bool(obj))
+        return canonical_hash(bool(obj))
 
 
 class IntHandler(PrimitiveHandler):
@@ -95,7 +98,7 @@ class IntHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(int(obj))
+        return canonical_hash(int(obj))
 
 
 class FloatHandler(PrimitiveHandler):
@@ -105,7 +108,7 @@ class FloatHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(_normalized_float(float(obj)))
+        return canonical_hash(_normalized_float(float(obj)))
 
 
 class ComplexHandler(PrimitiveHandler):
@@ -116,7 +119,7 @@ class ComplexHandler(PrimitiveHandler):
     @staticmethod
     def digest(obj: Any) -> int:
         value = complex(obj)
-        return hash_msgspec(
+        return canonical_hash(
             (
                 _normalized_float(float(value.real)),
                 _normalized_float(float(value.imag)),
@@ -131,7 +134,7 @@ class StrHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(str(obj))
+        return canonical_hash(str(obj))
 
 
 class BytearrayHandler(PrimitiveHandler):
@@ -141,7 +144,7 @@ class BytearrayHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(bytes(obj))
+        return canonical_hash(bytes(obj))
 
 
 class BytesHandler(PrimitiveHandler):
@@ -151,7 +154,7 @@ class BytesHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(bytes(obj))
+        return canonical_hash(bytes(obj))
 
 
 class MemoryviewHandler(PrimitiveHandler):
@@ -162,7 +165,7 @@ class MemoryviewHandler(PrimitiveHandler):
     @staticmethod
     def digest(obj: Any) -> int:
         view = memoryview(obj)
-        return hash_msgspec(
+        return canonical_hash(
             (
                 view.format,
                 view.ndim,
@@ -181,8 +184,8 @@ class DatetimeHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(
-            datetime.datetime(
+        return canonical_hash(
+            (
                 obj.year,
                 obj.month,
                 obj.day,
@@ -190,8 +193,8 @@ class DatetimeHandler(PrimitiveHandler):
                 obj.minute,
                 obj.second,
                 obj.microsecond,
-                tzinfo=obj.tzinfo,
-                fold=getattr(obj, "fold", 0),
+                str(obj.tzinfo),
+                obj.fold,
             )
         )
 
@@ -203,7 +206,7 @@ class DateHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(datetime.date(obj.year, obj.month, obj.day))
+        return canonical_hash((obj.year, obj.month, obj.day))
 
 
 class TimeHandler(PrimitiveHandler):
@@ -213,14 +216,14 @@ class TimeHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(
-            datetime.time(
+        return canonical_hash(
+            (
                 obj.hour,
                 obj.minute,
                 obj.second,
                 obj.microsecond,
-                tzinfo=obj.tzinfo,
-                fold=getattr(obj, "fold", 0),
+                str(obj.tzinfo),
+                obj.fold,
             )
         )
 
@@ -232,7 +235,7 @@ class TimedeltaHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(datetime.timedelta(days=obj.days, seconds=obj.seconds, microseconds=obj.microseconds))
+        return canonical_hash((obj.days, obj.seconds, obj.microseconds))
 
 
 class UUIDHandler(PrimitiveHandler):
@@ -242,7 +245,7 @@ class UUIDHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(uuid.UUID(bytes=obj.bytes))
+        return canonical_hash(obj.bytes)
 
 
 class DecimalHandler(PrimitiveHandler):
@@ -252,7 +255,7 @@ class DecimalHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(decimal.Decimal(str(obj)))
+        return canonical_hash(str(obj))
 
 
 class FractionHandler(PrimitiveHandler):
@@ -263,7 +266,7 @@ class FractionHandler(PrimitiveHandler):
     @staticmethod
     def digest(obj: Any) -> int:
         value = fractions.Fraction(obj)
-        return hash_msgspec((value.numerator, value.denominator))
+        return canonical_hash((value.numerator, value.denominator))
 
 
 class RangeHandler(PrimitiveHandler):
@@ -273,8 +276,7 @@ class RangeHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        value = range(obj.start, obj.stop, obj.step)
-        return hash_msgspec((value.start, value.stop, value.step))
+        return canonical_hash((obj.start, obj.stop, obj.step))
 
 
 class SliceHandler(PrimitiveHandler):
@@ -284,18 +286,28 @@ class SliceHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        value = slice(obj.start, obj.stop, obj.step)
-        return hash_msgspec((value.start, value.stop, value.step))
+        return canonical_hash((obj.start, obj.stop, obj.step))
 
 
 class PathHandler(PrimitiveHandler):
+    @staticmethod
+    def type_name(obj: Any) -> str:
+        # pathlib.Path() produces PosixPath on Unix and WindowsPath on
+        # Windows.  Collapse concrete paths to a single stable name so
+        # hashes are cross-platform.  Pure variants (PurePosixPath,
+        # PureWindowsPath) are explicitly chosen by the user and stay
+        # distinct.
+        if isinstance(obj, pathlib.Path):
+            return "pathlib.Path"
+        return qualified_type_name(type(obj))
+
     @staticmethod
     def match(obj: Any) -> bool:
         return isinstance(obj, pathlib.PurePath)
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec((obj.drive, obj.root, obj.parts))
+        return canonical_hash((obj.drive, obj.root, obj.parts))
 
 
 class PatternHandler(PrimitiveHandler):
@@ -305,7 +317,7 @@ class PatternHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec((obj.pattern, obj.flags))
+        return canonical_hash((obj.pattern, obj.flags))
 
 
 class ZoneInfoHandler(PrimitiveHandler):
@@ -319,7 +331,7 @@ class ZoneInfoHandler(PrimitiveHandler):
         if key is None:
             msg = "ZoneInfo objects must expose a stable key."
             raise ValueError(msg)
-        return hash_msgspec(key)
+        return canonical_hash(key)
 
 
 class IPAddressHandler(PrimitiveHandler):
@@ -339,7 +351,7 @@ class IPAddressHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(str(obj))
+        return canonical_hash(str(obj))
 
 
 class ArrayHandler(PrimitiveHandler):
@@ -349,8 +361,31 @@ class ArrayHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        value = array.array(obj.typecode, obj)
-        return hash_msgspec((value.typecode, value.tolist()))
+        return canonical_hash((obj.typecode, obj.tolist()))
+
+
+class EllipsisHandler(PrimitiveHandler):
+    """Hash the Ellipsis singleton."""
+
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return obj is ...
+
+    @staticmethod
+    def digest(obj: Any) -> int:
+        return canonical_hash("...")
+
+
+class TypeHandler(PrimitiveHandler):
+    """Hash type objects (classes) by their qualified name."""
+
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, type)
+
+    @staticmethod
+    def digest(obj: Any) -> int:
+        return canonical_hash(qualified_type_name(obj))
 
 
 class SimpleNamespaceHandler(Handler):
@@ -390,7 +425,19 @@ class UserStringHandler(PrimitiveHandler):
 
     @staticmethod
     def digest(obj: Any) -> int:
-        return hash_msgspec(str(obj))
+        return canonical_hash(str(obj))
+
+
+class NamedTupleHandler(CollectionHandler):
+    """Hash named tuples by field name/value pairs (like DataclassHandler)."""
+
+    @staticmethod
+    def match(obj: Any) -> bool:
+        return isinstance(obj, tuple) and hasattr(type(obj), "_fields")
+
+    @staticmethod
+    def elements(obj: Any) -> list[Any]:
+        return [(f, getattr(obj, f)) for f in type(obj)._fields]
 
 
 class ListHandler(CollectionHandler):
@@ -440,7 +487,7 @@ class DefaultDictHandler(Handler):
                 msg = "DefaultDictHandler requires element_hash."
                 raise ValueError(msg)
             default_factory_hash = element_hash(obj.default_factory)
-        return hash_msgspec(
+        return canonical_hash(
             (
                 default_factory_hash,
                 _digest_mapping_items(obj.items(), element_hash=element_hash),
@@ -505,7 +552,7 @@ class ChainMapHandler(Handler):
 
     @staticmethod
     def digest(obj: Any, element_hash: Callable[[Any], int] | None) -> int:
-        return hash_msgspec([_digest_mapping_items(mapping.items(), element_hash=element_hash) for mapping in obj.maps])
+        return canonical_hash([_digest_mapping_items(mapping.items(), element_hash=element_hash) for mapping in obj.maps])
 
 
 class MappingProxyHandler(Handler):
@@ -528,7 +575,7 @@ class DataclassHandler(CollectionHandler):
         return [(f.name, getattr(obj, f.name)) for f in dataclasses.fields(obj)]
 
 
-builtin_handlers: HandlerTypeList = [
+stdlib_handlers: HandlerTypeList = [
     NoneHandler,
     EnumHandler,
     BoolHandler,
@@ -553,10 +600,13 @@ builtin_handlers: HandlerTypeList = [
     ZoneInfoHandler,
     IPAddressHandler,
     ArrayHandler,
+    EllipsisHandler,
+    TypeHandler,
     SimpleNamespaceHandler,
     UserDictHandler,
     UserListHandler,
     UserStringHandler,
+    NamedTupleHandler,
     ListHandler,
     DequeHandler,
     OrderedDictHandler,
@@ -572,7 +622,7 @@ builtin_handlers: HandlerTypeList = [
 ]
 
 # Exact-type and base-type fast-path map by fully-qualified type name.
-_builtin_handlers_by_type: dict[type[Any], type[Handler]] = {
+_stdlib_handlers_by_type: dict[type[Any], type[Handler]] = {
     None.__class__: NoneHandler,
     enum.Enum: EnumHandler,
     enum.IntEnum: EnumHandler,
@@ -609,6 +659,8 @@ _builtin_handlers_by_type: dict[type[Any], type[Handler]] = {
     ipaddress.IPv4Interface: IPAddressHandler,
     ipaddress.IPv6Interface: IPAddressHandler,
     array.array: ArrayHandler,
+    type(...).__class__: EllipsisHandler,
+    type: TypeHandler,
     types.SimpleNamespace: SimpleNamespaceHandler,
     UserDict: UserDictHandler,
     UserList: UserListHandler,
@@ -629,6 +681,6 @@ _builtin_handlers_by_type: dict[type[Any], type[Handler]] = {
     types.MappingProxyType: MappingProxyHandler,
 }
 
-builtin_handlers_by_type: HandlerTypeRegistry = {
-    qualified_type_name(obj_type): handler_cls for obj_type, handler_cls in _builtin_handlers_by_type.items()
+stdlib_handlers_by_type: HandlerTypeRegistry = {
+    qualified_type_name(obj_type): handler_cls for obj_type, handler_cls in _stdlib_handlers_by_type.items()
 }

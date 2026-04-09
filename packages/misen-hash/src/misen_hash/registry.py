@@ -4,22 +4,22 @@ from typing import Any
 
 from misen_hash.handler_base import Handler, HandlerTypeList, HandlerTypeRegistry, qualified_type_name
 from misen_hash.handlers import (
-    builtin_handlers,
-    builtin_handlers_by_type,
     optional_handlers,
     optional_handlers_by_type,
+    stdlib_handlers,
+    stdlib_handlers_by_type,
 )
 
-__all__ = ["UnhashableTypeError", "lookup_handler"]
+__all__ = ["UnhashableTypeError", "get_handler_versions", "lookup_handler"]
 
 
 class UnhashableTypeError(TypeError):
     """Raised when ``stable_hash`` is asked to hash a type without an explicit handler."""
 
 
-_handlers_by_type_name: HandlerTypeRegistry = {**builtin_handlers_by_type, **optional_handlers_by_type}
+_handlers_by_type_name: HandlerTypeRegistry = {**stdlib_handlers_by_type, **optional_handlers_by_type}
 _handlers_type_cache: dict[type[Any], type[Handler]] = {}
-_handler_types: HandlerTypeList = [*builtin_handlers, *optional_handlers]
+_handler_types: HandlerTypeList = [*stdlib_handlers, *optional_handlers]
 
 
 def lookup_handler(obj: Any) -> type[Handler]:
@@ -48,3 +48,20 @@ def lookup_handler(obj: Any) -> type[Handler]:
         "or Literal value)."
     )
     raise UnhashableTypeError(msg)
+
+
+def get_handler_versions() -> dict[str, int]:
+    """Return ``{qualified_type_name: handler_version}`` for all registered handlers.
+
+    The workspace should call this at creation time and persist the result.
+    On subsequent loads, pass it to ``stable_hash(handler_versions=...)`` so
+    that version mismatches are detected.
+    """
+    versions: dict[str, int] = {}
+    for type_name, handler_cls in _handlers_by_type_name.items():
+        versions[type_name] = handler_cls.version
+    for handler_cls in _handler_types:
+        name = qualified_type_name(handler_cls)
+        if name not in versions:
+            versions[name] = handler_cls.version
+    return versions

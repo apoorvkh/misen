@@ -483,14 +483,12 @@ name = "misen-hash"
 version = "0.1.0"
 source = { editable = "packages/misen-hash" }
 dependencies = [
-    { name = "msgspec" },
     { name = "typing-extensions" },
     { name = "xxhash" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "msgspec", specifier = ">=0.20.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "xxhash", specifier = ">=3.0.0" },
 ]
