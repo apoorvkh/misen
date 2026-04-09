@@ -23,7 +23,7 @@ from misen.utils.function_introspection import (
     is_local_project_function,
     lambda_task_id,
 )
-from misen.utils.hashes import ResultHash
+from misen.utils.hashing import ResultHash
 from misen.utils.object_io import DefaultSerializer, Serializer
 
 if TYPE_CHECKING:

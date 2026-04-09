@@ -7,7 +7,7 @@ import pytest
 
 from misen import Task, task
 from misen.task_properties import TaskProperties
-from misen.utils.hashes import ResultHash
+from misen.utils.hashing import ResultHash
 from misen.workspaces.disk import DiskWorkspace
 
 

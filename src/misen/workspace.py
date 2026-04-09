@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
+    from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
     from misen.utils.locks import LockLike
     from misen.utils.work_unit import WorkUnit
 

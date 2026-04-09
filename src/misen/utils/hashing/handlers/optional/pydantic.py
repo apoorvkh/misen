@@ -3,7 +3,7 @@
 import importlib.util
 from typing import Any
 
-from misen_hash.handler_base import CollectionHandler, HandlerTypeList, HandlerTypeRegistry
+from misen.utils.hashing.handler_base import CollectionHandler, HandlerTypeList, HandlerTypeRegistry
 
 __all__ = ["pydantic_handlers", "pydantic_handlers_by_type"]
 

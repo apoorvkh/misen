@@ -3,8 +3,7 @@
 import importlib.util
 from typing import Any
 
-from misen_hash.handler_base import HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler
-from misen_hash.hash import canonical_hash
+from misen.utils.hashing.handler_base import HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler, hash_values
 
 __all__ = ["torch_handlers", "torch_handlers_by_type"]
 
@@ -24,7 +23,7 @@ if importlib.util.find_spec("torch") is not None:
 
         @staticmethod
         def digest(obj: Any) -> int:
-            return canonical_hash(str(obj))
+            return hash_values(str(obj))
 
     class TorchDeviceHandler(PrimitiveHandler):
         """Hash torch device objects (e.g. torch.device('cuda:0')) by their string representation."""
@@ -37,7 +36,7 @@ if importlib.util.find_spec("torch") is not None:
 
         @staticmethod
         def digest(obj: Any) -> int:
-            return canonical_hash(str(obj))
+            return hash_values(str(obj))
 
     torch_handlers = [TorchDTypeHandler, TorchDeviceHandler]
     torch_handlers_by_type = {

@@ -3,8 +3,7 @@
 import importlib.util
 from typing import Any
 
-from misen_hash.handler_base import HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler
-from misen_hash.hash import canonical_hash
+from misen.utils.hashing.handler_base import HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler, hash_values
 
 __all__ = ["pyarrow_handlers", "pyarrow_handlers_by_type"]
 
@@ -25,7 +24,7 @@ if importlib.util.find_spec("pyarrow") is not None:
 
         @staticmethod
         def digest(obj: Any) -> int:
-            return canonical_hash(str(obj))
+            return hash_values(str(obj))
 
     pyarrow_handlers = [PyArrowDataTypeHandler]
     pyarrow_handlers_by_type = {
