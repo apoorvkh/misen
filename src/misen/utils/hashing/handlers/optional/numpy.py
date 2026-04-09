@@ -3,8 +3,13 @@
 import importlib.util
 from typing import Any
 
-from misen_hash.handler_base import CollectionHandler, HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler
-from misen_hash.hash import canonical_hash
+from misen.utils.hashing.handler_base import (
+    CollectionHandler,
+    HandlerTypeList,
+    HandlerTypeRegistry,
+    PrimitiveHandler,
+    hash_values,
+)
 
 __all__ = ["numpy_handlers", "numpy_handlers_by_type"]
 
@@ -30,7 +35,7 @@ if importlib.util.find_spec("numpy") is not None:
             import numpy as np
 
             dtype = np.dtype(obj)
-            return canonical_hash((dtype.str, dtype.descr))
+            return hash_values((dtype.str, dtype.descr))
 
 
     class NumpyScalarHandler(CollectionHandler):

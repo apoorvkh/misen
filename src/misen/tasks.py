@@ -33,7 +33,7 @@ from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
 from misen.task_properties import Resources, TaskProperties, resolve_task_properties
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
-from misen.utils.hashes import ResolvedTaskHash, ResultHash, TaskHash
+from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
 
 if TYPE_CHECKING:

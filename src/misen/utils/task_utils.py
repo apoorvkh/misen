@@ -17,10 +17,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-from misen_hash import UnhashableTypeError
-
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
-from misen.utils.hashes import ResultHash, TaskHash
+from misen.utils.hashing import ResultHash, TaskHash, UnhashableTypeError
 from misen.utils.log_capture import capture_all_output
 from misen.utils.runtime_events import runtime_event, task_label
 

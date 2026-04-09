@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Generic, Literal, TextIO, TypeVar, cast
 import lmdb
 from typing_extensions import Self
 
-from misen.utils.hashes import Hash, ResolvedTaskHash, ResultHash, TaskHash
+from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, NFSLock
 from misen.workspace import Workspace
 
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     """Typed key/value mapping backed by a single LMDB database.
 
-    Keys and values must be :class:`misen.utils.hashes.Hash` subclasses that
+    Keys and values must be :class:`misen.utils.hashing.Hash` subclasses that
     support ``encode``/``decode``.
     """
 

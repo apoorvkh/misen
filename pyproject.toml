@@ -12,7 +12,7 @@ dependencies = [
   "flufl-lock>=8.2.0",
   "libcst>=1.8.2",
   "lmdb>=1.7.5",
-  "misen_hash",
+  "xxhash>=3.0.0",
   "msgspec>=0.20.0",
   "psutil",
   "python-dotenv>=1.0",
@@ -38,7 +38,7 @@ build-backend = "uv_build"
 
 [tool.ruff]
 line-length = 120
-src = ["src", "tests", "packages"]
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -58,13 +58,7 @@ ignore = [
 convention = "google"
 
 [[tool.ty.overrides]]
-include = ["packages/misen-hash/src/misen_hash/handlers/optional/**"]
+include = ["src/misen/utils/hashing/handlers/optional/**"]
 
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"
-
-[tool.uv.sources]
-misen-hash = { workspace = true }
-
-[tool.uv.workspace]
-members = ["packages/*"]

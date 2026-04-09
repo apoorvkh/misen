@@ -1,8 +1,9 @@
 """Typed 64-bit hash wrappers for task/result identity."""
 
+from __future__ import annotations
+
 import base64
 
-from misen_hash import stable_hash
 from typing_extensions import Self
 
 __all__ = ["Hash", "ResolvedTaskHash", "ResultHash", "TaskHash"]
@@ -21,7 +22,8 @@ class Hash(int):
         Returns:
             ``Hash`` subclass wrapping a 64-bit digest.
         """
-        # canonical_hash returns unsigned xxh3-64 int digests.
+        from misen.utils.hashing import stable_hash
+
         return cls(stable_hash(obj))
 
     def encode(self) -> bytes:

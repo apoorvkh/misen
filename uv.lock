@@ -8,12 +8,6 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 
-[manifest]
-members = [
-    "misen",
-    "misen-hash",
-]
-
 [[package]]
 name = "atpublic"
 version = "6.0.2"
@@ -423,7 +417,6 @@ dependencies = [
     { name = "flufl-lock" },
     { name = "libcst" },
     { name = "lmdb" },
-    { name = "misen-hash" },
     { name = "msgspec" },
     { name = "psutil" },
     { name = "python-dotenv" },
@@ -434,6 +427,7 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "tyro" },
     { name = "uv" },
+    { name = "xxhash" },
 ]
 
 [package.dev-dependencies]
@@ -454,7 +448,6 @@ requires-dist = [
     { name = "flufl-lock", specifier = ">=8.2.0" },
     { name = "libcst", specifier = ">=1.8.2" },
     { name = "lmdb", specifier = ">=1.7.5" },
-    { name = "misen-hash", editable = "packages/misen-hash" },
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "psutil" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -465,6 +458,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "tyro", specifier = ">=1.0.0" },
     { name = "uv", specifier = ">=0.9.0" },
+    { name = "xxhash", specifier = ">=3.0.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -476,21 +470,6 @@ dev = [
 docs = [
     { name = "mkdocstrings-python", specifier = "==2.0.1" },
     { name = "zensical", specifier = "==0.0.17" },
-]
-
-[[package]]
-name = "misen-hash"
-version = "0.1.0"
-source = { editable = "packages/misen-hash" }
-dependencies = [
-    { name = "typing-extensions" },
-    { name = "xxhash" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "typing-extensions", specifier = ">=4.1.0" },
-    { name = "xxhash", specifier = ">=3.0.0" },
 ]
 
 [[package]]

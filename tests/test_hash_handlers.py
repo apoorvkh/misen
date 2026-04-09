@@ -9,12 +9,11 @@ import types
 import typing
 from collections import ChainMap, Counter, defaultdict, deque
 from fractions import Fraction
-from typing import Any, ForwardRef, TypeVar
+from typing import ForwardRef, TypeVar
 
 import pytest
-from misen_hash import stable_hash
-from misen_hash.handlers.optional import optional_handlers
-from misen_hash.hash import incremental_hash
+from misen.utils.hashing import stable_hash
+from misen.utils.hashing.handlers.optional import optional_handlers
 
 
 class _Custom:
@@ -24,24 +23,6 @@ class _Custom:
 @dataclasses.dataclass
 class _DataWithList:
     values: list[int]
-
-
-def test_incremental_hash_hashes_incremental_chunks() -> None:
-    from xxhash import xxh3_64_intdigest
-
-    chunks: list[bytes | bytearray | memoryview] = [
-        b"abc",
-        bytearray(b"def"),
-        memoryview(b"ghi"),
-    ]
-
-    def _serialize(sink: Any) -> None:
-        for chunk in chunks:
-            sink.write(chunk)
-
-    incremental_digest = incremental_hash(_serialize)
-    buffered_digest = xxh3_64_intdigest(b"abcdefghi", seed=0)
-    assert incremental_digest == buffered_digest
 
 
 def _optional_handler_names() -> set[str]:
@@ -135,7 +116,6 @@ def test_removed_optional_handlers_are_not_registered(handler_name: str) -> None
         pytest.param(lambda x: x, id="function"),
         pytest.param(len, id="builtin-function"),
         pytest.param("abc".upper, id="bound-method"),
-        pytest.param(int, id="class"),
         pytest.param(functools.partial(pow, 2, exp=5), id="partial"),
         pytest.param((lambda: None).__code__, id="code"),
         pytest.param(inspect.signature(lambda x: x), id="signature"),
@@ -143,7 +123,6 @@ def test_removed_optional_handlers_are_not_registered(handler_name: str) -> None
         pytest.param(typing.List[int], id="typing-alias"),
         pytest.param(TypeVar("T"), id="typevar"),
         pytest.param(ForwardRef("Demo"), id="forwardref"),
-        pytest.param(list[int], id="generic-alias"),
         pytest.param(int | str, id="union-type"),
     ],
 )
@@ -231,9 +210,11 @@ def test_popular_stdlib_types_have_stable_hashes(left: object, right: object) ->
     assert stable_hash(left) == stable_hash(right)
 
 
-def test_defaultdict_with_runtime_default_factory_is_unsupported() -> None:
-    with pytest.raises(TypeError, match="builtins.type"):
-        stable_hash(defaultdict(list, {"a": 1}))
+def test_defaultdict_with_type_default_factory() -> None:
+    left = defaultdict(list, {"a": 1})
+    right = defaultdict(list, {"a": 1})
+    assert stable_hash(left) == stable_hash(right)
+    assert stable_hash(left) != stable_hash(defaultdict(int, {"a": 1}))
 
 
 def test_dict_view_handlers_cover_keys_values_items() -> None:
