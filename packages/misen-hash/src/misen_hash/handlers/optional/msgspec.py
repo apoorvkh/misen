@@ -17,9 +17,6 @@ if importlib.util.find_spec("msgspec") is not None:
 
         @staticmethod
         def match(obj: Any) -> bool:
-            if type(obj).__module__.split(".")[0] != "msgspec":
-                return False
-
             import msgspec
 
             return isinstance(obj, msgspec.Struct)

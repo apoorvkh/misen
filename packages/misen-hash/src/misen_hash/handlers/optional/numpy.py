@@ -4,7 +4,7 @@ import importlib.util
 from typing import Any
 
 from misen_hash.handler_base import CollectionHandler, HandlerTypeList, HandlerTypeRegistry, PrimitiveHandler
-from misen_hash.hash import hash_msgspec, incremental_hash
+from misen_hash.hash import canonical_hash
 
 __all__ = ["numpy_handlers", "numpy_handlers_by_type"]
 
@@ -30,7 +30,7 @@ if importlib.util.find_spec("numpy") is not None:
             import numpy as np
 
             dtype = np.dtype(obj)
-            return hash_msgspec((dtype.str, dtype.descr))
+            return canonical_hash((dtype.str, dtype.descr))
 
 
     class NumpyScalarHandler(CollectionHandler):
@@ -47,13 +47,9 @@ if importlib.util.find_spec("numpy") is not None:
 
         @staticmethod
         def elements(obj: Any) -> list[Any]:
-            scalar = obj
-
-            if scalar.dtype.hasobject:
-                return [scalar.dtype.str, scalar.item()]
-
-            payload_hash = incremental_hash(lambda sink: sink.write(scalar.tobytes()))
-            return [scalar.dtype.str, payload_hash]
+            if obj.dtype.hasobject:
+                return [obj.dtype.str, obj.item()]
+            return [obj.dtype.str, obj.tobytes()]
 
 
     numpy_handlers = [

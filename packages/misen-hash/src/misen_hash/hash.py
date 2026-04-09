@@ -1,40 +1,91 @@
-"""Public canonical hashing API and deterministic encoding helper."""
+"""Canonical byte encoding and hashing for stable object digests.
 
-import io
-from collections.abc import Callable
+Design: each value is type-tagged (1-byte prefix) and length-prefixed
+where variable-length. The encoding is self-describing, unambiguous,
+and fully controlled by this module — no external serialization dependency.
+"""
+
+import struct
 from typing import Any
 
-import msgspec
-from xxhash import xxh3_64, xxh3_64_intdigest
+from xxhash import xxh3_64_intdigest
 
-__all__ = ["hash_msgspec", "incremental_hash"]
+__all__ = ["canonical_encode", "canonical_hash"]
+
+# Type tags — each value starts with one of these bytes.
+_TAG_NONE = 0
+_TAG_BOOL = 1
+_TAG_INT = 2
+_TAG_FLOAT = 3
+_TAG_STR = 4
+_TAG_BYTES = 5
+_TAG_TUPLE = 6
+_TAG_LIST = 7
+_TAG_SET = 8
+
+_STRUCT_DOUBLE = struct.Struct(">d")
+_STRUCT_UINT64 = struct.Struct(">Q")
 
 
-def hash_msgspec(obj: Any) -> int:
-    """Encode with deterministic msgspec JSON and hash with xxh3-64."""
-    return xxh3_64_intdigest(msgspec.json.encode(obj, order="deterministic"), seed=0)
+def _encode_length(n: int) -> bytes:
+    return _STRUCT_UINT64.pack(n)
 
 
-def incremental_hash(serialize: Callable[[io.RawIOBase], Any], seed: int = 0) -> int:
-    """Hash serialized bytes incrementally as a serializer writes to a sink."""
-    sink = _IncrementalHashWriter(seed=seed)
-    serialize(sink)
-    return sink.intdigest()
+def _encode_int(n: int) -> bytes:
+    if n == 0:
+        return b"\x01\x00"  # length=1, value=0
+    byte_length = (n.bit_length() + 8) // 8  # +8 for sign bit
+    return _encode_length(byte_length) + n.to_bytes(byte_length, "big", signed=True)
 
 
-class _IncrementalHashWriter(io.RawIOBase):
-    """Writable sink that updates an xxh3 hasher from streamed bytes."""
+def _encode_sequence(items: Any) -> bytes:
+    parts = [canonical_encode(item) for item in items]
+    header = _encode_length(len(parts))
+    return header + b"".join(_encode_length(len(p)) + p for p in parts)
 
-    def __init__(self, *, seed: int = 0) -> None:
-        self._hasher = xxh3_64(seed=seed)
 
-    def writable(self) -> bool:
-        return True
+def canonical_encode(obj: Any) -> bytes:
+    """Encode a limited set of Python types into canonical, deterministic bytes.
 
-    def write(self, b: Any, /) -> int:
-        chunk = memoryview(b)
-        self._hasher.update(chunk)
-        return chunk.nbytes
+    Supported types: None, bool, int, float, str, bytes, tuple, list, set, frozenset.
+    """
+    if obj is None:
+        return bytes([_TAG_NONE])
 
-    def intdigest(self) -> int:
-        return self._hasher.intdigest()
+    if isinstance(obj, bool):
+        return bytes([_TAG_BOOL, obj])
+
+    if isinstance(obj, int):
+        return bytes([_TAG_INT]) + _encode_int(obj)
+
+    if isinstance(obj, float):
+        # Normalize negative zero.
+        value = 0.0 if obj == 0.0 else obj
+        return bytes([_TAG_FLOAT]) + _STRUCT_DOUBLE.pack(value)
+
+    if isinstance(obj, str):
+        encoded = obj.encode("utf-8")
+        return bytes([_TAG_STR]) + _encode_length(len(encoded)) + encoded
+
+    if isinstance(obj, bytes):
+        return bytes([_TAG_BYTES]) + _encode_length(len(obj)) + obj
+
+    if isinstance(obj, tuple):
+        return bytes([_TAG_TUPLE]) + _encode_sequence(obj)
+
+    if isinstance(obj, list):
+        return bytes([_TAG_LIST]) + _encode_sequence(obj)
+
+    if isinstance(obj, (set, frozenset)):
+        # Sort by encoded bytes for determinism regardless of iteration order.
+        parts = sorted(canonical_encode(item) for item in obj)
+        header = _encode_length(len(parts))
+        return bytes([_TAG_SET]) + header + b"".join(_encode_length(len(p)) + p for p in parts)
+
+    msg = f"canonical_encode does not support {type(obj).__name__!r}. Handler digests must decompose objects into primitives (None, bool, int, float, str, bytes) and containers (tuple, list, set)."
+    raise TypeError(msg)
+
+
+def canonical_hash(obj: Any) -> int:
+    """Encode with canonical bytes and hash with xxh3-64."""
+    return xxh3_64_intdigest(canonical_encode(obj), seed=0)

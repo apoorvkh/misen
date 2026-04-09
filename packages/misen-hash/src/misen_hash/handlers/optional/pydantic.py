@@ -20,7 +20,7 @@ if importlib.util.find_spec("pydantic") is not None:
         )
 
     class PydanticModelHandler(CollectionHandler):
-        """Hash pydantic models by serialized field payload."""
+        """Hash pydantic models by field name/value pairs (stable across pydantic versions)."""
 
         @staticmethod
         def match(obj: Any) -> bool:
@@ -28,8 +28,9 @@ if importlib.util.find_spec("pydantic") is not None:
 
         @staticmethod
         def elements(obj: Any) -> list[Any]:
-            payload = obj.model_dump(mode="python", round_trip=True) if hasattr(obj, "model_dump") else obj.dict()
-            return list(payload.items())
+            # Use direct field access rather than model_dump() for version stability.
+            fields = obj.model_fields if hasattr(obj, "model_fields") else obj.__fields__
+            return [(name, getattr(obj, name)) for name in fields]
 
     pydantic_handlers = [PydanticModelHandler]
     pydantic_handlers_by_type = {"pydantic.main.BaseModel": PydanticModelHandler}

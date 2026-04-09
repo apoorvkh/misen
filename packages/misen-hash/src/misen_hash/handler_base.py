@@ -6,7 +6,7 @@ from typing import Any, TypeAlias
 
 from typing_extensions import assert_never
 
-from misen_hash.hash import hash_msgspec
+from misen_hash.hash import canonical_hash
 
 __all__ = [
     "CollectionHandler",
@@ -24,6 +24,19 @@ ElementHasher: TypeAlias = Callable[[Any], int]
 
 class Handler(ABC):
     """Base handler protocol for canonical hashing."""
+
+    version: int = 1
+
+    @staticmethod
+    def type_name(obj: Any) -> str:
+        """Return the canonical type name included in the hash.
+
+        The default uses the runtime ``module.qualname``.  Override in
+        handlers where the runtime location may change across Python
+        versions or platforms (e.g. ``pathlib.PosixPath`` vs
+        ``pathlib.WindowsPath``).
+        """
+        return qualified_type_name(type(obj))
 
     @staticmethod
     @abstractmethod
@@ -72,8 +85,8 @@ class CollectionHandler(Handler):
         """Hash a collection by hashing each element then hashing the aggregate."""
         match cls.elements(obj):
             case list() as elements:
-                return hash_msgspec([element_hash(i) for i in elements])
+                return canonical_hash([element_hash(i) for i in elements])
             case set() as elements:
-                return hash_msgspec({element_hash(i) for i in elements})
+                return canonical_hash({element_hash(i) for i in elements})
             case elements:
                 assert_never(elements)
