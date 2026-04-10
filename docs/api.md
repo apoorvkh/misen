@@ -20,13 +20,13 @@ change without notice.
         - result
         - work_dir
 
-# @task decorator
+# @meta decorator
 
-::: misen.task_properties.task
+::: misen.task_metadata.meta
 
 # Resources
 
-::: misen.task_properties.Resources
+::: misen.task_metadata.Resources
 
 # DiskWorkspace
 

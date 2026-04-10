@@ -21,7 +21,7 @@ from misen.utils.snapshot import LocalSnapshot
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from misen.task_properties import Resources
+    from misen.task_metadata import Resources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 

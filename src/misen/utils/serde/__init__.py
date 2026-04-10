@@ -64,7 +64,7 @@ def _lookup_serializer(obj: Any) -> SerializerClass:
 
     msg = (
         f"No serializer registered for type {qualified_type_name(obj_type)!r}. "
-        "Either pass a custom serializer to @task(serializer=...) or convert "
+        "Either pass a custom serializer to @meta(serializer=...) or convert "
         "the return value to a supported type."
     )
     raise TypeError(msg)

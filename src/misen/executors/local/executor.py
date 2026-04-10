@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import subprocess
     from io import FileIO
 
-    from misen.task_properties import GpuRuntime, Resources
+    from misen.task_metadata import GpuRuntime, Resources
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 

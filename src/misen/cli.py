@@ -29,7 +29,7 @@ class _ExperimentSelection:
 
 
 def _select_fill() -> _FillSelection:
-    """Fill missing ``@task(id=...)`` values in Python files."""
+    """Fill missing ``@meta(id=...)`` values in Python files."""
     return _FillSelection()
 
 
