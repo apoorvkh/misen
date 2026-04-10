@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import subprocess
     from io import FileIO
 
-    from misen.task_metadata import GpuRuntime, Resources
+    from misen.task_metadata import GpuRuntime
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -37,7 +37,6 @@ class LocalJob(Job):
         "assigned_cpu_indices",
         "assigned_gpu_indices",
         "dependencies",
-        "resources",
         "snapshot",
         "workspace",
     )
@@ -45,14 +44,12 @@ class LocalJob(Job):
     def __init__(
         self,
         work_unit: WorkUnit,
-        resources: Resources,
         dependencies: set[LocalJob],
         snapshot: LocalSnapshot,
         workspace: Workspace,
     ) -> None:
         """Initialize a local job."""
         super().__init__(work_unit=work_unit, job_id=None, log_path=None)
-        self.resources = resources
         self.dependencies = dependencies
         self.snapshot = snapshot
         self.workspace = workspace
@@ -86,7 +83,7 @@ class LocalJob(Job):
             logger.info(
                 "Local job %s for %s exited with code %d -> state=%s.",
                 self.job_id or "n/a",
-                work_unit_label(self.work_unit),
+                self.label,
                 rc,
                 self._state,
             )
@@ -101,7 +98,7 @@ class LocalJob(Job):
             logger.info(
                 "Local job %s for %s is running (pid=%d).",
                 self.job_id or "n/a",
-                work_unit_label(self.work_unit),
+                self.label,
                 process.pid,
             )
 
@@ -110,7 +107,7 @@ class LocalJob(Job):
         with self._lock:
             self._close_log_fp_locked()
             self._state = "failed"
-            logger.error("Local job %s for %s marked failed.", self.job_id or "n/a", work_unit_label(self.work_unit))
+            logger.error("Local job %s for %s marked failed.", self.job_id or "n/a", self.label)
 
     def _close_log_fp_locked(self) -> None:
         fp = self._log_fp
@@ -209,7 +206,6 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
 
         job = LocalJob(
             work_unit=work_unit,
-            resources=resources,
             dependencies=dependencies,
             snapshot=snapshot,
             workspace=workspace,

@@ -330,12 +330,11 @@ def _tree_node_label(snapshot: JobSnapshot) -> Text:
 
 
 def _job_label(job: Job) -> str:
-    task = job.work_unit.root
-    return f"{task.properties.id} ({task.task_hash().short_b32()})"
+    return f"{job.root.properties.id} ({job.root.task_hash().short_b32()})"
 
 
 def _job_summary_label(job: Job) -> str:
-    return task_label(job.work_unit.root, include_hash=True, include_arguments=True)
+    return task_label(job.root, include_hash=True, include_arguments=True)
 
 
 def _job_pid(job: Job) -> int | None:
