@@ -1,7 +1,9 @@
 """Aggregate optional serializers for third-party library types."""
 
 from misen.utils.serde.serializer_base import SerializerTypeList, SerializerTypeRegistry
+from misen.utils.serde.serializers.optional.altair import altair_serializers, altair_serializers_by_type
 from misen.utils.serde.serializers.optional.attrs import attrs_serializers, attrs_serializers_by_type
+from misen.utils.serde.serializers.optional.bokeh import bokeh_serializers, bokeh_serializers_by_type
 from misen.utils.serde.serializers.optional.catboost import catboost_serializers, catboost_serializers_by_type
 from misen.utils.serde.serializers.optional.geopandas import geopandas_serializers, geopandas_serializers_by_type
 from misen.utils.serde.serializers.optional.hf_datasets import hf_datasets_serializers, hf_datasets_serializers_by_type
@@ -14,6 +16,7 @@ from misen.utils.serde.serializers.optional.msgspec_struct import (
 )
 from misen.utils.serde.serializers.optional.networkx import networkx_serializers, networkx_serializers_by_type
 from misen.utils.serde.serializers.optional.numpy import numpy_serializers, numpy_serializers_by_type
+from misen.utils.serde.serializers.optional.onnx import onnx_serializers, onnx_serializers_by_type
 from misen.utils.serde.serializers.optional.pandas import pandas_serializers, pandas_serializers_by_type
 from misen.utils.serde.serializers.optional.pillow import pillow_serializers, pillow_serializers_by_type
 from misen.utils.serde.serializers.optional.plotly import plotly_serializers, plotly_serializers_by_type
@@ -25,6 +28,7 @@ from misen.utils.serde.serializers.optional.shapely import shapely_serializers, 
 from misen.utils.serde.serializers.optional.sklearn import sklearn_serializers, sklearn_serializers_by_type
 from misen.utils.serde.serializers.optional.spacy import spacy_serializers, spacy_serializers_by_type
 from misen.utils.serde.serializers.optional.sympy import sympy_serializers, sympy_serializers_by_type
+from misen.utils.serde.serializers.optional.tokenizers import tokenizers_serializers, tokenizers_serializers_by_type
 from misen.utils.serde.serializers.optional.torch import torch_serializers, torch_serializers_by_type
 from misen.utils.serde.serializers.optional.transformers import (
     transformers_serializers,
@@ -63,12 +67,16 @@ optional_serializers: SerializerTypeList = [
     *xgboost_serializers,
     *lightgbm_serializers,
     *catboost_serializers,
-    # NLP
+    *onnx_serializers,
+    # NLP / tokenization
     *spacy_serializers,
+    *tokenizers_serializers,
     # HuggingFace
     *transformers_serializers,
     *hf_datasets_serializers,
     # Visualization
+    *altair_serializers,
+    *bokeh_serializers,
     *matplotlib_serializers,
     *plotly_serializers,
     *pillow_serializers,
@@ -94,9 +102,13 @@ optional_serializers_by_type: SerializerTypeRegistry = {
     **xgboost_serializers_by_type,
     **lightgbm_serializers_by_type,
     **catboost_serializers_by_type,
+    **onnx_serializers_by_type,
     **spacy_serializers_by_type,
+    **tokenizers_serializers_by_type,
     **transformers_serializers_by_type,
     **hf_datasets_serializers_by_type,
+    **altair_serializers_by_type,
+    **bokeh_serializers_by_type,
     **matplotlib_serializers_by_type,
     **plotly_serializers_by_type,
     **pillow_serializers_by_type,

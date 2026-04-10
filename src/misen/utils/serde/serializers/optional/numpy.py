@@ -1,4 +1,4 @@
-"""Serializers for numpy arrays and scalars."""
+"""Serializers for numpy arrays, scalars, and masked arrays."""
 
 import importlib.util
 from typing import Any
@@ -75,8 +75,47 @@ if importlib.util.find_spec("numpy") is not None:
             dtype = np.dtype(raw["dtype"])
             return dtype.type(raw["value"])
 
-    numpy_serializers = [NumpyArraySerializer, NumpyScalarSerializer]
+    class NumpyMaskedArraySerializer(Serializer[Any]):
+        """Serialize ``numpy.ma.MaskedArray`` via separate data and mask ``.npy`` files."""
+
+        version = 1
+
+        @staticmethod
+        def match(obj: Any) -> bool:
+            import numpy as np
+
+            return isinstance(obj, np.ma.MaskedArray)
+
+        @staticmethod
+        def save(obj: Any, directory: Path) -> None:
+            import numpy as np
+
+            np.save(directory / "data.npy", obj.data, allow_pickle=False)
+            np.save(directory / "mask.npy", obj.mask, allow_pickle=False)
+            fill_value = obj.fill_value.item() if hasattr(obj.fill_value, "item") else obj.fill_value
+            write_meta(
+                directory,
+                NumpyMaskedArraySerializer,
+                numpy_version=np.__version__,
+                fill_value=fill_value,
+            )
+
+        @staticmethod
+        def load(directory: Path) -> Any:
+            import numpy as np
+
+            from misen.utils.serde.serializer_base import read_meta
+
+            data = np.load(directory / "data.npy", allow_pickle=False)
+            mask = np.load(directory / "mask.npy", allow_pickle=False)
+            meta = read_meta(directory)
+            fill_value = meta.get("fill_value") if meta else None
+            return np.ma.MaskedArray(data, mask=mask, fill_value=fill_value)
+
+    # MaskedArray must come before ndarray (it's a subclass).
+    numpy_serializers = [NumpyMaskedArraySerializer, NumpyArraySerializer, NumpyScalarSerializer]
     numpy_serializers_by_type = {
+        "numpy.ma.core.MaskedArray": NumpyMaskedArraySerializer,
         "numpy.ndarray": NumpyArraySerializer,
         "numpy.generic": NumpyScalarSerializer,
     }

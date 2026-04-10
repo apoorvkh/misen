@@ -6,8 +6,13 @@ import decimal
 import enum
 import fractions
 import importlib
+import ipaddress
 import pathlib
+import re
+import types
 import uuid
+import zoneinfo
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +58,14 @@ _SAFE_SCALAR_TYPES = (
     fractions.Fraction,
     range,
     slice,
+    re.Pattern,
+    zoneinfo.ZoneInfo,
+    ipaddress.IPv4Address,
+    ipaddress.IPv6Address,
+    ipaddress.IPv4Network,
+    ipaddress.IPv6Network,
+    ipaddress.IPv4Interface,
+    ipaddress.IPv6Interface,
 )
 
 
@@ -76,14 +89,23 @@ def _is_msgpack_safe(obj: Any, _seen: set[int] | None = None) -> bool:  # noqa: 
     if isinstance(obj, pathlib.PurePath):
         return True
 
+    if isinstance(obj, types.SimpleNamespace):
+        return True  # checked recursively below via vars()
+
     obj_id = id(obj)
     if obj_id in _seen:
         return False  # circular reference
     _seen.add(obj_id)
 
     try:
+        if isinstance(obj, types.SimpleNamespace):
+            return all(_is_msgpack_safe(v, _seen) for v in vars(obj).values())
+
         if isinstance(obj, dict):
             return all(_is_msgpack_safe(k, _seen) and _is_msgpack_safe(v, _seen) for k, v in obj.items())
+
+        if isinstance(obj, deque):
+            return all(_is_msgpack_safe(item, _seen) for item in obj)
 
         if isinstance(obj, (list, tuple, set, frozenset)):
             return all(_is_msgpack_safe(item, _seen) for item in obj)
@@ -149,7 +171,43 @@ def _encode_tagged(obj: Any) -> Any:  # noqa: PLR0911
     if isinstance(obj, slice):
         return {_TAG: "slice", _VAL: [_encode_tagged(obj.start), _encode_tagged(obj.stop), _encode_tagged(obj.step)]}
 
+    if isinstance(obj, re.Pattern):
+        return {_TAG: "pattern", _VAL: obj.pattern, "flags": obj.flags}
+
+    if isinstance(obj, zoneinfo.ZoneInfo):
+        return {_TAG: "zoneinfo", _VAL: str(obj)}
+
+    if isinstance(
+        obj,
+        (
+            ipaddress.IPv4Address,
+            ipaddress.IPv6Address,
+            ipaddress.IPv4Network,
+            ipaddress.IPv6Network,
+            ipaddress.IPv4Interface,
+            ipaddress.IPv6Interface,
+        ),
+    ):
+        return {_TAG: "ipaddress", _VAL: str(obj), "cls": type(obj).__name__}
+
+    if isinstance(obj, types.SimpleNamespace):
+        return {_TAG: "namespace", _VAL: {k: _encode_tagged(v) for k, v in vars(obj).items()}}
+
     # Containers.
+    # NamedTuple must be checked before plain tuple.
+    if isinstance(obj, tuple) and hasattr(type(obj), "_fields"):
+        return {
+            _TAG: "namedtuple",
+            _VAL: {f: _encode_tagged(getattr(obj, f)) for f in type(obj)._fields},
+            "cls": qualified_type_name(type(obj)),
+        }
+
+    if isinstance(obj, OrderedDict):
+        return {_TAG: "OrderedDict", _VAL: [[_encode_tagged(k), _encode_tagged(v)] for k, v in obj.items()]}
+
+    if isinstance(obj, deque):
+        return {_TAG: "deque", _VAL: [_encode_tagged(item) for item in obj], "maxlen": obj.maxlen}
+
     if isinstance(obj, dict):
         encoded = {_encode_tagged(k): _encode_tagged(v) for k, v in obj.items()}
         # Escape dicts that collide with our tag convention.
@@ -229,6 +287,22 @@ def _decode_tagged(obj: Any) -> Any:  # noqa: PLR0911
                 return range(val[0], val[1], val[2])
             if tag == "slice":
                 return slice(_decode_tagged(val[0]), _decode_tagged(val[1]), _decode_tagged(val[2]))
+            if tag == "pattern":
+                return re.compile(val, obj.get("flags", 0))
+            if tag == "zoneinfo":
+                return zoneinfo.ZoneInfo(val)
+            if tag == "ipaddress":
+                ip_cls = getattr(ipaddress, obj["cls"])
+                return ip_cls(val)
+            if tag == "namespace":
+                return types.SimpleNamespace(**{k: _decode_tagged(v) for k, v in val.items()})
+            if tag == "namedtuple":
+                nt_cls = _import_type(obj["cls"])
+                return nt_cls(**{k: _decode_tagged(v) for k, v in val.items()})
+            if tag == "OrderedDict":
+                return OrderedDict((_decode_tagged(k), _decode_tagged(v)) for k, v in val)
+            if tag == "deque":
+                return deque((_decode_tagged(item) for item in val), maxlen=obj.get("maxlen"))
             if tag == "escaped_dict":
                 return {_decode_tagged(k): _decode_tagged(v) for k, v in val}
             msg = f"Unknown serde tag: {tag!r}"
@@ -371,6 +445,17 @@ _stdlib_serializers_by_type: dict[type[Any], SerializerClass] = {
     pathlib.PureWindowsPath: MsgpackSerializer,
     pathlib.PosixPath: MsgpackSerializer,
     pathlib.WindowsPath: MsgpackSerializer,
+    re.Pattern: MsgpackSerializer,
+    zoneinfo.ZoneInfo: MsgpackSerializer,
+    ipaddress.IPv4Address: MsgpackSerializer,
+    ipaddress.IPv6Address: MsgpackSerializer,
+    ipaddress.IPv4Network: MsgpackSerializer,
+    ipaddress.IPv6Network: MsgpackSerializer,
+    ipaddress.IPv4Interface: MsgpackSerializer,
+    ipaddress.IPv6Interface: MsgpackSerializer,
+    types.SimpleNamespace: MsgpackSerializer,
+    OrderedDict: MsgpackSerializer,
+    deque: MsgpackSerializer,
 }
 
 stdlib_serializers_by_type: SerializerTypeRegistry = {
