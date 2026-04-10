@@ -202,17 +202,23 @@ class Task(FrozenMixin, Generic[R]):
         return not any(self.uncached_deps(workspace=workspace))
 
     def done(self, workspace: Workspace) -> bool:
-        """Return whether task completion metadata exists in the workspace.
+        """Return whether this task is complete in the workspace.
+
+        For non-cacheable tasks (``cache=False``), completion means a result
+        hash has been recorded.  For cacheable tasks (``cache=True``),
+        completion additionally requires the result payload to be present.
 
         Args:
             workspace: Workspace to query.
 
         Returns:
-            ``True`` if a result hash has been recorded.
+            ``True`` if the task is complete per its caching policy.
         """
         try:
             workspace.get_result_hash(task=self)
         except RuntimeError:
+            return False
+        if self.properties.cache and self not in workspace.results:
             return False
         return True
 
@@ -400,7 +406,7 @@ class Task(FrozenMixin, Generic[R]):
             kwargs=self.kwargs,
             properties=self.properties,
         )
-        return TaskHash.from_object((self.properties.id, self.properties.cache, hashed_args))
+        return TaskHash.from_object((self.properties.id, hashed_args))
 
     def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """Return resolved-input hash for this task.
@@ -424,7 +430,7 @@ class Task(FrozenMixin, Generic[R]):
                 hash_task_by_result=True,
                 workspace=workspace,
             )
-            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, self.properties.cache, hashed_args))
+            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, hashed_args))
             workspace.set_resolved_hash(self, resolved_hash)
 
         return resolved_hash
