@@ -400,7 +400,7 @@ class Task(FrozenMixin, Generic[R]):
             kwargs=self.kwargs,
             properties=self.properties,
         )
-        return TaskHash.from_object((self.properties.id, hashed_args))
+        return TaskHash.from_object((self.properties.id, self.properties.cache, hashed_args))
 
     def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """Return resolved-input hash for this task.
@@ -424,7 +424,7 @@ class Task(FrozenMixin, Generic[R]):
                 hash_task_by_result=True,
                 workspace=workspace,
             )
-            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, hashed_args))
+            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, self.properties.cache, hashed_args))
             workspace.set_resolved_hash(self, resolved_hash)
 
         return resolved_hash
