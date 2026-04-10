@@ -2,13 +2,30 @@
 
 import inspect
 from pathlib import Path
+from typing import Any
 
+import dill
 import pytest
 
 from misen import Task, task
 from misen.task_properties import TaskProperties
 from misen.utils.hashing import ResultHash
+from misen.utils.serde import Serializer
 from misen.workspaces.disk import DiskWorkspace
+
+
+class DillSerializer(Serializer[Any]):
+    """Test-only serializer using dill for arbitrary types."""
+
+    @staticmethod
+    def save(obj: Any, directory: Path) -> None:
+        """Serialize via dill."""
+        (directory / "data.dill").write_bytes(dill.dumps(obj))
+
+    @staticmethod
+    def load(directory: Path) -> Any:
+        """Deserialize via dill."""
+        return dill.loads((directory / "data.dill").read_bytes())  # noqa: S301
 
 
 class UnsupportedPayload:
@@ -50,7 +67,7 @@ def hashable_result(seed: int) -> int:
     return 0
 
 
-@task(id="unsupported_result", cache=True)
+@task(id="unsupported_result", cache=True, serializer=DillSerializer)
 def unsupported_result(seed: int) -> UnsupportedPayload:
     return UnsupportedPayload(seed)
 

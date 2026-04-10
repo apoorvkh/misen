@@ -24,7 +24,7 @@ from misen.utils.function_introspection import (
     lambda_task_id,
 )
 from misen.utils.hashing import ResultHash
-from misen.utils.object_io import DefaultSerializer, Serializer
+from misen.utils.serde import DefaultSerializer, Serializer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
