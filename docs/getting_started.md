@@ -18,15 +18,15 @@ uv add misen
 ## Define Tasks and an Experiment
 
 ```python
-from misen import Experiment, Task, task
+from misen import Experiment, Task, meta
 
 
-@task(id="load", cache=True)
+@meta(id="load", cache=True)
 def load(n: int) -> list[int]:
     return list(range(n))
 
 
-@task(id="sum", cache=True)
+@meta(id="sum", cache=True)
 def sum_values(values: list[int]) -> int:
     return sum(values)
 
@@ -76,7 +76,7 @@ workspace_kwargs = { directory = ".misen" }
 
 ## Fill Missing Task IDs
 
-If you have legacy `@task` decorators missing `id`, you can auto-fill them:
+If you have legacy `@meta` decorators missing `id`, you can auto-fill them:
 
 ```bash
 misen fill
@@ -91,7 +91,7 @@ misen fill src/my_project scripts/fixup.py
 ## Mental Model
 
 - Build tasks lazily with `Task(...)`.
-- Cache behavior is controlled on `@task(...)`.
+- Cache behavior is controlled on `@meta(...)`.
 - `Workspace` stores hashes/results and locks.
 - `Executor` schedules work units derived from cache boundaries.
 

@@ -2,14 +2,14 @@ import logging
 import os
 import sys
 
-from misen import ASSIGNED_RESOURCES, Experiment, Task, task
+from misen import ASSIGNED_RESOURCES, Experiment, Task, meta
 from misen.utils.assigned_resources import AssignedResources
 
 # logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s %(message)s")
 # logging.getLogger("misen").setLevel(logging.DEBUG)
 
 
-@task(id="add", cache=False, exclude={"x"})
+@meta(id="add", cache=False, exclude={"x"})
 def add(a: float, b: float, x: AssignedResources | None = None) -> float:
     print(f"Running add with {a}, {b}")
     print(f"{os.environ['MY_ENV_VAR']}")
@@ -18,32 +18,32 @@ def add(a: float, b: float, x: AssignedResources | None = None) -> float:
     return a + b
 
 
-@task(id="multiply", cache=True)
+@meta(id="multiply", cache=True)
 def multiply(a: float, b: float) -> float:
     print(f"[CACHE] Running multiply with {a}, {b}")
     return a * b
 
 
-@task(id="square", cache=False)
+@meta(id="square", cache=False)
 def square(x: float) -> float:
     print(f"Running square with {x}")
     return x * x
 
 
-@task(id="sum_list", cache=True)
+@meta(id="sum_list", cache=True)
 def sum_list(numbers: list[float]) -> float:
     print(f"[CACHE] Running sum_list with {numbers}")
     return sum(numbers)
 
 
-@task(id="mean", cache=False)
+@meta(id="mean", cache=False)
 def mean(numbers: list[float]) -> float:
     print(f"Running mean with {numbers}")
     total = sum_list(numbers)
     return total / len(numbers)
 
 
-@task(id="variance", cache=True)
+@meta(id="variance", cache=True)
 def variance(numbers: list[float]) -> float:
     print(f"[CACHE] Running variance with {numbers}")
     mean_val = mean(numbers)
@@ -51,7 +51,7 @@ def variance(numbers: list[float]) -> float:
     return sum_list(squared_diffs) / len(numbers)
 
 
-@task(id="generate_numbers", cache=False)
+@meta(id="generate_numbers", cache=False)
 def generate_numbers(n: int) -> list[float]:
     print(f"Running generate_numbers with {n}")
     return [float(i) for i in range(1, n + 1)]

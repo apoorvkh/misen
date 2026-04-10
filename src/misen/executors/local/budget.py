@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Literal
 import msgspec
 
 if TYPE_CHECKING:
-    from misen.task_properties import GpuRuntime, Resources
+    from misen.task_metadata import GpuRuntime, Resources
 
 
 class ResourceBudget(msgspec.Struct, frozen=True):

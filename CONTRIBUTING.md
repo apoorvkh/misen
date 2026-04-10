@@ -15,6 +15,6 @@ uv run pytest
 
 ## Design Notes
 
-- Keep the public API small and explicit (`Task`, `Workspace`, `Executor`, `Experiment`, `@task`).
+- Keep the public API small and explicit (`Task`, `Workspace`, `Executor`, `Experiment`, `@meta`).
 - Preserve cache/locking semantics when changing internals.
 - Update docs when changing behavior that affects execution, hashing, or caching.

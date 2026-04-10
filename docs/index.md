@@ -11,7 +11,7 @@ between the main abstractions.
 
 The intended public API is:
 
-- `@task`, `TaskProperties`, `Resources`
+- `@meta`, `TaskMetadata`, `Resources`
 - `Task`
 - `Workspace` (`DiskWorkspace` by default)
 - `Executor` (`LocalExecutor`, `InProcessExecutor`, `SlurmExecutor`)

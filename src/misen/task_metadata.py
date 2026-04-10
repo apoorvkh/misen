@@ -1,4 +1,4 @@
-"""Task metadata model and public ``@task`` decorator.
+"""Task metadata model and public ``@meta`` decorator.
 
 This module defines the stable metadata contract used by :class:`misen.tasks.Task`:
 
@@ -7,7 +7,7 @@ This module defines the stable metadata contract used by :class:`misen.tasks.Tas
 - execution requirements (`resources`)
 
 The decorator writes this metadata onto function objects, while
-``resolve_task_properties`` normalizes behavior for local functions, lambdas,
+``resolve_task_metadata`` normalizes behavior for local functions, lambdas,
 and external callables.
 """
 
@@ -30,13 +30,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import FunctionType
 
-__all__ = ["GpuRuntime", "Resources", "TaskProperties", "resolve_task_properties", "task"]
+__all__ = ["GpuRuntime", "Resources", "TaskMetadata", "meta", "resolve_task_metadata"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 
-class TaskProperties(Struct, frozen=True):
+class TaskMetadata(Struct, frozen=True):
     """Immutable metadata describing task identity, execution, and caching.
 
     Attributes:
@@ -88,7 +88,7 @@ class Resources(Struct, frozen=True):
     gpu_runtime: GpuRuntime = "cuda"
 
 
-def task(
+def meta(
     *,
     id: str | None = None,  # noqa: A002
     cache: bool = False,
@@ -99,7 +99,7 @@ def task(
     serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: tighten generic serializer typing
     cleanup_work_dir: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    """Attach :class:`TaskProperties` metadata to a function.
+    """Attach :class:`TaskMetadata` metadata to a function.
 
     Args:
         id: Stable task identifier. Required for local project functions.
@@ -119,6 +119,9 @@ def task(
 
     Raises:
         ValueError: If ``id`` is not provided.
+
+    .. deprecated::
+        The old name ``task`` is deprecated; use ``meta`` instead.
     """
     if id is None:
         msg = "id must be provided."
@@ -127,7 +130,7 @@ def task(
     if resources is None:
         resources = Resources()
     if isinstance(resources, Resources):
-        # Normalize static resources into the callable shape expected by TaskProperties.
+        # Normalize static resources into the callable shape expected by TaskMetadata.
         resources = lambda r=resources, *_, **__: r  # noqa: E731
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
@@ -137,10 +140,10 @@ def task(
             func: Function to annotate.
 
         Returns:
-            The same function, now carrying ``__task_properties__``.
+            The same function, now carrying ``__task_metadata__``.
         """
         # Function objects are extended at runtime with metadata consumed by Task().
-        func.__task_properties__ = TaskProperties(  # ty:ignore[unresolved-attribute]
+        func.__task_metadata__ = TaskMetadata(  # ty:ignore[unresolved-attribute]
             id=id,
             cache=cache,
             exclude=(exclude or set()),
@@ -156,30 +159,30 @@ def task(
     return decorator
 
 
-def resolve_task_properties(func: FunctionType) -> TaskProperties:
-    """Resolve :class:`TaskProperties` for a function object.
+def resolve_task_metadata(func: FunctionType) -> TaskMetadata:
+    """Resolve :class:`TaskMetadata` for a function object.
 
     Args:
         func: Python function object.
 
     Returns:
-        Resolved task properties.
+        Resolved task metadata.
 
     Raises:
-        ValueError: If a local project function lacks ``@task(...)`` metadata.
+        ValueError: If a local project function lacks ``@meta(...)`` metadata.
     """
     if is_lambda_function(func):
-        return TaskProperties(lambda_task_id(func))
+        return TaskMetadata(lambda_task_id(func))
 
     if is_local_project_function(func):
-        if not hasattr(func, "__task_properties__"):
+        if not hasattr(func, "__task_metadata__"):
             msg = (
-                f"Local function {func.__module__}.{func.__qualname__} must define __task_properties__. Use @task(...)."
+                f"Local function {func.__module__}.{func.__qualname__} must define __task_metadata__. Use @meta(...)."
             )
             raise ValueError(msg)
-        return func.__task_properties__
+        return func.__task_metadata__
 
-    return TaskProperties(external_callable_id(func))
+    return TaskMetadata(external_callable_id(func))
 
 
 def _normalize_versions(versions: dict[str, dict[Any, int]] | None) -> dict[tuple[str, ResultHash], int]:

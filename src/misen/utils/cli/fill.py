@@ -68,7 +68,7 @@ class BuildSelectionConfig:
 
 
 class TaskIdFiller(cst.CSTTransformer):
-    """Insert UUID ``id=...`` values into ``@task`` decorators."""
+    """Insert UUID ``id=...`` values into ``@meta`` decorators."""
 
     def __init__(self, uuid_factory: Callable[[], str] | None = None) -> None:
         """Initialize rewrite counters."""
@@ -118,7 +118,7 @@ def fill_task_ids_in_source(source: str, uuid_factory: Callable[[], str] | None 
 def fill(
     paths: tyro.conf.Positional[tuple[Path, ...]] = (DEFAULT_ROOT,),
 ) -> int:
-    """Fill missing ``@task(id=...)`` values in Python files."""
+    """Fill missing ``@meta(id=...)`` values in Python files."""
     try:
         report = fill_paths_task_ids(paths=paths)
     except BuildSelectionError as exc:
@@ -156,7 +156,7 @@ def _fill_file_paths(
     file_paths: Iterable[Path],
     uuid_factory: Callable[[], str] | None = None,
 ) -> FillReport:
-    """Rewrite ``@task`` ids in a file stream and return a summary."""
+    """Rewrite ``@meta`` ids in a file stream and return a summary."""
     scanned_files = 0
     changed_files = 0
     updated_decorators = 0
@@ -414,7 +414,7 @@ def _as_str_list(value: object) -> list[str]:
 
 
 def _is_task_reference(expression: cst.BaseExpression) -> bool:
-    return m.matches(expression, m.Name("task")) or m.matches(expression, m.Attribute(attr=m.Name("task")))
+    return m.matches(expression, m.Name("meta")) or m.matches(expression, m.Attribute(attr=m.Name("meta")))
 
 
 def _insert_id_arg(args: list[cst.Arg], id_arg: cst.Arg) -> list[cst.Arg]:

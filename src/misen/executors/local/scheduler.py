@@ -17,7 +17,7 @@ from misen.utils.runtime_events import runtime_job_done, runtime_job_failed, run
 if TYPE_CHECKING:
     from misen.executors.local.budget import ResourceBudget
     from misen.executors.local.executor import JobState, LocalJob
-    from misen.task_properties import GpuRuntime, Resources
+    from misen.task_metadata import GpuRuntime, Resources
 
 
 class LocalScheduler(msgspec.Struct, dict=True):

@@ -17,7 +17,7 @@ from misen.utils.assigned_resources import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from misen.task_properties import GpuRuntime
+    from misen.task_metadata import GpuRuntime
 
 __all__ = ["apply_resource_binding"]
 

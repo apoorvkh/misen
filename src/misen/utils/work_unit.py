@@ -20,7 +20,7 @@ from misen.utils.graph import DependencyGraph
 from misen.utils.task_utils import map_nested_leaves
 
 if TYPE_CHECKING:
-    from misen.task_properties import GpuRuntime, Resources
+    from misen.task_metadata import GpuRuntime, Resources
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.workspace import Workspace
 
@@ -61,7 +61,7 @@ class WorkUnit:
         self.graph = build_task_dependency_graph(task=root, exclude_cacheable=True)
 
         # Compute one scheduler request that satisfies every task in the unit.
-        from misen.task_properties import Resources
+        from misen.task_metadata import Resources
 
         resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
         gpu_runtimes = cast(

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import cloudpickle
 import tyro
 
-from misen.task_properties import GpuRuntime
+from misen.task_metadata import GpuRuntime
 from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 from misen.utils.resource_binding import apply_resource_binding
 

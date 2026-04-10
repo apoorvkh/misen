@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from misen.task_properties import GpuRuntime
+    from misen.task_metadata import GpuRuntime
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace

@@ -30,7 +30,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
-from misen.task_properties import Resources, TaskProperties, resolve_task_properties
+from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
@@ -62,7 +62,7 @@ class Task(FrozenMixin, Generic[R]):
         func: Underlying callable.
         args: Positional arguments for ``func``.
         kwargs: Keyword arguments for ``func``.
-        properties: Metadata resolved from :func:`misen.task_properties.task`.
+        properties: Metadata resolved from :func:`misen.task_metadata.meta`.
         resources: Runtime resource request derived from bound arguments.
         dependencies: Immediate dependent tasks discovered from nested args.
     """
@@ -98,7 +98,7 @@ class Task(FrozenMixin, Generic[R]):
         self.kwargs: Mapping[str, Any] = MappingProxyType(kwargs)
         self._signature: Signature = signature(func)
 
-        self.properties: TaskProperties = resolve_task_properties(func)
+        self.properties: TaskMetadata = resolve_task_metadata(func)
         self.resources: Resources = self.properties.resources(*self.args, **self.kwargs)
 
         values = tuple(itertools.chain(self.args, self.kwargs.values()))
@@ -270,7 +270,7 @@ class Task(FrozenMixin, Generic[R]):
             can run concurrently.
             Upon successful completion, non-cacheable task work dirs are
             cleaned up; cacheable task work dirs are cleaned up when
-            ``@task(cleanup_work_dir=True)`` is set.
+            ``@meta(cleanup_work_dir=True)`` is set.
             Logs are captured to task logs and optionally mirrored to stdout.
         """
         from misen.workspace import Workspace

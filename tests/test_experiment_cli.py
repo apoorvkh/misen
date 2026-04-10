@@ -10,7 +10,7 @@ import tyro
 import misen.cli as misen_cli
 import misen.utils.cli.experiment as experiment_module
 import misen.utils.cli.tui as tui_module
-from misen import Experiment, Task, task
+from misen import Experiment, Task, meta
 from misen.executor import Executor, Job
 from misen.utils.cli.experiment import _resolve_command, experiment, experiment_cli
 from misen.utils.graph import DependencyGraph
@@ -19,32 +19,32 @@ from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
 
 
-@task(id="source", cache=False)
+@meta(id="source", cache=False)
 def source(x: int) -> int:
     return x
 
 
-@task(id="sink", cache=False)
+@meta(id="sink", cache=False)
 def sink(x: int) -> int:
     return x
 
 
-@task(id="left", cache=False)
+@meta(id="left", cache=False)
 def left(x: int) -> int:
     return x
 
 
-@task(id="right", cache=False)
+@meta(id="right", cache=False)
 def right(x: int) -> int:
     return x
 
 
-@task(id="with_exclude", cache=False, exclude={"hidden"})
+@meta(id="with_exclude", cache=False, exclude={"hidden"})
 def with_exclude(hidden: int, visible: int) -> int:
     return hidden + visible
 
 
-@task(id="cached_only", cache=True)
+@meta(id="cached_only", cache=True)
 def cached_only(x: int) -> int:
     return x
 
@@ -93,8 +93,8 @@ def test_experiment_command_accepts_src_file_reference(monkeypatch, tmp_path) ->
     (project_src / "__init__.py").write_text("", encoding="utf-8")
     (project_src / "demo.py").write_text(
         (
-            "from misen import Experiment, Task, task\n\n"
-            "@task(id='demo_task', cache=False)\n"
+            "from misen import Experiment, Task, meta\n\n"
+            "@meta(id='demo_task', cache=False)\n"
             "def demo_task(x: int) -> int:\n"
             "    return x\n\n"
             "class DemoExperiment(Experiment):\n"
@@ -136,8 +136,8 @@ def test_resolve_experiment_class_prefers_local_src_module(monkeypatch, tmp_path
     (project_src / "__init__.py").write_text("", encoding="utf-8")
     (project_src / "demo.py").write_text(
         (
-            "from misen import Experiment, Task, task\n\n"
-            "@task(id='demo_task', cache=False)\n"
+            "from misen import Experiment, Task, meta\n\n"
+            "@meta(id='demo_task', cache=False)\n"
             "def demo_task(x: int) -> int:\n"
             "    return x\n\n"
             "class DemoExperiment(Experiment):\n"
@@ -153,8 +153,8 @@ def test_resolve_experiment_class_prefers_local_src_module(monkeypatch, tmp_path
     (installed_pkg / "__init__.py").write_text("", encoding="utf-8")
     (installed_pkg / "demo.py").write_text(
         (
-            "from misen import Experiment, Task, task\n\n"
-            "@task(id='demo_task', cache=False)\n"
+            "from misen import Experiment, Task, meta\n\n"
+            "@meta(id='demo_task', cache=False)\n"
             "def demo_task(x: int) -> int:\n"
             "    return x\n\n"
             "class DemoExperiment(Experiment):\n"
@@ -182,8 +182,8 @@ def test_resolve_experiment_class_accepts_src_file_reference(monkeypatch, tmp_pa
     (project_src / "__init__.py").write_text("", encoding="utf-8")
     (project_src / "demo.py").write_text(
         (
-            "from misen import Experiment, Task, task\n\n"
-            "@task(id='demo_task', cache=False)\n"
+            "from misen import Experiment, Task, meta\n\n"
+            "@meta(id='demo_task', cache=False)\n"
             "def demo_task(x: int) -> int:\n"
             "    return x\n\n"
             "class DemoExperiment(Experiment):\n"

@@ -1,14 +1,14 @@
-from misen import Task, task
+from misen import Task, meta
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.disk import DiskWorkspace
 
 
-@task(id="log_task_a", cache=True)
+@meta(id="log_task_a", cache=True)
 def log_task_a() -> int:
     return 1
 
 
-@task(id="log_task_b", cache=True)
+@meta(id="log_task_b", cache=True)
 def log_task_b() -> int:
     return 2
 

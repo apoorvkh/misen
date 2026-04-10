@@ -15,7 +15,7 @@ import logging
 from misen.executor import Executor
 from misen.experiment import Experiment
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
-from misen.task_properties import Resources, TaskProperties, task
+from misen.task_metadata import Resources, TaskMetadata, meta
 from misen.tasks import Task
 from misen.utils.settings import Settings
 from misen.workspace import Workspace
@@ -37,7 +37,7 @@ __all__ = [
     "Resources",
     "Settings",
     "Task",
-    "TaskProperties",
+    "TaskMetadata",
     "Workspace",
-    "task",
+    "meta",
 ]

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
     from inspect import Signature
 
-    from misen.task_properties import TaskProperties
+    from misen.task_metadata import TaskMetadata
     from misen.tasks import Task
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.workspace import Workspace
@@ -48,7 +48,7 @@ def hash_task_arguments(
     signature: Signature,
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
-    properties: TaskProperties,
+    properties: TaskMetadata,
     hash_task_by_result: bool = False,
     workspace: Workspace | Literal["auto"] = "auto",
 ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
@@ -114,7 +114,7 @@ def hash_task_arguments(
                 f"{prefix}Non-Task argument values must hash through an explicit `stable_hash` handler. "
                 f"Details: {exc} "
                 "Pass a `Task` dependency, register a `stable_hash` handler, or use "
-                "`@task(exclude=...)` / `@task(versions=...)`."
+                "`@meta(exclude=...)` / `@meta(versions=...)`."
             )
             raise TypeError(msg) from exc
         version = properties.versions.get((name, cast("ResultHash", arg_hash)), 0)
