@@ -30,6 +30,7 @@ from misen.utils.work_unit import build_work_graph
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from misen.task_metadata import Resources
     from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
     from misen.utils.snapshot import Snapshot
@@ -185,7 +186,7 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
                 logger.debug(
                     "%s waiting on %s (job_id=%s).",
                     executor_name,
-                    work_unit_label(job.work_unit),
+                    job.label,
                     job.job_id or "n/a",
                 )
                 job.wait()
@@ -293,6 +294,21 @@ class Job(ABC):
         self.work_unit = work_unit
         self.job_id = job_id
         self.log_path = log_path
+
+    @property
+    def root(self) -> Task:
+        """Return root task of the associated work unit."""
+        return self.work_unit.root
+
+    @property
+    def resources(self) -> Resources:
+        """Return aggregated resource requirements of the associated work unit."""
+        return self.work_unit.resources
+
+    @property
+    def label(self) -> str:
+        """Return compact human-readable label for this job."""
+        return work_unit_label(self.work_unit)
 
     @abstractmethod
     def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
