@@ -13,14 +13,12 @@ and lock-based safety for concurrent producers.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import shutil
 import tempfile
 from collections.abc import Generator, Iterator, MutableMapping
 from pathlib import Path
-from time import time_ns
 from typing import TYPE_CHECKING, Generic, Literal, TextIO, TypeVar, cast
 
 import lmdb
@@ -317,7 +315,6 @@ class DiskWorkspace(Workspace):
         task: Task,
         mode: Literal["a", "r"],
         job_id: str | None = None,
-        timestamp: int | Literal["current", "latest"] = "latest",
     ) -> TextIO:
         """Open a task log file in the workspace.
 
@@ -325,7 +322,7 @@ class DiskWorkspace(Workspace):
             task: Task whose logs to open.
             mode: File mode (``"a"`` or ``"r"``).
             job_id: Optional job identifier to filter/select log stream.
-            timestamp: Timestamp selection strategy or explicit timestamp.
+                In read mode with no job_id, opens the most recently modified log.
 
         Returns:
             Open text file object.
@@ -337,32 +334,22 @@ class DiskWorkspace(Workspace):
         log_dir = Path(self._directory) / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        if timestamp == "latest":
-            file_pattern = f"{key_str}_{job_id}_*.log" if job_id is not None else f"{key_str}_*_*.log"
+        if job_id is None and mode == "r":
+            # Find the most recently modified log for this task.
+            matches = sorted(log_dir.glob(f"{key_str}_*.log"), key=lambda p: p.stat().st_mtime)
+            if not matches:
+                msg = f"No logs found for {key_str} in {log_dir}"
+                raise FileNotFoundError(msg)
+            log_path = matches[-1]
+        else:
+            selected_job_id = job_id or "0"
+            log_path = log_dir / f"{key_str}_{selected_job_id}.log"
 
-            def pairs() -> Iterator[tuple[int, str]]:
-                for p in log_dir.glob(file_pattern):
-                    with contextlib.suppress(ValueError):
-                        _, j, t = p.stem.rsplit("_", 2)
-                        yield int(t), j
-
-            timestamp, job_id = max(pairs(), default=(-1, None))
-
-            if timestamp == -1:
-                if mode == "r":
-                    msg = f"No logs found for {key_str} (job_id={job_id!r}) in {log_dir}"
-                    raise FileNotFoundError(msg)
-                timestamp = "current"
-
-        selected_job_id = job_id or "0"
-        selected_timestamp = time_ns() if timestamp == "current" else timestamp
-        log_path = log_dir / f"{key_str}_{selected_job_id}_{selected_timestamp}.log"
         logger.debug(
-            "Opening task log for %s at %s (mode=%s, job_id=%s, timestamp=%s).",
+            "Opening task log for %s at %s (mode=%s, job_id=%s).",
             task,
             log_path,
             mode,
-            selected_job_id,
-            selected_timestamp,
+            job_id,
         )
         return log_path.open(mode, buffering=1)

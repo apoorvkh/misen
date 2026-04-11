@@ -300,7 +300,7 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
                 return
             if chunk:
                 log_viewer = self.query_one("#log-viewer", RichLog)
-                log_viewer.write(chunk.rstrip("\n"))
+                log_viewer.write(Text.from_ansi(chunk.rstrip("\n")))
 
     app = _JobMonitorApp()
     app.run()

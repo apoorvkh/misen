@@ -241,15 +241,28 @@ class Workspace(FromSettingsABC):
         task: Task,
         mode: Literal["a", "r"],
         job_id: str | None = None,
-        timestamp: int | Literal["current", "latest"] = "latest",
     ) -> TextIO:
         """Open a log file for the given task.
 
+        Logs are keyed by ``(resolved_hash, job_id)``. Each task execution
+        produces one log file per job.
+
+        Implementations must support:
+
+        - **Write mode** (``mode="a"``): open (or create) the log for the
+          given task and job_id. If ``job_id`` is ``None``, use a default
+          identifier.
+        - **Read mode** (``mode="r"``): if ``job_id`` is provided, open that
+          specific log. If ``job_id`` is ``None``, open the most recent log
+          for the task. Recency is implementation-defined (e.g., filesystem
+          mtime, object-store upload timestamp, or an internal index).
+        - Raise ``FileNotFoundError`` in read mode when no matching log exists.
+
         Args:
             task: Task associated with the log file.
-            mode: File open mode, usually "a" or "r".
-            timestamp: Timestamp to select a log file, or "latest".
-            job_id: Optional job identifier to group task logs from the same executor job.
+            mode: File open mode (``"a"`` for write/append, ``"r"`` for read).
+            job_id: Optional job identifier. Selects a specific log in read
+                mode; groups output in write mode.
         """
 
     def get_job_log(self, job_id: str, work_unit: WorkUnit) -> Path:
