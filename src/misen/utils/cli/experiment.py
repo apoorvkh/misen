@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import sys
 from dataclasses import dataclass, field, make_dataclass
+from datetime import datetime
 from hashlib import sha1
 from pathlib import Path
 from types import ModuleType
@@ -17,6 +18,7 @@ import tyro
 from rich.console import Console
 from rich.markup import escape
 from rich.pretty import Pretty
+from rich.text import Text
 from rich.tree import Tree
 
 from misen.executor import ExecutorType
@@ -40,7 +42,7 @@ __all__ = [
 ]
 
 
-ExperimentCommand = Literal["run", "list", "tree", "count", "result", "incomplete"]
+ExperimentCommand = Literal["run", "list", "tree", "count", "result", "incomplete", "logs"]
 TreeDepthArg = Annotated[
     int | None,
     tyro.conf.arg(
@@ -68,6 +70,27 @@ TreeIncompleteArg = Annotated[
     tyro.conf.arg(
         name="incomplete",
         help="Show only incomplete tasks in the tree.",
+    ),
+]
+LogsJobArg = Annotated[
+    bool,
+    tyro.conf.arg(
+        name="job",
+        help="Show job log for the containing work unit instead of the task log.",
+    ),
+]
+LogsListArg = Annotated[
+    bool,
+    tyro.conf.arg(
+        name="list",
+        help="List available log entries with metadata instead of printing content.",
+    ),
+]
+LogsAllArg = Annotated[
+    bool,
+    tyro.conf.arg(
+        name="all",
+        help="Show all job logs (only meaningful with --job).",
     ),
 ]
 ListCacheableOnlyArg = Annotated[
@@ -143,6 +166,15 @@ class ResultCommandArgs:
 
 
 @dataclass(frozen=True)
+class LogsCommandArgs:
+    task: tyro.conf.Positional[str | None] = None
+    job_id: tyro.conf.Positional[str | None] = None
+    job: LogsJobArg = False
+    list: LogsListArg = False
+    all: LogsAllArg = False
+
+
+@dataclass(frozen=True)
 class IncompleteCommandArgs:
     all: TreeAllArg = False
     max_depth: TreeDepthArg = None
@@ -156,6 +188,7 @@ ExperimentCommandArgs = tyro.conf.OmitSubcommandPrefixes[
     | Annotated[CountCommandArgs, tyro.conf.subcommand(name="count", prefix_name=False)]
     | Annotated[ResultCommandArgs, tyro.conf.subcommand(name="result", prefix_name=False)]
     | Annotated[IncompleteCommandArgs, tyro.conf.subcommand(name="incomplete", prefix_name=False)]
+    | Annotated[LogsCommandArgs, tyro.conf.subcommand(name="logs", prefix_name=False)]
 ]
 
 
@@ -570,6 +603,7 @@ def _command_name(command: object) -> ExperimentCommand:
         CountCommandArgs: "count",
         ResultCommandArgs: "result",
         IncompleteCommandArgs: "incomplete",
+        LogsCommandArgs: "logs",
     }
     command_name = command_type_to_name.get(type(command))
     if command_name is not None:
@@ -644,6 +678,146 @@ def _result_task(args: Any) -> str | None:
     return cast("str | None", getattr(args, "result_task", None))
 
 
+def _logs_task(args: Any) -> str | None:
+    command = args.command
+    if isinstance(command, LogsCommandArgs):
+        return command.task
+    return cast("str | None", getattr(args, "logs_task", None))
+
+
+def _logs_job_id(args: Any) -> str | None:
+    command = args.command
+    if isinstance(command, LogsCommandArgs):
+        return command.job_id
+    return cast("str | None", getattr(args, "logs_job_id", None))
+
+
+def _logs_job(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, LogsCommandArgs):
+        return command.job
+    return bool(getattr(args, "logs_job", False))
+
+
+def _logs_list(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, LogsCommandArgs):
+        return command.list
+    return bool(getattr(args, "logs_list", False))
+
+
+def _logs_all(args: Any) -> bool:
+    command = args.command
+    if isinstance(command, LogsCommandArgs):
+        return command.all
+    return bool(getattr(args, "logs_all", False))
+
+
+def _resolve_task_or_hash(experiment: Any, query: str) -> Task[Any]:
+    """Resolve a task by exact name or hash prefix.
+
+    Args:
+        experiment: Experiment instance.
+        query: Task name key or hash prefix.
+
+    Returns:
+        Matching task.
+
+    Raises:
+        ValueError: If zero or multiple tasks match.
+    """
+    from misen.tasks import Task
+
+    # Try exact name match first.
+    named_tasks = experiment.tasks()
+    if query in named_tasks:
+        return named_tasks[query]
+
+    # Fallback: hash prefix match across entire task closure.
+    query_upper = query.upper()
+    all_tasks = _iter_task_closure(named_tasks.values())
+    matches = [t for t in all_tasks if t.task_hash().b32().startswith(query_upper)]
+
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        msg = f"No task matching {query!r}."
+        raise ValueError(msg)
+    labels = ", ".join(task_label(t) for t in matches)
+    msg = f"Ambiguous query {query!r}: matches {labels}."
+    raise ValueError(msg)
+
+
+def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
+    """Find the work unit containing a given task.
+
+    Args:
+        experiment: Experiment instance.
+        task: Task to locate.
+
+    Returns:
+        WorkUnit containing the task.
+
+    Raises:
+        ValueError: If the task is not found in any work unit.
+    """
+    from misen.utils.work_unit import WorkUnit, build_work_graph
+
+    work_graph = build_work_graph(set(experiment.tasks().values()))
+    for work_unit in work_graph.nodes():
+        if task == work_unit.root or task in set(work_unit.graph.nodes()):
+            return work_unit
+
+    msg = f"No work unit found containing task {task_label(task)}."
+    raise ValueError(msg)
+
+
+def _list_task_logs(task: Task[Any], workspace: Any, console: Console) -> None:
+    """List available task log entries with metadata."""
+    try:
+        resolved_hash = task.resolved_hash(workspace=workspace).b32()
+    except RuntimeError:
+        console.print(f"  [dim]No resolved hash (task not yet executed).[/dim]")
+        return
+
+    log_dir = Path(workspace.directory) / "task_logs" / resolved_hash[:2]
+    if not log_dir.exists():
+        console.print(f"  [dim]No logs found.[/dim]")
+        return
+
+    log_files = sorted(log_dir.glob(f"{resolved_hash}_*.log"), key=lambda p: p.stat().st_mtime)
+    if not log_files:
+        console.print(f"  [dim]No logs found.[/dim]")
+        return
+
+    for log_path in log_files:
+        _, job_id = log_path.stem.rsplit("_", 1)
+        stat = log_path.stat()
+        time_str = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+        console.print(
+            f"  job_id=[cyan]{escape(job_id)}[/cyan]  modified=[dim]{time_str}[/dim]  size=[dim]{stat.st_size}B[/dim]"
+        )
+
+
+def _list_job_logs(log_paths: list[Path], console: Console) -> None:
+    """List available job log entries with metadata."""
+    for log_path in log_paths:
+        stat = log_path.stat()
+        size = stat.st_size
+        mtime = stat.st_mtime
+        time_str = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+        console.print(
+            f"  [bright_white]{escape(log_path.name)}[/bright_white]  modified=[dim]{time_str}[/dim]  size=[dim]{size}B[/dim]"
+        )
+
+
+def _print_log_content(log_path: Path, console: Console, *, rule_title: str | None = None) -> None:
+    """Print log file content with optional rule header."""
+    if rule_title is not None:
+        console.rule(rule_title)
+    console.print(Text.from_ansi(log_path.read_text(encoding="utf-8", errors="replace")))
+
+
 def _execute_command(*, args: Any, console: Console) -> None:
     """Execute resolved experiment CLI command."""
     command_name = _command_name(args.command)
@@ -711,6 +885,89 @@ def _execute_command(*, args: Any, console: Console) -> None:
             workspace = _resolve_workspace(args)
             task_key = _resolve_command_task(command=command_name, task_name=_result_task(args))
             console.print(Pretty(args.experiment.result(task_key, workspace=workspace)))
+        case "logs":
+            workspace = _resolve_workspace(args)
+            task_query = _logs_task(args)
+            job_id = _logs_job_id(args)
+            job_mode = _logs_job(args)
+            list_mode = _logs_list(args)
+            show_all = _logs_all(args)
+
+            if not job_mode:
+                # Task log mode.
+                if task_query is not None:
+                    task = _resolve_task_or_hash(args.experiment, task_query)
+                    if list_mode:
+                        status = _status_indicator(done=_task_done(task, workspace))
+                        console.print(f"{status} {_task_display_label(task)}")
+                        _list_task_logs(task, workspace, console)
+                    else:
+                        try:
+                            with workspace.open_task_log(task, mode="r", job_id=job_id) as f:
+                                log_content = f.read()
+                        except FileNotFoundError:
+                            console.print("[dim]No logs found.[/dim]")
+                            return
+                        status = _status_indicator(done=_task_done(task, workspace))
+                        console.rule(f"{status} {_task_display_label(task)}")
+                        console.print(Text.from_ansi(log_content))
+                else:
+                    tasks = _iter_task_closure(args.experiment.tasks().values())
+                    printed_any = False
+                    for task in tasks:
+                        if list_mode:
+                            status = _status_indicator(done=_task_done(task, workspace))
+                            console.print(f"{status} {_task_display_label(task)}")
+                            _list_task_logs(task, workspace, console)
+                            printed_any = True
+                        else:
+                            try:
+                                with workspace.open_task_log(task, mode="r", job_id=job_id) as f:
+                                    log_content = f.read()
+                            except FileNotFoundError:
+                                continue
+                            status = _status_indicator(done=_task_done(task, workspace))
+                            console.rule(f"{status} {_task_display_label(task)}")
+                            console.print(Text.from_ansi(log_content))
+                            printed_any = True
+                    if not printed_any:
+                        console.print("[dim]No logs found.[/dim]")
+            else:
+                # Job log mode.
+                if task_query is not None:
+                    task = _resolve_task_or_hash(args.experiment, task_query)
+                    work_unit = _find_work_unit_for_task(args.experiment, task)
+                    log_paths = sorted(workspace.job_log_iter(work_unit), key=lambda p: p.stat().st_mtime)
+
+                    if job_id is not None:
+                        log_paths = [p for p in log_paths if f"_{job_id}.log" in p.name]
+
+                    if not log_paths:
+                        console.print("[dim]No job logs found.[/dim]")
+                        return
+
+                    if list_mode:
+                        _list_job_logs(log_paths, console)
+                    else:
+                        logs_to_show = log_paths if show_all else log_paths[-1:]
+                        for log_path in logs_to_show:
+                            _print_log_content(
+                                log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
+                            )
+                else:
+                    log_paths = sorted(workspace.job_log_iter(), key=lambda p: p.stat().st_mtime)
+                    if not log_paths:
+                        console.print("[dim]No job logs found.[/dim]")
+                        return
+
+                    if list_mode:
+                        _list_job_logs(log_paths, console)
+                    else:
+                        logs_to_show = log_paths if show_all else log_paths[-1:]
+                        for log_path in logs_to_show:
+                            _print_log_content(
+                                log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
+                            )
 
 
 def _resolve_command(*, command_token: str | None, unknown_args: list[str]) -> ExperimentCommand:
@@ -759,6 +1016,7 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
         "count": CountCommandArgs,
         "result": ResultCommandArgs,
         "incomplete": IncompleteCommandArgs,
+        "logs": LogsCommandArgs,
     }
     resolved_command = _resolve_command(command_token=None, unknown_args=unknown_args)
 

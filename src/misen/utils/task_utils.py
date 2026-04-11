@@ -14,6 +14,7 @@ import itertools
 import logging
 import tempfile
 import time
+from rich.console import Console as RichConsole
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
@@ -171,19 +172,20 @@ def execute_task(
         assigned_resources=assigned_resources,
     )
 
-    try:
-        with workspace.open_task_log(task=task, mode="a", job_id=job_id, timestamp="current") as task_log:
-            with capture_all_output(task_log, tee_to_stdout=True):
+    with workspace.open_task_log(task=task, mode="a", job_id=job_id) as task_log:
+        with capture_all_output(task_log, tee_to_stdout=True):
+            try:
                 args = (argument_resolver(value) for value in task.args)
                 kwargs = {name: argument_resolver(value) for name, value in task.kwargs.items()}
                 result = task.func(*args, **kwargs)
-    except Exception:
-        logger.exception("Task failed: %s after %.2fs.", task_name, time.perf_counter() - started_at)
-        runtime_event(
-            f"Task failed: {task_name} in {(time.perf_counter() - started_at):.2f}s",
-            style="bold red",
-        )
-        raise
+            except Exception:
+                RichConsole(stderr=True).print_exception()
+                logger.exception("Task failed: %s after %.2fs.", task_name, time.perf_counter() - started_at)
+                runtime_event(
+                    f"Task failed: {task_name} in {(time.perf_counter() - started_at):.2f}s",
+                    style="bold red",
+                )
+                raise
 
     logger.info("Task finished: %s in %.2fs.", task_name, time.perf_counter() - started_at)
     runtime_event(f"Task finished: {task_name} in {(time.perf_counter() - started_at):.2f}s", style="green")

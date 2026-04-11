@@ -177,7 +177,7 @@ class LocalScheduler(msgspec.Struct, dict=True):
         try:
             process = subprocess.Popen(  # noqa: S603
                 argv,
-                env=os.environ | env_overrides,
+                env=os.environ | {"FORCE_COLOR": "1", "MISEN_RUNTIME_EVENTS": "1"} | env_overrides,
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
             )
