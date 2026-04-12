@@ -1,11 +1,12 @@
-"""Internal task helpers for traversal, hashing, and execution.
+"""Internal task helpers for hashing, execution, and persistence.
 
 This module centralizes the mechanics used by :class:`misen.tasks.Task`:
 
-- walking nested structures to find/map leaves
 - canonical task-argument hashing
 - runtime argument resolution (dependency results + sentinels)
 - output capture and result persistence
+
+Generic nested-structure traversal lives in :mod:`misen.utils.nested`.
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WOR
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashing import ResultHash, TaskHash, UnhashableTypeError
 from misen.utils.log_capture import capture_all_output
+from misen.utils.nested import iter_nested_leaves, map_nested_leaves
 from misen.utils.runtime_events import runtime_event, task_label
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Mapping
     from inspect import Signature
 
     from misen.task_metadata import TaskMetadata
@@ -40,7 +42,6 @@ __all__ = [
     "collect_task_dependencies",
     "execute_task",
     "hash_task_arguments",
-    "map_nested_leaves",
     "save_task_result",
 ]
 
@@ -141,7 +142,7 @@ def collect_task_dependencies(args: tuple[Any, ...], kwargs: Mapping[str, Any]) 
     from misen.tasks import Task
 
     values = itertools.chain(args, kwargs.values())
-    leaves = itertools.chain.from_iterable(map(_iter_nested_leaves, values))
+    leaves = itertools.chain.from_iterable(map(iter_nested_leaves, values))
     return frozenset(leaf for leaf in leaves if isinstance(leaf, Task))
 
 
@@ -225,30 +226,6 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
             raise
 
 
-def map_nested_leaves(value: Any, leaf_mapper: Callable[[Any], Any]) -> Any:
-    """Map scalar leaves recursively while preserving container structure.
-
-    Args:
-        value: Arbitrary nested structure.
-        leaf_mapper: Function applied to non-container leaves.
-
-    Returns:
-        Structure mirroring ``value`` with mapped leaves.
-    """
-    value_type = type(value)
-    if value_type is dict:
-        return {map_nested_leaves(k, leaf_mapper): map_nested_leaves(v, leaf_mapper) for k, v in value.items()}
-    if value_type is list:
-        return [map_nested_leaves(v, leaf_mapper) for v in value]
-    if value_type is tuple:
-        return tuple(map_nested_leaves(v, leaf_mapper) for v in value)
-    if value_type is set:
-        return {map_nested_leaves(v, leaf_mapper) for v in value}
-    if value_type is frozenset:
-        return frozenset(map_nested_leaves(v, leaf_mapper) for v in value)
-    return leaf_mapper(value)
-
-
 def _build_argument_resolver(
     task: Task[Any],
     workspace: Workspace,
@@ -298,29 +275,6 @@ def _build_argument_resolver(
         work_dir()
 
     return argument_resolver, work_directory
-
-
-def _iter_nested_leaves(value: Any) -> Iterator[Any]:
-    """Yield scalar leaves from supported nested containers.
-
-    Args:
-        value: Arbitrary nested structure.
-
-    Yields:
-        Non-container leaves.
-    """
-    if type(value) is dict:
-        for key, nested in value.items():
-            yield from _iter_nested_leaves(key)
-            yield from _iter_nested_leaves(nested)
-        return
-
-    if type(value) in (list, tuple, set, frozenset):
-        for nested in value:
-            yield from _iter_nested_leaves(nested)
-        return
-
-    yield value
 
 
 def build_task_dependency_graph(

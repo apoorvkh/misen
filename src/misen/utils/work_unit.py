@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
-from misen.utils.task_utils import build_task_dependency_graph, map_nested_leaves
+from misen.utils.nested import map_nested_leaves
+from misen.utils.task_utils import build_task_dependency_graph
 
 if TYPE_CHECKING:
     from misen.task_metadata import GpuRuntime, Resources
