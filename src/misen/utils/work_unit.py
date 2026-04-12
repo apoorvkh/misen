@@ -152,10 +152,9 @@ class WorkUnit:
 
             # Rebuild the task with resolved in-unit non-cacheable dependencies.
             # Cacheable dependencies are still loaded through Workspace in Task.result.
-            task_results[task] = Task(
-                task.func,
-                *(resolve_arg(arg) for arg in task.args),
-                **{name: resolve_arg(arg) for name, arg in task.kwargs.items()},
+            task_results[task] = task._with_resolved_args(
+                args=tuple(resolve_arg(arg) for arg in task.args),
+                kwargs={name: resolve_arg(arg) for name, arg in task.kwargs.items()},
             ).result(
                 workspace=workspace,
                 compute_if_uncached=True,

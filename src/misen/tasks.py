@@ -115,6 +115,41 @@ class Task(FrozenMixin, Generic[R]):
 
         self.freeze()
 
+    def _with_resolved_args(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Task[R]:
+        """Create a shallow copy with substituted arguments, bypassing full __init__.
+
+        This avoids re-inspecting the function signature, re-resolving metadata,
+        re-computing resources, and re-validating sentinels — all of which are
+        unchanged when the only difference is that some non-cacheable dependency
+        args have been resolved to their runtime values.
+
+        Uses :meth:`__getstate__` to snapshot all slot-backed state, so newly
+        added slots are carried forward automatically.
+
+        Args:
+            args: New positional arguments (with some Task deps resolved to values).
+            kwargs: New keyword arguments (with some Task deps resolved to values).
+
+        Returns:
+            A new Task sharing func/properties/signature/resources from ``self``
+            but with updated args, kwargs, dependencies, and task_hash.
+        """
+        state = self.__getstate__()
+        state["args"] = args
+        state["kwargs"] = MappingProxyType(kwargs)
+        state["dependencies"] = collect_task_dependencies(args, kwargs)
+        hashed_args = hash_task_arguments(
+            signature=self._signature,
+            args=args,
+            kwargs=kwargs,
+            properties=self.properties,
+        )
+        state["_task_hash"] = TaskHash.from_object((self.properties.id, hashed_args))
+        state["_frozen"] = True
+        new: Task[R] = object.__new__(Task)
+        new.__setstate__(state)
+        return new
+
     def __repr__(self) -> str:
         """Return compact debug representation."""
         argument_items = self._repr_argument_items()
