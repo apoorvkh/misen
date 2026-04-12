@@ -9,22 +9,21 @@ preserving cache semantics.
 from __future__ import annotations
 
 import functools
-from functools import cache
 from operator import is_
 from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
-from misen.tasks import Task
-from misen.utils.graph import DependencyGraph
-from misen.utils.task_utils import map_nested_leaves
+from misen.utils.task_utils import build_task_dependency_graph, map_nested_leaves
 
 if TYPE_CHECKING:
     from misen.task_metadata import GpuRuntime, Resources
+    from misen.tasks import Task
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
+    from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
 
-__all__ = ["WorkUnit", "build_task_dependency_graph", "build_work_graph"]
+__all__ = ["WorkUnit", "build_work_graph"]
 
 
 class WorkUnit:
@@ -147,9 +146,7 @@ class WorkUnit:
         for i, task in enumerate(ordered_tasks):
             # Keep only transient results still needed by future in-unit tasks.
             remaining_deps = {
-                dependency
-                for remaining_task in ordered_tasks[i:]
-                for dependency in remaining_task.dependencies
+                dependency for remaining_task in ordered_tasks[i:] for dependency in remaining_task.dependencies
             }
             task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
 
@@ -198,6 +195,8 @@ def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
     Returns:
         Dependency graph of work units ready for executor submission.
     """
+    from misen.tasks import Task
+
     # Edge convention: A -> B means A depends on B.
     union = Task((lambda *_: None), *tasks)
     task_graph: DependencyGraph[Task[Any]] = build_task_dependency_graph(task=union)
@@ -214,71 +213,3 @@ def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
         work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
 
     return work_graph
-
-
-def build_task_dependency_graph(
-    task: Task[Any],
-    *,
-    exclude_cacheable: bool = False,
-    exclude_cached: bool = False,
-    workspace: Workspace | None = None,
-) -> DependencyGraph[Task[Any]]:
-    """Build dependency graph rooted at a task-like object.
-
-    Args:
-        task: Root task-like node.
-        exclude_cacheable: Whether to skip cacheable dependency nodes.
-        exclude_cached: Whether to skip dependencies already cached in workspace.
-        workspace: Workspace required when ``exclude_cached=True``.
-
-    Returns:
-        Dependency graph with edges ``task -> dependency``.
-
-    Raises:
-        ValueError: If ``exclude_cached=True`` and workspace is not provided.
-    """
-    if exclude_cacheable:
-
-        @cache
-        def include_dependency(dependency: Task[Any]) -> bool:
-            return dependency.properties.cache is False
-
-    elif exclude_cached:
-        if workspace is None:
-            msg = "workspace is required when exclude_cached=True."
-            raise ValueError(msg)
-
-        @cache
-        def include_dependency(dependency: Task[Any]) -> bool:
-            return not dependency.is_cached(workspace=workspace)
-
-    else:
-
-        def include_dependency(dependency: Task[Any]) -> bool:  # noqa: ARG001
-            return True
-
-    graph: DependencyGraph[Task[Any]] = DependencyGraph()
-    nodes: dict[Task[Any], int] = {}
-
-    def get_node_index(candidate: Task[Any]) -> int:
-        node_index = nodes.get(candidate)
-        if node_index is None:
-            node_index = nodes[candidate] = graph.add_node(candidate)
-        return node_index
-
-    stack: list[Task[Any]] = [task]
-    seen: set[Task[Any]] = {task}
-
-    while stack:
-        current = stack.pop()
-        current_node = get_node_index(current)
-
-        for dependency in current.dependencies:
-            if not include_dependency(dependency):
-                continue
-            graph.add_edge(current_node, get_node_index(dependency), None)
-            if dependency not in seen:
-                seen.add(dependency)
-                stack.append(dependency)
-
-    return graph
