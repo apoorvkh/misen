@@ -23,7 +23,7 @@ from rich.tree import Tree
 
 from misen.executor import ExecutorType
 from misen.utils.runtime_events import task_label
-from misen.utils.settings import DEFAULT_SETTINGS_FILE, Settings
+from misen.utils.settings import Settings
 from misen.workspace import WorkspaceType
 
 from . import tui
@@ -130,9 +130,9 @@ class _ExperimentEntryArgs:
 
 @dataclass(frozen=True)
 class _BootstrapArgs:
-    settings_file: Path = DEFAULT_SETTINGS_FILE
-    executor_type: ExecutorType | Literal["auto"] = "auto"
-    workspace_type: WorkspaceType | Literal["auto"] = "auto"
+    config: Path | None = None
+    executor: ExecutorType | str = "auto"
+    workspace: WorkspaceType | str = "auto"
 
 
 @dataclass(frozen=True)
@@ -575,16 +575,16 @@ def _resolve_workspace(args: Any) -> Any:
     """Resolve workspace instance from parsed CLI args."""
     from misen.workspace import Workspace
 
-    settings = Settings(file=args.settings_file)
-    return Workspace.auto(settings=settings) if args.workspace_type == "auto" else args.workspace
+    settings = Settings(config_file=args.config)
+    return Workspace.auto(settings=settings) if args.workspace == "auto" else args.workspace
 
 
 def _resolve_executor(args: Any) -> Any:
     """Resolve executor instance from parsed CLI args."""
     from misen.executor import Executor
 
-    settings = Settings(file=args.settings_file)
-    return Executor.auto(settings=settings) if args.executor_type == "auto" else args.executor
+    settings = Settings(config_file=args.config)
+    return Executor.auto(settings=settings) if args.executor == "auto" else args.executor
 
 
 def _command_name(command: object) -> ExperimentCommand:
@@ -761,7 +761,7 @@ def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
     Raises:
         ValueError: If the task is not found in any work unit.
     """
-    from misen.utils.work_unit import WorkUnit, build_work_graph
+    from misen.utils.work_unit import build_work_graph
 
     work_graph = build_work_graph(set(experiment.tasks().values()))
     for work_unit in work_graph.nodes():
@@ -997,7 +997,7 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
 
     Notes:
         Parsing happens in two phases so executor/workspace concrete argument
-        schemas can be selected dynamically from ``*_type`` flags.
+        schemas can be selected dynamically from ``--executor``/``--workspace`` flags.
     """
     from misen.executor import Executor
     from misen.workspace import Workspace
@@ -1023,16 +1023,16 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
     cli_fields: list[tuple[Any, ...]] = [
         ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls]),  # ty:ignore[invalid-type-form]
     ]
-    if bootstrap_args.executor_type != "auto":
-        cli_fields.append(("executor", Executor.resolve_type(bootstrap_args.executor_type)))
-    if bootstrap_args.workspace_type != "auto":
-        cli_fields.append(("workspace", Workspace.resolve_type(bootstrap_args.workspace_type)))
+    if bootstrap_args.executor != "auto":
+        cli_fields.append(("executor", Executor.resolve_type(bootstrap_args.executor)))
+    if bootstrap_args.workspace != "auto":
+        cli_fields.append(("workspace", Workspace.resolve_type(bootstrap_args.workspace)))
     cli_fields.extend(
         [
             ("command", ExperimentCommandArgs, field(default_factory=command_default_factories[resolved_command])),
-            ("settings_file", Path, bootstrap_args.settings_file),
-            ("executor_type", ExecutorType | Literal["auto"], bootstrap_args.executor_type),
-            ("workspace_type", WorkspaceType | Literal["auto"], bootstrap_args.workspace_type),
+            ("config", Path | None, bootstrap_args.config),
+            ("executor", ExecutorType | Literal["auto"] | str, bootstrap_args.executor),
+            ("workspace", WorkspaceType | Literal["auto"] | str, bootstrap_args.workspace),
         ]
     )
 

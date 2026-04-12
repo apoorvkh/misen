@@ -18,12 +18,10 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from functools import cache
-from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast, get_args
-
-from typing_extensions import assert_never
+from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar, cast
 
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, work_unit_label
-from misen.utils.settings import FromSettingsABC
+from misen.utils.settings import Configurable
 from misen.utils.snapshot import LocalSnapshot
 from misen.utils.work_unit import build_work_graph
 
@@ -45,13 +43,21 @@ SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
 logger = logging.getLogger(__name__)
 
 
-class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
+class Executor(Configurable, Generic[JobT, SnapshotT]):
     """Abstract execution backend interface.
 
     Subclasses provide snapshot creation and dispatch behavior; shared submission
     logic here handles dependency-aware graph traversal and completed-work short
     circuiting.
     """
+
+    _config_key: ClassVar[str] = "executor"
+    _config_default_type: ClassVar[str] = "misen.executors.local:LocalExecutor"
+    _config_aliases: ClassVar[dict[ExecutorType, str]] = {
+        "local": "misen.executors.local:LocalExecutor",
+        "in_process": "misen.executors.in_process:InProcessExecutor",
+        "slurm": "misen.executors.slurm:SlurmExecutor",
+    }
 
     def submit(
         self,
@@ -231,47 +237,6 @@ class Executor(FromSettingsABC, Generic[JobT, SnapshotT]):
     def _cached_local_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
         """Return cached local snapshot for one directory."""
         return LocalSnapshot(snapshots_dir=snapshots_dir)
-
-    @staticmethod
-    def _settings_key() -> str:
-        """Return TOML key used for executor auto-configuration."""
-        return "executor"
-
-    @staticmethod
-    def _default() -> Executor:
-        """Return default executor implementation."""
-        from misen.executors.local import LocalExecutor
-
-        return LocalExecutor()
-
-    @classmethod
-    def _resolve_type(cls, type_name: str | ExecutorType) -> type[Executor]:
-        """Resolve an executor type string to a concrete class.
-
-        Args:
-            type_name: Built-in short name or ``module:Class`` string.
-
-        Returns:
-            Resolved executor class.
-        """
-        if type_name in get_args(ExecutorType):
-            type_name = cast("ExecutorType", type_name)
-            match type_name:
-                case "local":
-                    from misen.executors.local import LocalExecutor
-
-                    return LocalExecutor
-                case "in_process":
-                    from misen.executors.in_process import InProcessExecutor
-
-                    return InProcessExecutor
-                case "slurm":
-                    from misen.executors.slurm import SlurmExecutor
-
-                    return SlurmExecutor
-                case _:
-                    assert_never(type_name)
-        return super()._resolve_type(type_name)
 
 
 class Job(ABC):
