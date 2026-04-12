@@ -65,7 +65,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
         workspace: Workspace,
         *,
         blocking: bool = False,
-    ) -> DependencyGraph[CompletedJob | JobT]:
+    ) -> tuple[DependencyGraph[CompletedJob | JobT], SnapshotT | None]:
         """Submit tasks for execution on this backend.
 
         The method first converts task DAGs into a work-unit DAG. Work units
@@ -79,7 +79,8 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
                 terminal state before returning.
 
         Returns:
-            Dependency graph of job handles keyed to work-unit topology.
+            Tuple of (dependency graph of job handles, snapshot used for
+            dispatched work units or ``None`` if all work was cached).
         """
         work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
         work_units = list(work_graph)
@@ -197,8 +198,20 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
                 )
                 job.wait()
             logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
+            self.cleanup_snapshot(snapshot)
 
-        return job_graph
+        return job_graph, snapshot
+
+    def cleanup_snapshot(self, snapshot: Snapshot | None) -> None:
+        """Clean up a snapshot created by :meth:`submit`.
+
+        Args:
+            snapshot: Snapshot to remove, or ``None`` (no-op).
+        """
+        if snapshot is not None:
+            snapshot.cleanup()
+            logger.info("%s cleaned up snapshot.", self.__class__.__name__)
+            runtime_event("Cleaned up snapshot of the project environment", style="green")
 
     @abstractmethod
     def _make_snapshot(self, workspace: Workspace) -> SnapshotT:

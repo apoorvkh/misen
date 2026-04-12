@@ -26,6 +26,7 @@ import cloudpickle
 import uv
 from dotenv import load_dotenv
 
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -41,6 +42,10 @@ class Snapshot(ABC):
     """Abstract environment snapshot used by executors."""
 
     __slots__ = ()
+
+    @abstractmethod
+    def cleanup(self) -> None:
+        """Remove snapshot artifacts from disk."""
 
     @abstractmethod
     def prepare_job(
@@ -68,6 +73,9 @@ class NullSnapshot(Snapshot):
     """Snapshot placeholder for executors that never dispatch subprocess jobs."""
 
     __slots__ = ()
+
+    def cleanup(self) -> None:
+        """No-op for null snapshots."""
 
     def prepare_job(
         self,
@@ -98,6 +106,10 @@ class LocalSnapshot(Snapshot):
         self.snapshot_dir.mkdir(parents=True)
         self.venv_dir = self._snapshot_venv(self.snapshot_dir / ".venv")
         self.env_files = self._snapshot_env_files(self.snapshot_dir)
+
+    def cleanup(self) -> None:
+        """Remove snapshot directory tree from disk."""
+        shutil.rmtree(self.snapshot_dir, ignore_errors=True)
 
     def prepare_job(
         self,
