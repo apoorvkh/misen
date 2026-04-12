@@ -20,12 +20,10 @@ import logging
 import shutil
 from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
-from typing import TYPE_CHECKING, Any, Literal, TextIO, TypeAlias, TypeVar, cast, get_args
-
-from typing_extensions import assert_never
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar
 
 from misen.tasks import Task
-from misen.utils.settings import FromSettingsABC
+from misen.utils.settings import Configurable
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -43,45 +41,16 @@ TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
 
 
-class Workspace(FromSettingsABC):
+class Workspace(Configurable):
     """Base class for workspace storage backends.
 
     Concrete implementations provide persistence (for hashes/results), lock
     implementations, and task/job log storage.
     """
 
-    @staticmethod
-    def _settings_key() -> str:
-        """Return TOML key used for workspace auto-configuration."""
-        return "workspace"
-
-    @staticmethod
-    def _default() -> Workspace:
-        """Return default workspace implementation."""
-        from misen.workspaces.disk import DiskWorkspace
-
-        return DiskWorkspace()
-
-    @classmethod
-    def _resolve_type(cls, type_name: str | WorkspaceType) -> type[Workspace]:
-        """Resolve workspace type name to a concrete class.
-
-        Args:
-            type_name: Built-in short name or ``module:Class`` string.
-
-        Returns:
-            Resolved workspace class.
-        """
-        if type_name in get_args(WorkspaceType):
-            type_name = cast("WorkspaceType", type_name)
-            match type_name:
-                case "disk":
-                    from misen.workspaces.disk import DiskWorkspace
-
-                    return DiskWorkspace
-                case _:
-                    assert_never(type_name)
-        return super()._resolve_type(type_name)
+    _config_key: ClassVar[str] = "workspace"
+    _config_default_type: ClassVar[str] = "misen.workspaces.disk:DiskWorkspace"
+    _config_aliases: ClassVar[dict[WorkspaceType, str]] = {"disk": "misen.workspaces.disk:DiskWorkspace"}
 
     def _post_init(
         self,

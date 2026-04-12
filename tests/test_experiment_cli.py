@@ -309,18 +309,18 @@ def test_work_unit_repr_uses_work_unit_label() -> None:
 
 
 def test_experiment_cli_count_command(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="count",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="count",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -335,12 +335,12 @@ def test_experiment_cli_count_command(monkeypatch, capsys, tmp_path) -> None:
 
 
 def test_experiment_cli_tree_command_prints_tree(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="tree",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="tree",
@@ -348,9 +348,9 @@ def test_experiment_cli_tree_command_prints_tree(monkeypatch, capsys, tmp_path) 
         tree_max_depth=None,
         tree_cacheable_only=False,
         tree_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -373,12 +373,12 @@ def test_experiment_cli_tree_command_prints_tree(monkeypatch, capsys, tmp_path) 
 
 
 def test_experiment_cli_tree_command_max_depth(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="tree",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="tree",
@@ -386,9 +386,9 @@ def test_experiment_cli_tree_command_max_depth(monkeypatch, capsys, tmp_path) ->
         tree_max_depth=0,
         tree_cacheable_only=False,
         tree_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -406,12 +406,12 @@ def test_experiment_cli_tree_command_max_depth(monkeypatch, capsys, tmp_path) ->
 
 
 def test_experiment_cli_tree_command_cacheable_only(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="tree",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="tree",
@@ -419,9 +419,9 @@ def test_experiment_cli_tree_command_cacheable_only(monkeypatch, capsys, tmp_pat
         tree_max_depth=None,
         tree_cacheable_only=True,
         tree_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -436,12 +436,12 @@ def test_experiment_cli_tree_command_cacheable_only(monkeypatch, capsys, tmp_pat
 
 
 def test_experiment_cli_tree_command_all_expands_shared_dependencies(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="tree",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="tree",
@@ -449,9 +449,9 @@ def test_experiment_cli_tree_command_all_expands_shared_dependencies(monkeypatch
         tree_max_depth=None,
         tree_cacheable_only=False,
         tree_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=SharedDepsExperiment(),
     )
 
@@ -469,12 +469,12 @@ def test_experiment_cli_tree_command_all_expands_shared_dependencies(monkeypatch
 
 
 def test_experiment_cli_tree_command_collapses_shared_dependencies_by_default(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="tree",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="tree",
@@ -482,9 +482,9 @@ def test_experiment_cli_tree_command_collapses_shared_dependencies_by_default(mo
         tree_max_depth=None,
         tree_cacheable_only=False,
         tree_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=SharedDepsExperiment(),
     )
 
@@ -502,20 +502,20 @@ def test_experiment_cli_tree_command_collapses_shared_dependencies_by_default(mo
 
 
 def test_experiment_cli_list_command_prints_flat_tasks(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="list",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="list",
         list_cacheable_only=False,
         list_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -540,20 +540,20 @@ def test_experiment_cli_list_command_prints_flat_tasks(monkeypatch, capsys, tmp_
 
 
 def test_experiment_cli_list_command_places_cache_marker_after_task_name(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="list",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="list",
         list_cacheable_only=False,
         list_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CachedExperiment(),
     )
 
@@ -568,20 +568,20 @@ def test_experiment_cli_list_command_places_cache_marker_after_task_name(monkeyp
 
 
 def test_experiment_cli_list_command_cacheable_only(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="list",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="list",
         list_cacheable_only=True,
         list_incomplete=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -596,20 +596,20 @@ def test_experiment_cli_list_command_cacheable_only(monkeypatch, capsys, tmp_pat
 
 
 def test_experiment_cli_list_command_incomplete_filter(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="list",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="list",
         list_cacheable_only=False,
         list_incomplete=True,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -627,12 +627,12 @@ def test_experiment_cli_list_command_incomplete_filter(monkeypatch, capsys, tmp_
 
 
 def test_experiment_cli_tree_command_incomplete_filter_prints_missing_tasks(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="tree",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="tree",
@@ -640,9 +640,9 @@ def test_experiment_cli_tree_command_incomplete_filter_prints_missing_tasks(monk
         tree_max_depth=None,
         tree_cacheable_only=False,
         tree_incomplete=True,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -661,12 +661,12 @@ def test_experiment_cli_tree_command_incomplete_filter_prints_missing_tasks(monk
 
 
 def test_experiment_cli_incomplete_command_alias_prints_missing_tasks(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="incomplete",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="incomplete",
@@ -674,9 +674,9 @@ def test_experiment_cli_incomplete_command_alias_prints_missing_tasks(monkeypatc
         tree_max_depth=None,
         tree_cacheable_only=False,
         tree_incomplete=True,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -696,12 +696,12 @@ def test_experiment_cli_incomplete_command_alias_prints_missing_tasks(monkeypatc
 def test_experiment_cli_tree_command_incomplete_filter_handles_fully_complete_graph(
     monkeypatch, capsys, tmp_path
 ) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="tree",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="tree",
@@ -709,9 +709,9 @@ def test_experiment_cli_tree_command_incomplete_filter_handles_fully_complete_gr
         tree_max_depth=None,
         tree_cacheable_only=False,
         tree_incomplete=True,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=CliExperiment(),
     )
 
@@ -728,7 +728,7 @@ def test_experiment_cli_tree_command_incomplete_filter_handles_fully_complete_gr
 
 
 def test_experiment_cli_run_command_runs_full_experiment(monkeypatch, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     executor = object()
     workspace = object()
     calls: dict[str, object] = {}
@@ -740,17 +740,17 @@ def test_experiment_cli_run_command_runs_full_experiment(monkeypatch, tmp_path) 
 
     first_args = SimpleNamespace(
         command="run",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="run",
         run_task=None,
         run_tui=True,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=SimpleNamespace(tasks=lambda: {}),
     )
 
@@ -767,7 +767,7 @@ def test_experiment_cli_run_command_runs_full_experiment(monkeypatch, tmp_path) 
 
 
 def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     executor = object()
     workspace = object()
     submit_calls: list[tuple[object, object, bool]] = []
@@ -786,17 +786,17 @@ def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> Non
 
     first_args = SimpleNamespace(
         command="run",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="run",
         run_task="task",
         run_tui=True,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=StubExperiment(task=StubTask()),
     )
 
@@ -810,7 +810,7 @@ def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> Non
 
 
 def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     workspace = object()
     submit_calls: list[tuple[set[Task[int]], object, bool]] = []
 
@@ -824,17 +824,17 @@ def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tm
 
     first_args = SimpleNamespace(
         command="run",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="run",
         run_task=None,
         run_tui=False,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=StubExperiment(),
     )
 
@@ -952,7 +952,7 @@ def test_experiment_cli_parses_list_incomplete_flag(monkeypatch, capsys) -> None
 
 
 def test_experiment_cli_result_command(monkeypatch, capsys, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     workspace = object()
 
     def fake_result(key: str, workspace: object) -> str:
@@ -965,16 +965,16 @@ def test_experiment_cli_result_command(monkeypatch, capsys, tmp_path) -> None:
     first_args = SimpleNamespace(
         command="result",
         result_task=None,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="result",
         result_task="task",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=experiment,
     )
 
@@ -987,19 +987,19 @@ def test_experiment_cli_result_command(monkeypatch, capsys, tmp_path) -> None:
 
 
 def test_experiment_cli_result_command_requires_task_selector(monkeypatch, tmp_path) -> None:
-    settings_file = tmp_path / "misen.toml"
+    config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="result",
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
     )
     second_args = SimpleNamespace(
         command="result",
         result_task=None,
-        settings_file=settings_file,
-        executor_type="auto",
-        workspace_type="auto",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
         experiment=SimpleNamespace(result=lambda _key, workspace: workspace),
     )
 
