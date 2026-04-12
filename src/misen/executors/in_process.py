@@ -14,7 +14,8 @@ from misen.executor import CompletedJob, Executor
 from misen.tasks import Task
 from misen.utils.graph import DependencyGraph
 from misen.utils.snapshot import NullSnapshot, apply_env_files_temporarily
-from misen.utils.work_unit import WorkUnit, build_task_dependency_graph
+from misen.utils.task_utils import build_task_dependency_graph
+from misen.utils.work_unit import WorkUnit
 
 if TYPE_CHECKING:
     from misen.workspace import Workspace

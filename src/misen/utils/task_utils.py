@@ -14,11 +14,14 @@ import itertools
 import logging
 import tempfile
 import time
-from rich.console import Console as RichConsole
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
+from rich.console import Console as RichConsole
+
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
+from misen.utils.graph import DependencyGraph
 from misen.utils.hashing import ResultHash, TaskHash, UnhashableTypeError
 from misen.utils.log_capture import capture_all_output
 from misen.utils.runtime_events import runtime_event, task_label
@@ -33,6 +36,7 @@ if TYPE_CHECKING:
     from misen.workspace import Workspace
 
 __all__ = [
+    "build_task_dependency_graph",
     "collect_task_dependencies",
     "execute_task",
     "hash_task_arguments",
@@ -317,3 +321,71 @@ def _iter_nested_leaves(value: Any) -> Iterator[Any]:
         return
 
     yield value
+
+
+def build_task_dependency_graph(
+    task: Task[Any],
+    *,
+    exclude_cacheable: bool = False,
+    exclude_cached: bool = False,
+    workspace: Workspace | None = None,
+) -> DependencyGraph[Task[Any]]:
+    """Build dependency graph rooted at a task-like object.
+
+    Args:
+        task: Root task-like node.
+        exclude_cacheable: Whether to skip cacheable dependency nodes.
+        exclude_cached: Whether to skip dependencies already cached in workspace.
+        workspace: Workspace required when ``exclude_cached=True``.
+
+    Returns:
+        Dependency graph with edges ``task -> dependency``.
+
+    Raises:
+        ValueError: If ``exclude_cached=True`` and workspace is not provided.
+    """
+    if exclude_cacheable:
+
+        @cache
+        def include_dependency(dependency: Task[Any]) -> bool:
+            return dependency.properties.cache is False
+
+    elif exclude_cached:
+        if workspace is None:
+            msg = "workspace is required when exclude_cached=True."
+            raise ValueError(msg)
+
+        @cache
+        def include_dependency(dependency: Task[Any]) -> bool:
+            return not dependency.is_cached(workspace=workspace)
+
+    else:
+
+        def include_dependency(dependency: Task[Any]) -> bool:  # noqa: ARG001
+            return True
+
+    graph: DependencyGraph[Task[Any]] = DependencyGraph()
+    nodes: dict[Task[Any], int] = {}
+
+    def get_node_index(candidate: Task[Any]) -> int:
+        node_index = nodes.get(candidate)
+        if node_index is None:
+            node_index = nodes[candidate] = graph.add_node(candidate)
+        return node_index
+
+    stack: list[Task[Any]] = [task]
+    seen: set[Task[Any]] = {task}
+
+    while stack:
+        current = stack.pop()
+        current_node = get_node_index(current)
+
+        for dependency in current.dependencies:
+            if not include_dependency(dependency):
+                continue
+            graph.add_edge(current_node, get_node_index(dependency), None)
+            if dependency not in seen:
+                seen.add(dependency)
+                stack.append(dependency)
+
+    return graph
