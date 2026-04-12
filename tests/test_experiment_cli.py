@@ -815,8 +815,9 @@ def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tm
     submit_calls: list[tuple[set[Task[int]], object, bool]] = []
 
     class StubExecutor:
-        def submit(self, *, tasks: set[Task[int]], workspace: object, blocking: bool = False) -> None:
+        def submit(self, *, tasks: set[Task[int]], workspace: object, blocking: bool = False) -> tuple[None, None]:
             submit_calls.append((tasks, workspace, blocking))
+            return None, None
 
     class StubExperiment:
         def tasks(self) -> dict[str, Task[int]]:
@@ -860,8 +861,9 @@ def test_experiment_cli_parses_positional_run_command(monkeypatch) -> None:
     workspace = object()
 
     class StubExecutor:
-        def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> None:
+        def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> tuple[None, None]:
             submit_calls.append((tasks, workspace, blocking))
+            return None, None
 
     monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: StubExecutor()))
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
@@ -880,8 +882,9 @@ def test_experiment_cli_parses_run_no_tui_flag(monkeypatch) -> None:
     workspace = object()
 
     class StubExecutor:
-        def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> None:
+        def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> tuple[None, None]:
             submit_calls.append((tasks, workspace, blocking))
+            return None, None
 
     def fail_tui(**_kwargs: object) -> None:
         msg = "TUI should be bypassed with --no-tui"
@@ -1043,11 +1046,14 @@ def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> Non
             workspace: object,
             *,
             blocking: bool = False,
-        ) -> DependencyGraph[Job]:
+        ) -> tuple[DependencyGraph[Job], None]:
             submit_args["tasks"] = tasks
             submit_args["workspace"] = workspace
             submit_args["blocking"] = blocking
-            return graph
+            return graph, None
+
+        def cleanup_snapshot(self, snapshot: object) -> None:
+            pass
 
     class StubExperiment:
         def tasks(self) -> dict[str, Task[int]]:
@@ -1082,11 +1088,14 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
             workspace: object,
             *,
             blocking: bool = False,
-        ) -> DependencyGraph[Job]:
+        ) -> tuple[DependencyGraph[Job], None]:
             _ = tasks, workspace, blocking
             seen["during_submit"] = os.environ.get("MISEN_RUNTIME_EVENTS")
             seen["during_submit_job_board"] = os.environ.get("MISEN_RUNTIME_JOB_BOARD")
-            return graph
+            return graph, None
+
+        def cleanup_snapshot(self, snapshot: object) -> None:
+            pass
 
     class StubExperiment:
         def tasks(self) -> dict[str, Task[int]]:

@@ -57,10 +57,12 @@ def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> 
     # Keep submit-time runtime events visible (e.g. snapshot/submission messages),
     # but hide the runtime job board rows because Textual will render job states.
     with _runtime_job_board_suppressed():
-        job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
+        job_graph, snapshot = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
         with _runtime_events_suppressed():
-            snapshots = watch_job_graph(job_graph=job_graph)
-    _print_final_summary(snapshots)
+            job_snapshots = watch_job_graph(job_graph=job_graph)
+    if all(s.state in ("done", "failed") for s in job_snapshots):
+        executor.cleanup_snapshot(snapshot)
+    _print_final_summary(job_snapshots)
 
 
 def watch_job_graph(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[JobSnapshot]:
