@@ -35,6 +35,7 @@ from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
+from misen.utils.snapshot import token_base32
 from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
 
 if TYPE_CHECKING:
@@ -318,13 +319,15 @@ class Task(FrozenMixin, Generic[R]):
         from misen.workspace import Workspace
 
         workspace = Workspace.resolve_auto(workspace)
+        if _job_id is None:
+            _job_id = token_base32(6)
         logger.debug(
             "Resolving task result for %s (cache=%s, compute_if_uncached=%s, compute_uncached_deps=%s, job_id=%s).",
             self,
             self.properties.cache,
             compute_if_uncached,
             compute_uncached_deps,
-            _job_id or "n/a",
+            _job_id,
         )
 
         # Fast path: return cached payload for cacheable tasks.

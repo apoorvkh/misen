@@ -86,7 +86,7 @@ class NullSnapshot(Snapshot):
     ) -> tuple[str, list[str], dict[str, str]]:
         """Null snapshots don't prepare external commands."""
         _ = work_unit, workspace, assigned_resources_getter, gpu_runtime
-        job_id = _token_base32(6)
+        job_id = token_base32(6)
         return job_id, [], {}
 
 
@@ -102,7 +102,7 @@ class LocalSnapshot(Snapshot):
             snapshots_dir: Parent directory where snapshots are stored.
         """
         self.uv_bin = uv.find_uv_bin()
-        self.snapshot_dir = snapshots_dir / f"{_token_base32(6)}"
+        self.snapshot_dir = snapshots_dir / f"{token_base32(6)}"
         self.snapshot_dir.mkdir(parents=True)
         self.venv_dir = self._snapshot_venv(self.snapshot_dir / ".venv")
         self.env_files = self._snapshot_env_files(self.snapshot_dir)
@@ -130,10 +130,10 @@ class LocalSnapshot(Snapshot):
         Returns:
             Tuple ``(job_id, argv, env_overrides)``.
         """
-        job_id = _token_base32(6)
+        job_id = token_base32(6)
         payload_dir = self.snapshot_dir / "payloads"
         payload_dir.mkdir(parents=True, exist_ok=True)
-        payload_path = payload_dir / f"{_token_base32(6)}.pkl"
+        payload_path = payload_dir / f"{token_base32(6)}.pkl"
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
         encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
         argv: list[str] = [
@@ -245,7 +245,7 @@ def _discover_env_files(cwd: Path | None = None) -> list[Path]:
     return [path for path in (root / name for name in _ENV_FILENAMES) if path.exists()]
 
 
-def _token_base32(nbytes: int) -> str:
+def token_base32(nbytes: int) -> str:
     """Return URL/file-safe random base32 token.
 
     Args:
