@@ -12,6 +12,13 @@ Most user code only needs the symbols re-exported here.
 
 import logging
 
+from misen.exceptions import (
+    CacheError,
+    ConfigError,
+    HashError,
+    MisenError,
+    SerializationError,
+)
 from misen.executor import Executor
 from misen.experiment import Experiment
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
@@ -32,9 +39,14 @@ __all__ = [
     "ASSIGNED_RESOURCES_PER_NODE",
     "TRACE_LEVEL",
     "WORK_DIR",
+    "CacheError",
+    "ConfigError",
     "Executor",
     "Experiment",
+    "HashError",
+    "MisenError",
     "Resources",
+    "SerializationError",
     "Settings",
     "Task",
     "Workspace",

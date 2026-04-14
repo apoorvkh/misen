@@ -22,6 +22,7 @@ from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar
 
+from misen.exceptions import CacheError
 from misen.tasks import Task
 from misen.utils.settings import Configurable
 
@@ -115,7 +116,7 @@ class Workspace(Configurable):
         """Return the result hash for a completed task.
 
         Raises:
-            RuntimeError: If the task has not been computed yet.
+            CacheError: If the task has not been computed yet.
         """
         # Fast path: in-memory session cache.
         task_hash = task.task_hash()
@@ -129,7 +130,7 @@ class Workspace(Configurable):
         if result_hash is None:
             logger.log(TRACE_LEVEL, "Result-hash cache miss for task %s.", task)
             msg = f"Task {task} must be computed first."
-            raise RuntimeError(msg)
+            raise CacheError(msg)
         # Promote to session cache after a persistent hit.
         self._result_hashes[task_hash] = result_hash
         logger.log(TRACE_LEVEL, "Result-hash persistent cache hit for task %s.", task)
@@ -360,6 +361,6 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             return False
         try:
             result_hash = key.result_hash(workspace=self.workspace)
-        except RuntimeError:
+        except CacheError:
             return False
         return result_hash in self.result_store

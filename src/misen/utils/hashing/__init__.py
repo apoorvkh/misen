@@ -12,6 +12,7 @@ Design notes:
 from functools import partial
 from typing import Any
 
+from misen.exceptions import HashError
 from misen.utils.hashing.handler_base import (
     Handler,
     HandlerTypeList,
@@ -33,7 +34,6 @@ __all__ = [
     "ResolvedTaskHash",
     "ResultHash",
     "TaskHash",
-    "UnhashableTypeError",
     "get_handler_versions",
     "stable_hash",
 ]
@@ -101,10 +101,6 @@ def stable_hash(
 # ---------------------------------------------------------------------------
 
 
-class UnhashableTypeError(TypeError):
-    """Raised when ``stable_hash`` is asked to hash a type without an explicit handler."""
-
-
 _handlers_by_type_name: HandlerTypeRegistry = {**stdlib_handlers_by_type, **optional_handlers_by_type}
 _handlers_type_cache: dict[type[Any], type[Handler]] = {}
 _handler_types: HandlerTypeList = [*stdlib_handlers, *optional_handlers]
@@ -135,7 +131,7 @@ def _lookup_handler(obj: Any) -> type[Handler]:
         "or convert this value to a stable declarative identifier (for example a string, enum, "
         "or Literal value)."
     )
-    raise UnhashableTypeError(msg)
+    raise HashError(msg)
 
 
 def get_handler_versions() -> dict[str, int]:

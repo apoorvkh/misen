@@ -23,7 +23,8 @@ from rich.console import Console as RichConsole
 
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
 from misen.utils.graph import DependencyGraph
-from misen.utils.hashing import ResultHash, TaskHash, UnhashableTypeError
+from misen.exceptions import HashError
+from misen.utils.hashing import ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
 from misen.utils.nested import iter_nested_leaves, map_nested_leaves
 from misen.utils.runtime_events import runtime_event, task_label
@@ -108,7 +109,7 @@ def hash_task_arguments(
             continue
         try:
             arg_hash = argument_hash(value)
-        except UnhashableTypeError as exc:
+        except HashError as exc:
             prefix = f"Task '{properties.id}' argument '{name}' required unsupported hashing behavior. "
             if properties.cache:
                 prefix = (
@@ -122,7 +123,7 @@ def hash_task_arguments(
                 "Pass a `Task` dependency, register a `stable_hash` handler, or use "
                 "`@meta(exclude=...)` / `@meta(versions=...)`."
             )
-            raise TypeError(msg) from exc
+            raise HashError(msg) from exc
         version = properties.versions.get((name, cast("ResultHash", arg_hash)), 0)
         hashed_arguments[name] = (arg_hash, version)
 
@@ -208,7 +209,7 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
     try:
         result_hash = ResultHash.from_object(result)
         index_mode = "result"
-    except UnhashableTypeError:
+    except HashError:
         result_hash = ResultHash.from_object(task.resolved_hash(workspace=workspace))
         index_mode = "task"
 

@@ -24,6 +24,8 @@ import msgspec
 from msgspec import Struct
 from typing_extensions import Self
 
+from misen.exceptions import ConfigError
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -152,7 +154,7 @@ class Configurable(msgspec.Struct, dict=True, metaclass=ConfigurableMeta):
 
         if not isinstance(type_name, str):
             msg = f"Invalid type for [{cls._config_key}] in settings: expected string."
-            raise TypeError(msg)
+            raise ConfigError(msg)
 
         return cls.resolve_type(type_name)(**section)
 

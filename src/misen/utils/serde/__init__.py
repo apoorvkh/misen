@@ -5,8 +5,8 @@ Design notes:
 - Each serializer targets specific Python types and uses a stable on-disk format.
 - ``DefaultSerializer`` auto-selects the best serializer via a type registry and
   ``match()`` fallback scan (same algorithm as ``misen.utils.hashing``).
-- Unknown types raise ``TypeError`` rather than falling back to an unstable
-  format like ``dill``.
+- Unknown types raise ``SerializationError`` rather than falling back to an
+  unstable format like ``dill``.
 - Metadata (``serde_meta.json``) records which serializer wrote the data so
   that ``load`` can dispatch without the original object.
 """
@@ -15,6 +15,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from misen.exceptions import SerializationError
 from misen.utils.serde.serializer_base import (
     Serializer,
     SerializerClass,
@@ -67,7 +68,7 @@ def _lookup_serializer(obj: Any) -> SerializerClass:
         "Either pass a custom serializer to @meta(serializer=...) or convert "
         "the return value to a supported type."
     )
-    raise TypeError(msg)
+    raise SerializationError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +94,7 @@ class DefaultSerializer(Serializer[Any]):
 
         if meta is None:
             msg = f"No serde_meta.json found in {directory}"
-            raise ValueError(msg)
+            raise SerializationError(msg)
 
         ser_name = meta["serializer"]
         ser_cls = _serializer_by_qualified_name.get(ser_name)
@@ -102,7 +103,7 @@ class DefaultSerializer(Serializer[Any]):
                 f"Unknown serializer {ser_name!r} in serde_meta.json. "
                 "The serializer may have been renamed or removed."
             )
-            raise ValueError(msg)
+            raise SerializationError(msg)
 
         saved_version = meta.get("version")
         if saved_version is not None and saved_version != ser_cls.version:
