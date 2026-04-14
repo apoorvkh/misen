@@ -8,7 +8,7 @@ from typing import Any
 import dill
 import pytest
 
-from misen import Task, meta
+from misen import HashError, Task, meta
 from misen.task_metadata import TaskMetadata
 from misen.utils.hashing import ResultHash
 from misen.utils.serde import Serializer
@@ -75,7 +75,7 @@ def unsupported_result(seed: int) -> UnsupportedPayload:
 
 
 def test_task_rejects_unsupported_argument_with_guidance() -> None:
-    with pytest.raises(TypeError) as exc_info:
+    with pytest.raises(HashError) as exc_info:
         Task(strict_task, config=lambda: None)
 
     message = str(exc_info.value)
@@ -87,7 +87,7 @@ def test_task_rejects_unsupported_argument_with_guidance() -> None:
 
 
 def test_cacheable_task_rejects_unsupported_argument_with_stronger_guidance() -> None:
-    with pytest.raises(TypeError) as exc_info:
+    with pytest.raises(HashError) as exc_info:
         Task(strict_cached_task, config=lambda: None)
 
     message = str(exc_info.value)

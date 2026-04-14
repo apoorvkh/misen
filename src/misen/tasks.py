@@ -29,11 +29,13 @@ from inspect import Signature, signature
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
 
+from misen.exceptions import CacheError
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
 from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
+from misen.utils.snapshot import token_base32
 from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
 
 if TYPE_CHECKING:
@@ -251,7 +253,7 @@ class Task(FrozenMixin, Generic[R]):
         """
         try:
             workspace.get_result_hash(task=self)
-        except RuntimeError:
+        except CacheError:
             return False
         if self.properties.cache and self not in workspace.results:
             return False
@@ -301,7 +303,7 @@ class Task(FrozenMixin, Generic[R]):
             Result of ``func(*resolved_args, **resolved_kwargs)``.
 
         Raises:
-            RuntimeError: If required cache entries are missing and computation
+            CacheError: If required cache entries are missing and computation
                 flags do not permit executing missing nodes.
 
         Notes:
@@ -317,13 +319,15 @@ class Task(FrozenMixin, Generic[R]):
         from misen.workspace import Workspace
 
         workspace = Workspace.resolve_auto(workspace)
+        if _job_id is None:
+            _job_id = token_base32(6)
         logger.debug(
             "Resolving task result for %s (cache=%s, compute_if_uncached=%s, compute_uncached_deps=%s, job_id=%s).",
             self,
             self.properties.cache,
             compute_if_uncached,
             compute_uncached_deps,
-            _job_id or "n/a",
+            _job_id,
         )
 
         # Fast path: return cached payload for cacheable tasks.
@@ -336,7 +340,7 @@ class Task(FrozenMixin, Generic[R]):
             if not compute_if_uncached:
                 msg = f"{self} is not cached."
                 logger.warning("Task result requested without compute_if_uncached and cache is missing for %s.", self)
-                raise RuntimeError(msg)
+                raise CacheError(msg)
 
         # Guardrail: only recurse into dependencies when explicitly requested.
         if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
@@ -347,7 +351,7 @@ class Task(FrozenMixin, Generic[R]):
                 len(uncached_deps),
             )
             msg = f"{self} has dependencies which must be computed and cached first: {uncached_deps}"
-            raise RuntimeError(msg)
+            raise CacheError(msg)
 
         if self.dependencies:
             logger.debug("Resolving %d dependency result(s) for %s.", len(self.dependencies), self)
@@ -483,7 +487,7 @@ class Task(FrozenMixin, Generic[R]):
             otherwise by the resolved task identity.
 
         Raises:
-            RuntimeError: if the task has not been computed / recorded in the workspace.
+            CacheError: if the task has not been computed / recorded in the workspace.
         """
         return workspace.get_result_hash(self)
 

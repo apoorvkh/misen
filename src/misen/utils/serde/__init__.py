@@ -26,10 +26,10 @@ Design notes:
   ``format_version`` (or similar) in the extras dict returned by
   :meth:`Serializer.write` and branch on ``meta.get("format_version")``
   in :meth:`Serializer.read`.
-- Unknown types raise ``TypeError`` from :func:`save` rather than
-  falling back to an unstable format like ``dill``. To serialize a
-  value of an unregistered type, pass an explicit ``ser_cls`` or
-  convert the value first.
+- Unknown types raise :class:`misen.exceptions.SerializationError` from
+  :func:`save` rather than falling back to an unstable format like
+  ``dill``. To serialize a value of an unregistered type, pass an
+  explicit ``ser_cls`` or convert the value first.
 """
 
 from misen.utils.serde.base import (

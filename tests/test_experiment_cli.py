@@ -10,7 +10,7 @@ import tyro
 import misen.cli as misen_cli
 import misen.utils.cli.experiment as experiment_module
 import misen.utils.cli.tui as tui_module
-from misen import Experiment, Task, meta
+from misen import CacheError, Experiment, Task, meta
 from misen.executor import Executor, Job
 from misen.utils.cli.experiment import _resolve_command, experiment, experiment_cli
 from misen.utils.graph import DependencyGraph
@@ -238,7 +238,7 @@ class _StatusWorkspace:
         if task.properties.id in self.done_ids:
             return object()
         msg = "Task not complete"
-        raise RuntimeError(msg)
+        raise CacheError(msg)
 
 
 def _mock_cli(monkeypatch: pytest.MonkeyPatch, first_args: SimpleNamespace, second_args: SimpleNamespace) -> None:

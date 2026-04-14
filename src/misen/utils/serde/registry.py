@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from misen.exceptions import SerializationError
 from misen.utils.serde.base import Serializer
 from misen.utils.serde.libs import all_serializers, all_serializers_by_type
 from misen.utils.type_registry import TypeDispatchRegistry, qualified_type_name
@@ -51,8 +52,8 @@ def save(obj: Any, directory: Path, ser_cls: type[Serializer] | None = None) -> 
         ser_cls: Optional explicit serializer class; bypasses dispatch.
 
     Raises:
-        TypeError: If no serializer is registered for ``type(obj)``
-            and no *ser_cls* was provided.
+        SerializationError: If no serializer is registered for
+            ``type(obj)`` and no *ser_cls* was provided.
     """
     ser_cls = ser_cls or _serializer_registry.lookup(obj)
     if ser_cls is None:
@@ -61,7 +62,7 @@ def save(obj: Any, directory: Path, ser_cls: type[Serializer] | None = None) -> 
             "Either pass a custom serializer to @meta(serializer=...) or convert "
             "the return value to a supported type."
         )
-        raise TypeError(msg)
+        raise SerializationError(msg)
     extra = ser_cls.write(obj, directory) or {}
 
     # Write ``serde_meta.json`` recording the serializer used
@@ -85,23 +86,23 @@ def load(directory: Path, ser_cls: type[Serializer] | None = None) -> Any:
             class named in ``serde_meta.json``.
 
     Raises:
-        ValueError: If ``serde_meta.json`` is missing, malformed, or
-            names a serializer that is no longer registered and no
-            *ser_cls* was provided.
+        SerializationError: If ``serde_meta.json`` is missing,
+            malformed, or names a serializer that is no longer
+            registered and no *ser_cls* was provided.
     """
     try:
         meta: dict[str, Any] = json.loads((directory / _META_FILENAME).read_text(encoding="utf-8"))
     except FileNotFoundError:
         msg = f"No serde_meta.json found in {directory}"
-        raise ValueError(msg) from None
+        raise SerializationError(msg) from None
 
     if "serializer" not in meta:
         msg = f"serde_meta.json in {directory} does not contain a 'serializer' field"
-        raise ValueError(msg)
+        raise SerializationError(msg)
 
     ser_name = meta["serializer"]
     ser_cls = ser_cls or _serializer_by_qualified_name.get(ser_name)
     if ser_cls is None:
         msg = f"Unknown serializer {ser_name!r} in serde_meta.json. The serializer may have been renamed or removed."
-        raise ValueError(msg)
+        raise SerializationError(msg)
     return ser_cls.read(directory, meta=meta)
