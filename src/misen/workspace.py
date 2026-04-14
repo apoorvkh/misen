@@ -23,6 +23,7 @@ from collections.abc import Iterator, MutableMapping
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar
 
 from misen.tasks import Task
+from misen.utils import serde
 from misen.utils.settings import Configurable
 
 if TYPE_CHECKING:
@@ -305,7 +306,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             msg = f"Result for task {key} not found in cache."
             raise KeyError(msg) from e
         logger.debug("Loading cached result for task %s from %s.", key, directory)
-        return key.properties.serializer.load(directory)
+        return serde.load(directory, ser_cls=key.properties.serializer)
 
     def __setitem__(self, key: Task[R], value: R, /) -> None:
         """Persist result for the given task.
@@ -321,7 +322,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
                 return
             tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
             tmp_dir.mkdir(parents=True, exist_ok=True)
-            key.properties.serializer.save(value, tmp_dir)
+            serde.save(value, tmp_dir, ser_cls=key.properties.serializer)
             self.result_store[result_hash] = tmp_dir
             logger.debug("Stored cached result for task %s at %s.", key, tmp_dir)
             with contextlib.suppress(FileNotFoundError):

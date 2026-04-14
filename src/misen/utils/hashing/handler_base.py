@@ -14,6 +14,8 @@ from typing import Any, TypeAlias
 from typing_extensions import assert_never
 from xxhash import xxh3_64_intdigest
 
+from misen.utils.type_registry import qualified_type_name
+
 __all__ = [
     "CollectionHandler",
     "ElementHasher",
@@ -152,11 +154,6 @@ class Handler(ABC):
 HandlerClass: TypeAlias = type[Handler]
 HandlerTypeList: TypeAlias = list[HandlerClass]
 HandlerTypeRegistry: TypeAlias = dict[str, HandlerClass]
-
-
-def qualified_type_name(obj_type: type[Any]) -> str:
-    """Return the fully-qualified ``module.qualname`` for ``obj_type``."""
-    return f"{obj_type.__module__}.{obj_type.__qualname__}"
 
 
 class PrimitiveHandler(Handler):

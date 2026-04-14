@@ -1,6 +1,7 @@
 """Tests for task argument hashing and result indexing behavior."""
 
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,12 +19,13 @@ class DillSerializer(Serializer[Any]):
     """Test-only serializer using dill for arbitrary types."""
 
     @staticmethod
-    def save(obj: Any, directory: Path) -> None:
+    def write(obj: Any, directory: Path) -> Mapping[str, Any] | None:
         """Serialize via dill."""
         (directory / "data.dill").write_bytes(dill.dumps(obj))
+        return None
 
     @staticmethod
-    def load(directory: Path) -> Any:
+    def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
         """Deserialize via dill."""
         return dill.loads((directory / "data.dill").read_bytes())  # noqa: S301
 
