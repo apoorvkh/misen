@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
+from misen.task_metadata import Resources
 from misen.utils.nested import map_nested_leaves
 from misen.utils.task_utils import build_task_dependency_graph
 
 if TYPE_CHECKING:
-    from misen.task_metadata import GpuRuntime, Resources
     from misen.tasks import Task
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.graph import DependencyGraph
@@ -61,39 +61,7 @@ class WorkUnit:
         self.graph = build_task_dependency_graph(task=root, exclude_cacheable=True)
 
         # Compute one scheduler request that satisfies every task in the unit.
-        from misen.task_metadata import Resources
-
-        resource_list: list[Resources] = [task.resources for task in self.graph.nodes()]
-        gpu_runtimes = cast(
-            "set[GpuRuntime]",
-            {resource.gpu_runtime for resource in resource_list if resource.gpus > 0},
-        )
-        match len(gpu_runtimes):
-            case 0:
-                gpu_runtime = "cuda"
-            case 1:
-                (gpu_runtime,) = gpu_runtimes
-            case _:
-                msg = f"WorkUnit has incompatible gpu_runtime requirements: {gpu_runtimes}"
-                raise ValueError(msg)
-
-        self.resources = Resources(
-            time=(
-                None
-                if any(resource.time is None for resource in resource_list)
-                else sum(cast("int", resource.time) for resource in resource_list)
-            ),
-            nodes=max(resource.nodes for resource in resource_list),
-            memory=max(resource.memory for resource in resource_list),
-            cpus=max(resource.cpus for resource in resource_list),
-            gpus=max(resource.gpus for resource in resource_list),
-            gpu_memory=(
-                None
-                if all(resource.gpu_memory is None for resource in resource_list)
-                else max(resource.gpu_memory for resource in resource_list if resource.gpu_memory is not None)
-            ),
-            gpu_runtime=gpu_runtime,
-        )
+        self.resources = Resources.aggregate(task.resources for task in self.graph.nodes())
 
     def __hash__(self) -> int:
         """Return hash keyed by root task identity."""

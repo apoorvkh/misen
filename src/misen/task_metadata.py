@@ -13,7 +13,7 @@ and external callables.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from msgspec import Struct
 
@@ -27,7 +27,7 @@ from misen.utils.hashing import ResultHash
 from misen.utils.serde import DefaultSerializer, Serializer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from types import FunctionType
 
 __all__ = ["GpuRuntime", "Resources", "TaskMetadata", "meta", "resolve_task_metadata"]
@@ -86,6 +86,60 @@ class Resources(Struct, frozen=True):
     gpus: int = 0
     gpu_memory: int | None = None
     gpu_runtime: GpuRuntime = "cuda"
+
+    @classmethod
+    def aggregate(cls, resources: Iterable[Resources]) -> Resources:
+        """Combine multiple resource requests into one conservative request.
+
+        CPU/memory/GPU counts use ``max`` (pick the largest request), finite
+        runtimes are summed (``None`` if any request is unbounded), and
+        ``gpu_runtime`` must agree across GPU-using requests.
+
+        Args:
+            resources: Iterable of :class:`Resources` to merge.
+
+        Returns:
+            A single :class:`Resources` that satisfies every input request.
+
+        Raises:
+            ValueError: If the iterable is empty or GPU-using requests disagree
+                on ``gpu_runtime``.
+        """
+        resource_list = list(resources)
+        if not resource_list:
+            msg = "Resources.aggregate requires at least one Resources instance."
+            raise ValueError(msg)
+
+        gpu_runtimes = cast(
+            "set[GpuRuntime]",
+            {resource.gpu_runtime for resource in resource_list if resource.gpus > 0},
+        )
+        match len(gpu_runtimes):
+            case 0:
+                gpu_runtime: GpuRuntime = "cuda"
+            case 1:
+                (gpu_runtime,) = gpu_runtimes
+            case _:
+                msg = f"Incompatible gpu_runtime requirements: {gpu_runtimes}"
+                raise ValueError(msg)
+
+        return cls(
+            time=(
+                None
+                if any(resource.time is None for resource in resource_list)
+                else sum(cast("int", resource.time) for resource in resource_list)
+            ),
+            nodes=max(resource.nodes for resource in resource_list),
+            memory=max(resource.memory for resource in resource_list),
+            cpus=max(resource.cpus for resource in resource_list),
+            gpus=max(resource.gpus for resource in resource_list),
+            gpu_memory=(
+                None
+                if all(resource.gpu_memory is None for resource in resource_list)
+                else max(resource.gpu_memory for resource in resource_list if resource.gpu_memory is not None)
+            ),
+            gpu_runtime=gpu_runtime,
+        )
 
 
 def meta(
