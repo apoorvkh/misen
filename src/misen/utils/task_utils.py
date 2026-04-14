@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from rich.console import Console as RichConsole
 
+from misen.exceptions import HashError
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
 from misen.utils.graph import DependencyGraph
-from misen.exceptions import HashError
 from misen.utils.hashing import ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
 from misen.utils.nested import iter_nested_leaves, map_nested_leaves
@@ -152,7 +152,7 @@ def execute_task(
     workspace: Workspace,
     dependency_results: dict[Task[Any], Any],
     assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
-    job_id: str | None,
+    job_id: str,
 ) -> tuple[R, Path | None]:
     """Execute task function under log capture.
 
@@ -161,14 +161,14 @@ def execute_task(
         workspace: Workspace for logs/artifacts.
         dependency_results: Precomputed dependency results.
         assigned_resources: Optional runtime resources for sentinel injection.
-        job_id: Optional job id for task-log grouping.
+        job_id: Job id for task-log grouping.
 
     Returns:
         Task result value plus the runtime work directory used (if any).
     """
     task_name = task_label(task)
-    logger.info("Task started: %s (job_id=%s).", task_name, job_id or "n/a")
-    runtime_event(f"Task started: {task_name} (job_id={job_id or 'n/a'})", style="yellow")
+    logger.info("Task started: %s (job_id=%s).", task_name, job_id)
+    runtime_event(f"Task started: {task_name} (job_id={job_id})", style="yellow")
     started_at = time.perf_counter()
 
     argument_resolver, work_directory = _build_argument_resolver(
