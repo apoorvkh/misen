@@ -13,7 +13,7 @@ import time
 from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
 T = TypeVar("T")
 
@@ -43,6 +43,36 @@ def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
 def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
     """Create incremental decoder for the given encoding."""
     return codecs.getincrementaldecoder(enc)(errors="replace")
+
+
+def _drain_and_write(
+    pipe_fd: int,
+    decoder: codecs.IncrementalDecoder,
+    lock: threading.Lock,
+    targets: Sequence[TextIO],
+    *,
+    deadline: float | None = None,
+) -> None:
+    """Read from ``pipe_fd`` until EOF/error and write decoded text to targets.
+
+    Stops when the pipe returns EOF, raises ``OSError``/``BlockingIOError``, or
+    ``deadline`` (a ``time.monotonic`` timestamp) is reached. Always flushes the
+    decoder's trailing bytes to every target before returning.
+    """
+    while deadline is None or time.monotonic() < deadline:
+        try:
+            chunk = os.read(pipe_fd, 8192)
+        except (BlockingIOError, OSError):
+            break
+        if not chunk:
+            break
+        text = decoder.decode(chunk)
+        for target in targets:
+            _write(text, lock=lock, target=target)
+
+    tail = decoder.decode(b"", final=True)
+    for target in targets:
+        _write(tail, lock=lock, target=target)
 
 
 def _wrap_fd(fd: int, enc: str, *, closefd: bool = False) -> TextIO:
@@ -129,29 +159,16 @@ def capture_all_output(  # noqa: PLR0915
     os.set_inheritable(wfd, False)  # noqa: FBT003
     os.set_inheritable(rfd, False)  # noqa: FBT003
 
+    targets: tuple[TextIO, ...] = (target,) if tee_stdout is None else (target, tee_stdout)
+
     def reader() -> None:
         """Read redirected pipe bytes and write decoded text to targets."""
         dec = _make_decoder(encoding)
         try:
-            while True:
-                try:
-                    chunk = os.read(rfd, 8192)
-                except OSError:
-                    break
-                if not chunk:
-                    break
-                text = dec.decode(chunk)
-                _write(text, lock=lock, target=target)
-                if tee_stdout is not None:
-                    _write(text, lock=lock, target=tee_stdout)
-            tail = dec.decode(b"", final=True)
-            _write(tail, lock=lock, target=target)
-            if tee_stdout is not None:
-                _write(tail, lock=lock, target=tee_stdout)
+            _drain_and_write(rfd, dec, lock, targets)
         except (OSError, ValueError) as exc:
-            _try(target.write, f"[misen] log capture reader stopped early: {exc}\n")
-            if tee_stdout is not None:
-                _try(tee_stdout.write, f"[misen] log capture reader stopped early: {exc}\n")
+            for t in targets:
+                _try(t.write, f"[misen] log capture reader stopped early: {exc}\n")
         finally:
             _try(os.close, rfd)
 
@@ -206,23 +223,7 @@ def capture_all_output(  # noqa: PLR0915
         if t.is_alive():
             # Best-effort: drain what is currently available, then stop.
             _try(os.set_blocking, rfd, blocking=False)
-            dec = _make_decoder(encoding)
-            while time.monotonic() < deadline:
-                try:
-                    chunk = os.read(rfd, 8192)
-                except (BlockingIOError, OSError):
-                    break
-                if not chunk:
-                    break
-                text = dec.decode(chunk)
-                _write(text, lock=lock, target=target)
-                if tee_stdout is not None:
-                    _write(text, lock=lock, target=tee_stdout)
-
-            tail = dec.decode(b"", final=True)
-            _try(_write, tail, lock, target)
-            if tee_stdout is not None:
-                _try(_write, tail, lock, tee_stdout)
+            _try(_drain_and_write, rfd, _make_decoder(encoding), lock, targets, deadline=deadline)
 
             # Force reader to exit; since it's daemon, we still won't hang regardless.
             _try(os.close, rfd)
