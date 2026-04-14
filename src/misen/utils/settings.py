@@ -13,6 +13,7 @@ Config resolution order (lowest to highest priority):
 
 import os
 import sys
+import weakref
 from abc import ABCMeta
 from collections.abc import Callable
 from functools import cache, cached_property
@@ -86,19 +87,29 @@ class Settings(Struct, dict=True):
 
 
 class ConfigurableMeta(msgspec.StructMeta, ABCMeta):
-    """Metaclass implementing a parameterized singleton cache."""
+    """Metaclass implementing a parameterized singleton cache.
 
-    _instances: ClassVar[dict[bytes, Any]] = {}
+    Instances are cached in a ``WeakValueDictionary`` keyed by
+    ``(module, qualname, kwargs)``.  Entries are automatically evicted when
+    the last external strong reference to an instance is dropped, so the
+    cache acts as a memoization layer for live instances rather than a
+    persistent registry.  This requires ``Configurable`` to opt into weak
+    reference support via ``weakref=True``.
+    """
+
+    _instances: ClassVar["weakref.WeakValueDictionary[bytes, Any]"] = weakref.WeakValueDictionary()
 
     def __call__(cls, **kwargs: Any) -> Any:
         """Return memoized instance for given constructor kwargs."""
         key = msgspec.json.encode((str(cls.__module__), str(cls.__qualname__), kwargs))
-        if key not in ConfigurableMeta._instances:
-            ConfigurableMeta._instances[key] = super().__call__(**kwargs)
-        return ConfigurableMeta._instances[key]
+        instance = ConfigurableMeta._instances.get(key)
+        if instance is None:
+            instance = super().__call__(**kwargs)
+            ConfigurableMeta._instances[key] = instance
+        return instance
 
 
-class Configurable(msgspec.Struct, dict=True, metaclass=ConfigurableMeta):
+class Configurable(msgspec.Struct, dict=True, weakref=True, metaclass=ConfigurableMeta):
     """Base class for settings-backed singleton structs.
 
     Subclasses declare three ``ClassVar`` attributes instead of overriding
