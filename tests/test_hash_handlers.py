@@ -12,6 +12,7 @@ from fractions import Fraction
 from typing import ForwardRef, TypeVar
 
 import pytest
+from misen import HashError
 from misen.utils.hashing import stable_hash
 from misen.utils.hashing.handlers.optional import optional_handlers
 
@@ -127,7 +128,7 @@ def test_removed_optional_handlers_are_not_registered(handler_name: str) -> None
     ],
 )
 def test_stable_hash_rejects_unsupported_runtime_types(value: object) -> None:
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(value)
 
 
@@ -250,21 +251,21 @@ def test_numpy_handlers_cover_dtypes_and_scalars() -> None:
 def test_numpy_array_is_unsupported() -> None:
     np = pytest.importorskip("numpy")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(np.array([[1, 2], [3, 4]], dtype=np.int64))
 
 
 def test_jax_array_is_unsupported() -> None:
     jnp = pytest.importorskip("jax.numpy")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(jnp.array([[1, 2], [3, 4]], dtype=jnp.int32))
 
 
 def test_tensorflow_tensor_is_unsupported() -> None:
     tf = pytest.importorskip("tensorflow")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(tf.constant([[1, 2], [3, 4]], dtype=tf.int32))
 
 
@@ -278,21 +279,21 @@ def test_tensorflow_keras_model_is_unsupported() -> None:
         ]
     )
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(model)
 
 
 def test_dask_collection_is_unsupported() -> None:
     dask_array = pytest.importorskip("dask.array")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(dask_array.arange(10, chunks=(5,)).reshape((2, 5)))
 
 
 def test_hugging_face_dataset_is_unsupported() -> None:
     datasets = pytest.importorskip("datasets")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(datasets.Dataset.from_dict({"x": [1, 2], "y": ["a", "b"]}))
 
 
@@ -315,7 +316,7 @@ def test_transformers_model_is_unsupported() -> None:
         transformers.BertConfig(hidden_size=16, num_hidden_layers=1, num_attention_heads=2, intermediate_size=32)
     )
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(model)
 
 
@@ -330,14 +331,14 @@ def test_tokenizers_handler_is_unsupported() -> None:
         """
     )
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(tokenizer)
 
 
 def test_sentencepiece_processor_is_unsupported() -> None:
     sentencepiece = pytest.importorskip("sentencepiece")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(sentencepiece.SentencePieceProcessor())
 
 
@@ -367,14 +368,14 @@ def test_nltk_cfg_handler() -> None:
 def test_nltk_tree_is_unsupported() -> None:
     nltk = pytest.importorskip("nltk")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(nltk.Tree("S", [nltk.Tree("NP", ["I"]), nltk.Tree("VP", ["run"])]))
 
 
 def test_plotly_figure_is_unsupported() -> None:
     graph_objects = pytest.importorskip("plotly.graph_objects")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(graph_objects.Figure(data=[graph_objects.Scatter(y=[1, 2, 3])]))
 
 
@@ -382,7 +383,7 @@ def test_altair_chart_is_unsupported() -> None:
     altair = pytest.importorskip("altair")
     pd = pytest.importorskip("pandas")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(altair.Chart(pd.DataFrame({"x": [0, 1], "y": [1, 3]})).mark_line().encode(x="x:Q", y="y:Q"))
 
 
@@ -393,7 +394,7 @@ def test_matplotlib_figure_is_unsupported() -> None:
     pyplot = pytest.importorskip("matplotlib.pyplot")
     figure, _ax = pyplot.subplots()
     try:
-        with pytest.raises(TypeError, match="explicit handlers"):
+        with pytest.raises(HashError, match="explicit handlers"):
             stable_hash(figure)
     finally:
         pyplot.close(figure)
@@ -408,7 +409,7 @@ def test_seaborn_grid_is_unsupported() -> None:
     seaborn = pytest.importorskip("seaborn")
     grid = seaborn.relplot(data=pd.DataFrame({"x": [0, 1], "y": [1, 3]}), x="x", y="y", kind="line")
     try:
-        with pytest.raises(TypeError, match="explicit handlers"):
+        with pytest.raises(HashError, match="explicit handlers"):
             stable_hash(grid)
     finally:
         pyplot.close(grid.figure)
@@ -422,49 +423,49 @@ def test_statsmodels_results_are_unsupported() -> None:
     design = statsmodels.add_constant(x)
     y = np.array([1, 2, 3, 4, 5, 6], dtype=float)
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(statsmodels.OLS(y, design).fit())
 
 
 def test_skimage_transform_is_unsupported() -> None:
     transform = pytest.importorskip("skimage.transform")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(transform.AffineTransform(scale=(1.0, 1.0), rotation=0.1, translation=(2, 3)))
 
 
 def test_opencv_keypoint_is_unsupported() -> None:
     cv2 = pytest.importorskip("cv2")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(cv2.KeyPoint(10.0, 20.0, 5.0, 45.0, 0.7, 1, 2))
 
 
 def test_spacy_handler() -> None:
     spacy = pytest.importorskip("spacy")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(spacy.blank("en"))
 
 
 def test_torch_tensor_is_unsupported() -> None:
     torch = pytest.importorskip("torch")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(torch.tensor([[1, 2], [3, 4]]))
 
 
 def test_torch_module_is_unsupported() -> None:
     torch = pytest.importorskip("torch")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(torch.nn.Linear(2, 3))
 
 
 def test_pandas_dataframe_is_unsupported() -> None:
     pd = pytest.importorskip("pandas")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}))
 
 
@@ -497,7 +498,7 @@ def test_attrs_handler() -> None:
 def test_polars_dataframe_is_unsupported() -> None:
     pl = pytest.importorskip("polars")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(pl.DataFrame({"a": [1, 2], "b": ["x", "y"]}))
 
 
@@ -515,28 +516,28 @@ def test_pyarrow_schema_handler() -> None:
 def test_pyarrow_table_is_unsupported() -> None:
     pa = pytest.importorskip("pyarrow")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(pa.table({"a": [1, 2], "b": ["x", "y"]}))
 
 
 def test_xarray_dataset_is_unsupported() -> None:
     xr = pytest.importorskip("xarray")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(xr.Dataset({"values": ("row", [1, 2, 3])}))
 
 
 def test_scipy_sparse_matrix_is_unsupported() -> None:
     sparse = pytest.importorskip("scipy.sparse")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(sparse.csr_matrix([[0, 1], [2, 0]]))
 
 
 def test_pillow_image_is_unsupported() -> None:
     image_mod = pytest.importorskip("PIL.Image")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(image_mod.new("RGB", (2, 2), color=(10, 20, 30)))
 
 
@@ -546,7 +547,7 @@ def test_networkx_graph_is_unsupported() -> None:
     graph = nx.MultiDiGraph()
     graph.add_edge("a", "b")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(graph)
 
 
@@ -557,26 +558,26 @@ def test_rustworkx_graph_is_unsupported() -> None:
     graph.add_node("a")
     graph.add_node("b")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(graph)
 
 
 def test_sklearn_estimator_is_unsupported() -> None:
     linear_model = pytest.importorskip("sklearn.linear_model")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(linear_model.LogisticRegression(C=1.0, max_iter=50, fit_intercept=True))
 
 
 def test_xgboost_handler() -> None:
     xgb = pytest.importorskip("xgboost")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(xgb.XGBClassifier(max_depth=3, n_estimators=10, learning_rate=0.1, random_state=7))
 
 
 def test_lightgbm_handler() -> None:
     lgb = pytest.importorskip("lightgbm")
 
-    with pytest.raises(TypeError, match="explicit handlers"):
+    with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(lgb.LGBMClassifier(num_leaves=31, n_estimators=10, learning_rate=0.1, random_state=7))

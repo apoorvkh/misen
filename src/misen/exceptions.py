@@ -35,12 +35,8 @@ class ConfigError(MisenError):
     """Raised when TOML settings cannot be resolved to a concrete instance."""
 
 
-class HashError(MisenError, TypeError):
-    """Raised when ``stable_hash`` cannot hash a value.
-
-    Also subclasses :class:`TypeError` so existing ``except TypeError`` callers
-    keep working — hashing failures have historically surfaced as ``TypeError``.
-    """
+class HashError(MisenError):
+    """Raised when ``stable_hash`` cannot hash a value."""
 
 
 class SerializationError(MisenError):
