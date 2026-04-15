@@ -8,7 +8,6 @@ license-files = ["LICENSE"]
 authors = [{ name = "Apoorv Khandelwal", email = "mail@apoorvkh.com" }]
 dependencies = [
   "cloudpickle>=3.0",
-  "dill>=0.4.0",
   "flufl-lock>=8.2.0",
   "libcst>=1.8.2",
   "lmdb>=1.7.5",
@@ -58,7 +57,7 @@ ignore = [
 convention = "google"
 
 [[tool.ty.overrides]]
-include = ["src/misen/utils/hashing/handlers/optional/**"]
+include = ["src/misen/utils/hashing/libs/**", "src/misen/utils/serde/libs/**"]
 
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"

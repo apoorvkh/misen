@@ -6,15 +6,15 @@ import ipaddress
 import pathlib
 import re
 import types
-import typing
 from collections import ChainMap, Counter, defaultdict, deque
 from fractions import Fraction
-from typing import ForwardRef, TypeVar
+from typing import ForwardRef, List, TypeVar  # noqa: UP035
 
 import pytest
+
 from misen import HashError
 from misen.utils.hashing import stable_hash
-from misen.utils.hashing.handlers.optional import optional_handlers
+from misen.utils.hashing.libs import all_handlers
 
 
 class _Custom:
@@ -27,7 +27,11 @@ class _DataWithList:
 
 
 def _optional_handler_names() -> set[str]:
-    return {handler.__name__ for handler in optional_handlers}
+    """Return the names of all handlers that live outside ``libs/stdlib.py``."""
+    from misen.utils.hashing.libs.stdlib import stdlib_handlers
+
+    stdlib_names = {handler.__name__ for handler in stdlib_handlers}
+    return {handler.__name__ for handler in all_handlers} - stdlib_names
 
 
 @pytest.mark.parametrize(
@@ -121,7 +125,7 @@ def test_removed_optional_handlers_are_not_registered(handler_name: str) -> None
         pytest.param((lambda: None).__code__, id="code"),
         pytest.param(inspect.signature(lambda x: x), id="signature"),
         pytest.param(next(iter(inspect.signature(lambda x: x).parameters.values())), id="parameter"),
-        pytest.param(typing.List[int], id="typing-alias"),
+        pytest.param(List[int], id="typing-alias"),  # noqa: UP006
         pytest.param(TypeVar("T"), id="typevar"),
         pytest.param(ForwardRef("Demo"), id="forwardref"),
         pytest.param(int | str, id="union-type"),
@@ -130,6 +134,22 @@ def test_removed_optional_handlers_are_not_registered(handler_name: str) -> None
 def test_stable_hash_rejects_unsupported_runtime_types(value: object) -> None:
     with pytest.raises(HashError, match="explicit handlers"):
         stable_hash(value)
+
+
+def test_generic_aliases_distinguish_type_args() -> None:
+    # list[int] and list[str] must not collide: qualified_type_name on a
+    # GenericAlias drops the args, so TypeHandler recurses into __origin__
+    # and __args__ to keep parameterizations distinct.
+    assert stable_hash(list[int]) == stable_hash(list[int])
+    assert stable_hash(list[int]) != stable_hash(list[str])
+    assert stable_hash(list[int]) != stable_hash(list)
+    assert stable_hash(dict[str, int]) != stable_hash(dict[str, str])
+    assert stable_hash(dict[str, int]) != stable_hash(dict[int, str])
+    # Nested and variadic aliases round-trip too.
+    assert stable_hash(list[list[int]]) == stable_hash(list[list[int]])
+    assert stable_hash(list[list[int]]) != stable_hash(list[list[str]])
+    assert stable_hash(tuple[int, ...]) == stable_hash(tuple[int, ...])
+    assert stable_hash(tuple[int, ...]) != stable_hash(tuple[str, ...])
 
 
 def test_stable_hash_supports_recursive_list() -> None:
