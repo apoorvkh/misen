@@ -16,7 +16,7 @@ import sys
 import weakref
 from abc import ABCMeta
 from collections.abc import Callable
-from functools import cache, cached_property
+from functools import cached_property
 from importlib import import_module
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -149,12 +149,7 @@ class Configurable(msgspec.Struct, dict=True, weakref=True, metaclass=Configurab
         """
         if settings is None:
             settings = Settings()
-        return cls._auto(settings=settings)
 
-    @classmethod
-    @cache
-    def _auto(cls, settings: Settings) -> Self:
-        """Internal cached auto-construction helper."""
         section = dict(settings.toml_data.get(cls._config_key, {}))
         type_name = section.pop("type", None)
 
