@@ -24,11 +24,12 @@ from misen.utils.function_introspection import (
     lambda_task_id,
 )
 from misen.utils.hashing import ResultHash
-from misen.utils.serde import DefaultSerializer, Serializer
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from types import FunctionType
+
+    from misen.utils.serde import Serializer
 
 __all__ = ["GpuRuntime", "Resources", "TaskMetadata", "meta", "resolve_task_metadata"]
 
@@ -59,7 +60,7 @@ class TaskMetadata(Struct, frozen=True):
     defaults: dict[str, Any] = {}
     versions: dict[tuple[str, ResultHash], int] = {}
     resources: Callable[..., Resources] = lambda *_, **__: Resources()
-    serializer: type[Serializer] = DefaultSerializer
+    serializer: type[Serializer] | None = None
     cleanup_work_dir: bool = False
 
 
@@ -150,7 +151,7 @@ def meta(
     defaults: dict[str, Any] | None = None,
     versions: dict[str, dict[Any, int]] | None = None,
     resources: Callable[..., Resources] | Resources | None = None,
-    serializer: type[Serializer[R]] = DefaultSerializer,  # TODO: tighten generic serializer typing
+    serializer: type[Serializer[R]] | None = None,
     cleanup_work_dir: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Attach :class:`TaskMetadata` metadata to a function.
@@ -230,9 +231,7 @@ def resolve_task_metadata(func: FunctionType) -> TaskMetadata:
 
     if is_local_project_function(func):
         if not hasattr(func, "__task_metadata__"):
-            msg = (
-                f"Local function {func.__module__}.{func.__qualname__} must define __task_metadata__. Use @meta(...)."
-            )
+            msg = f"Local function {func.__module__}.{func.__qualname__} must define __task_metadata__. Use @meta(...)."
             raise ValueError(msg)
         return func.__task_metadata__
 
