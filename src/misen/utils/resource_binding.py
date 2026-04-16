@@ -8,16 +8,13 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from misen.utils.assigned_resources import (
-    AssignedResources,
-    AssignedResourcesPerNode,
-    select_local_assigned_resources,
-)
+from misen.utils.assigned_resources import select_local_assigned_resources
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from misen.task_metadata import GpuRuntime
+    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 
 __all__ = ["apply_resource_binding"]
 
@@ -48,29 +45,29 @@ def apply_resource_binding(
     assigned_resources: AssignedResources | AssignedResourcesPerNode | None, gpu_runtime: GpuRuntime
 ) -> None:
     """Bind current process to assigned resources (CPU/GPU/threading)."""
-    local_resources = select_local_assigned_resources(assigned_resources)
-    env_overrides = _binding_env_overrides(local_resources=local_resources, gpu_runtime=gpu_runtime)
+    local = select_local_assigned_resources(assigned_resources)
+    env_overrides = _binding_env_overrides(local=local, gpu_runtime=gpu_runtime)
 
     for key, value in env_overrides.items():
         os.environ[key] = value
 
-    if local_resources is not None:
-        _apply_cpu_affinity(local_resources["cpu_indices"])
+    if local is not None:
+        _apply_cpu_affinity(local["cpu_indices"])
 
 
-def _binding_env_overrides(local_resources: AssignedResources | None, gpu_runtime: GpuRuntime) -> dict[str, str]:
+def _binding_env_overrides(local: AssignedResources | None, gpu_runtime: GpuRuntime) -> dict[str, str]:
     """Compute process-environment overrides for assigned resources."""
     env = dict(_DYNAMIC_THREAD_DISABLE_ENV)
-    if local_resources is None:
+    if local is None:
         return env
 
-    cpu_count = len(local_resources["cpu_indices"])
+    cpu_count = len(local["cpu_indices"])
     if cpu_count > 0:
         cpu_count_str = str(cpu_count)
         for key in _CPU_THREAD_CAP_VARS:
             env[key] = cpu_count_str
 
-    gpu_mask = ",".join(str(index) for index in local_resources["gpu_indices"])
+    gpu_mask = ",".join(str(index) for index in local["gpu_indices"])
     for key in _GPU_MASK_VARS[gpu_runtime]:
         env[key] = gpu_mask
 

@@ -4,16 +4,16 @@ import os
 import pytest
 
 import misen.utils.execute as execute_mod
+from misen.utils.assigned_resources import AssignedResources
 
 
 def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -> None:
-    expected = {
-        "cpu_indices": [1, 2],
-        "gpu_indices": [0],
-        "memory": 8,
-        "gpu_memory": 16,
-        "gpu_runtime": "cuda",
-    }
+    expected = AssignedResources(
+        cpu_indices=[1, 2],
+        gpu_indices=[0],
+        memory=8,
+        gpu_memory=16,
+    )
     calls: list[dict[str, object]] = []
     payload_marker = tmp_path / "payload-ran.txt"
 
@@ -23,11 +23,11 @@ def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -
     monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
     monkeypatch.setenv("MISEN_TEST_GETTER", "1")
 
-    def payload_fn(*, assigned_resources: object) -> None:
+    def payload_fn(*, assigned_resources: AssignedResources | None) -> None:
         assert assigned_resources == expected
         payload_marker.write_text("ran", encoding="utf-8")
 
-    def getter() -> object:
+    def getter() -> AssignedResources:
         if os.environ.get("MISEN_TEST_GETTER") != "1":
             msg = "getter did not read worker environment"
             raise AssertionError(msg)
