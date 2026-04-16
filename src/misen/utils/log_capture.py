@@ -108,7 +108,7 @@ def _validate_capture_target(target: TextIO, old_stdout: TextIO, old_stderr: Tex
 
 
 @contextlib.contextmanager
-def capture_all_output(  # noqa: PLR0915
+def capture_all_output(
     target: TextIO,
     timeout: float = 10.0,
     *,

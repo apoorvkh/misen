@@ -7,7 +7,7 @@ import importlib
 import importlib.util
 import sys
 from dataclasses import dataclass, field, make_dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha1
 from pathlib import Path
 from types import ModuleType
@@ -21,8 +21,8 @@ from rich.pretty import Pretty
 from rich.text import Text
 from rich.tree import Tree
 
-from misen.executor import ExecutorType
 from misen.exceptions import CacheError
+from misen.executor import ExecutorType
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
 from misen.workspace import WorkspaceType
@@ -727,8 +727,6 @@ def _resolve_task_or_hash(experiment: Any, query: str) -> Task[Any]:
     Raises:
         ValueError: If zero or multiple tasks match.
     """
-    from misen.tasks import Task
-
     # Try exact name match first.
     named_tasks = experiment.tasks()
     if query in named_tasks:
@@ -778,23 +776,23 @@ def _list_task_logs(task: Task[Any], workspace: Any, console: Console) -> None:
     try:
         resolved_hash = task.resolved_hash(workspace=workspace).b32()
     except CacheError:
-        console.print(f"  [dim]No resolved hash (task not yet executed).[/dim]")
+        console.print("  [dim]No resolved hash (task not yet executed).[/dim]")
         return
 
     log_dir = Path(workspace.directory) / "task_logs" / resolved_hash[:2]
     if not log_dir.exists():
-        console.print(f"  [dim]No logs found.[/dim]")
+        console.print("  [dim]No logs found.[/dim]")
         return
 
     log_files = sorted(log_dir.glob(f"{resolved_hash}_*.log"), key=lambda p: p.stat().st_mtime)
     if not log_files:
-        console.print(f"  [dim]No logs found.[/dim]")
+        console.print("  [dim]No logs found.[/dim]")
         return
 
     for log_path in log_files:
         _, job_id = log_path.stem.rsplit("_", 1)
         stat = log_path.stat()
-        time_str = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+        time_str = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(timespec="seconds")
         console.print(
             f"  job_id=[cyan]{escape(job_id)}[/cyan]  modified=[dim]{time_str}[/dim]  size=[dim]{stat.st_size}B[/dim]"
         )
@@ -806,9 +804,11 @@ def _list_job_logs(log_paths: list[Path], console: Console) -> None:
         stat = log_path.stat()
         size = stat.st_size
         mtime = stat.st_mtime
-        time_str = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+        time_str = datetime.fromtimestamp(mtime, tz=UTC).isoformat(timespec="seconds")
         console.print(
-            f"  [bright_white]{escape(log_path.name)}[/bright_white]  modified=[dim]{time_str}[/dim]  size=[dim]{size}B[/dim]"
+            f"  [bright_white]{escape(log_path.name)}[/bright_white]"
+            f"  modified=[dim]{time_str}[/dim]"
+            f"  size=[dim]{size}B[/dim]"
         )
 
 
@@ -933,42 +933,41 @@ def _execute_command(*, args: Any, console: Console) -> None:
                             printed_any = True
                     if not printed_any:
                         console.print("[dim]No logs found.[/dim]")
-            else:
-                # Job log mode.
-                if task_query is not None:
-                    task = _resolve_task_or_hash(args.experiment, task_query)
-                    work_unit = _find_work_unit_for_task(args.experiment, task)
-                    log_paths = sorted(workspace.job_log_iter(work_unit), key=lambda p: p.stat().st_mtime)
+            # Job log mode.
+            elif task_query is not None:
+                task = _resolve_task_or_hash(args.experiment, task_query)
+                work_unit = _find_work_unit_for_task(args.experiment, task)
+                log_paths = sorted(workspace.job_log_iter(work_unit), key=lambda p: p.stat().st_mtime)
 
-                    if job_id is not None:
-                        log_paths = [p for p in log_paths if f"_{job_id}.log" in p.name]
+                if job_id is not None:
+                    log_paths = [p for p in log_paths if f"_{job_id}.log" in p.name]
 
-                    if not log_paths:
-                        console.print("[dim]No job logs found.[/dim]")
-                        return
+                if not log_paths:
+                    console.print("[dim]No job logs found.[/dim]")
+                    return
 
-                    if list_mode:
-                        _list_job_logs(log_paths, console)
-                    else:
-                        logs_to_show = log_paths if show_all else log_paths[-1:]
-                        for log_path in logs_to_show:
-                            _print_log_content(
-                                log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
-                            )
+                if list_mode:
+                    _list_job_logs(log_paths, console)
                 else:
-                    log_paths = sorted(workspace.job_log_iter(), key=lambda p: p.stat().st_mtime)
-                    if not log_paths:
-                        console.print("[dim]No job logs found.[/dim]")
-                        return
+                    logs_to_show = log_paths if show_all else log_paths[-1:]
+                    for log_path in logs_to_show:
+                        _print_log_content(
+                            log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
+                        )
+            else:
+                log_paths = sorted(workspace.job_log_iter(), key=lambda p: p.stat().st_mtime)
+                if not log_paths:
+                    console.print("[dim]No job logs found.[/dim]")
+                    return
 
-                    if list_mode:
-                        _list_job_logs(log_paths, console)
-                    else:
-                        logs_to_show = log_paths if show_all else log_paths[-1:]
-                        for log_path in logs_to_show:
-                            _print_log_content(
-                                log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
-                            )
+                if list_mode:
+                    _list_job_logs(log_paths, console)
+                else:
+                    logs_to_show = log_paths if show_all else log_paths[-1:]
+                    for log_path in logs_to_show:
+                        _print_log_content(
+                            log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
+                        )
 
 
 def _resolve_command(*, command_token: str | None, unknown_args: list[str]) -> ExperimentCommand:
@@ -1032,8 +1031,8 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
         [
             ("command", ExperimentCommandArgs, field(default_factory=command_default_factories[resolved_command])),
             ("config", Path | None, bootstrap_args.config),
-            ("executor", ExecutorType | Literal["auto"] | str, bootstrap_args.executor),
-            ("workspace", WorkspaceType | Literal["auto"] | str, bootstrap_args.workspace),
+            ("executor", ExecutorType | str, bootstrap_args.executor),
+            ("workspace", WorkspaceType | str, bootstrap_args.workspace),
         ]
     )
 

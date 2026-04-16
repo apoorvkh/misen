@@ -12,26 +12,19 @@ Config resolution order (lowest to highest priority):
 """
 
 import os
-import sys
+import tomllib
 import weakref
 from abc import ABCMeta
 from collections.abc import Callable
 from functools import cached_property
 from importlib import import_module
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
 
 import msgspec
 from msgspec import Struct
-from typing_extensions import Self
 
 from misen.exceptions import ConfigError
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
-
 
 __all__ = ["Configurable", "Settings"]
 
@@ -51,7 +44,8 @@ class Settings(Struct, dict=True):
 
     When *config_file* is ``None`` (the default), settings are resolved by
     merging ``$XDG_CONFIG_HOME/misen.toml`` with
-    ``./.misen.toml``.  Project-level sections replace XDG sections entirely.  The ``$MISEN_CONFIG`` environment variable, if set,
+    ``./.misen.toml``.  Project-level sections replace XDG sections entirely.
+    The ``$MISEN_CONFIG`` environment variable, if set,
     short-circuits this and uses only that single file.  An explicit
     *config_file* argument behaves the same way.
     """

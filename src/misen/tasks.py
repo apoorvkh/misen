@@ -96,7 +96,7 @@ class Task(FrozenMixin, Generic[R]):
             raise TypeError(msg)
 
         self.func: FunctionType = func
-        self.args: P.args = args
+        self.args: tuple[Any, ...] = args
         self.kwargs: Mapping[str, Any] = MappingProxyType(kwargs)
         self._signature: Signature = signature(func)
 
@@ -117,7 +117,7 @@ class Task(FrozenMixin, Generic[R]):
 
         self.freeze()
 
-    def _with_resolved_args(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Task[R]:
+    def with_resolved_args(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Task[R]:
         """Create a shallow copy with substituted arguments, bypassing full __init__.
 
         This avoids re-inspecting the function signature, re-resolving metadata,
@@ -255,8 +255,8 @@ class Task(FrozenMixin, Generic[R]):
             workspace.get_result_hash(task=self)
         except CacheError:
             return False
-        if self.properties.cache and self not in workspace.results:
-            return False
+        if self.properties.cache:
+            return self in workspace.results
         return True
 
     def is_running(self, workspace: Workspace) -> bool:

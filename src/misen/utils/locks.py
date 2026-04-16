@@ -4,10 +4,9 @@ import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Self
 
 import flufl.lock._lockfile as flufl
-from typing_extensions import Self
 
 __all__ = ["LockLike", "LockUnavailableError", "NFSLock"]
 

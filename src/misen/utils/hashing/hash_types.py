@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import base64
-
-from typing_extensions import Self
+from typing import Self
 
 __all__ = ["Hash", "ResolvedTaskHash", "ResultHash", "TaskHash"]
 

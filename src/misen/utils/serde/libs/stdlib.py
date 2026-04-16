@@ -52,7 +52,7 @@ _TAG = "__t"
 _VAL = "v"
 
 
-def _encode_tagged(obj: Any) -> Any:  # noqa: PLR0911
+def _encode_tagged(obj: Any) -> Any:
     """Convert *obj* into a msgpack-native representation with type tags.
 
     Strict ``type(obj) is X`` checks are used for builtin types where
@@ -193,7 +193,7 @@ def _import_type(qualified_name: str) -> type[Any]:
     return cls
 
 
-def _decode_tagged(obj: Any) -> Any:  # noqa: PLR0911
+def _decode_tagged(obj: Any) -> Any:
     """Restore Python objects from their tagged msgpack representation."""
     if isinstance(obj, dict):
         tag = obj.get(_TAG)

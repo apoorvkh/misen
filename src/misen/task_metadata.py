@@ -111,10 +111,7 @@ class Resources(Struct, frozen=True):
             msg = "Resources.aggregate requires at least one Resources instance."
             raise ValueError(msg)
 
-        gpu_runtimes = cast(
-            "set[GpuRuntime]",
-            {resource.gpu_runtime for resource in resource_list if resource.gpus > 0},
-        )
+        gpu_runtimes = {resource.gpu_runtime for resource in resource_list if resource.gpus > 0}
         match len(gpu_runtimes):
             case 0:
                 gpu_runtime: GpuRuntime = "cuda"

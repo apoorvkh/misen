@@ -19,10 +19,9 @@ import shutil
 import tempfile
 from collections.abc import Generator, Iterator, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic, Literal, TextIO, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Literal, Self, TextIO, TypeVar, cast
 
 import lmdb
-from typing_extensions import Self
 
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, NFSLock
@@ -46,7 +45,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     _key_type: type[KT]
     _value_type: type[VT]
     lock: NFSLock
-    env: lmdb.Environment  # ty:ignore[possibly-missing-attribute]
+    env: lmdb.Environment
 
     __slots__ = ("_key_type", "_value_type", "env", "lock")
 
@@ -77,7 +76,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
 
         self.lock = NFSLock(database_path.with_suffix(".lock"), lifetime=10)
 
-        self.env = lmdb.Environment(  # ty:ignore[possibly-missing-attribute]
+        self.env = lmdb.Environment(
             str(database_path),
             subdir=False,
             lock=False,

@@ -32,7 +32,7 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         workspace: Workspace,
         *,
         blocking: bool = False,
-    ) -> DependencyGraph[CompletedJob]:
+    ) -> tuple[DependencyGraph[CompletedJob], NullSnapshot]:
         """Execute submitted tasks synchronously in dependency order.
 
         Args:
@@ -47,7 +47,8 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         _ = blocking
         logger.info("InProcessExecutor executing %d root task(s) synchronously.", len(tasks))
         null_work_unit = WorkUnit(root=Task(lambda: None), dependencies=set())
-        job_id, _, _ = self._make_snapshot(workspace=workspace).prepare_job(
+        null_snapshot = self._make_snapshot(workspace=workspace)
+        job_id, _, _ = null_snapshot.prepare_job(
             null_work_unit, workspace=workspace, assigned_resources_getter=lambda: None, gpu_runtime="cuda"
         )
 
@@ -59,7 +60,7 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
             WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id, assigned_resources=None)
 
         logger.info("InProcessExecutor finished executing %d task node(s).", len(list(task_graph.node_indices())))
-        return DependencyGraph()
+        return DependencyGraph(), null_snapshot
 
     def _make_snapshot(self, workspace: Workspace) -> NullSnapshot:
         """Return placeholder snapshot (unused by this executor)."""

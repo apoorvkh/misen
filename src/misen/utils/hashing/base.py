@@ -9,9 +9,8 @@ xxh3-64.
 import struct
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, assert_never
 
-from typing_extensions import assert_never
 from xxhash import xxh3_64_intdigest
 
 from misen.utils.type_registry import qualified_type_name
@@ -62,7 +61,7 @@ def _encode_sequence(items: Any) -> bytes:
     return header + b"".join(_encode_length(len(p)) + p for p in parts)
 
 
-def _encode(obj: Any) -> bytes:  # noqa: PLR0911
+def _encode(obj: Any) -> bytes:
     """Encode a limited set of Python types into canonical, deterministic bytes.
 
     Supported types: None, bool, int, float, str, bytes, tuple, list, set, frozenset.

@@ -10,9 +10,7 @@ inside :func:`misen.utils.task_utils.execute_task`:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, cast
-
-from typing_extensions import Self
+from typing import TYPE_CHECKING, ClassVar, Self, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable

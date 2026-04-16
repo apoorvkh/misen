@@ -188,7 +188,7 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
             self.set_interval(max(0.05, poll_interval_s), self._refresh)
 
         def _refresh(self) -> None:
-            snapshots, dependency_indices, done = snapshot_jobs(job_graph)
+            snapshots, dependency_indices, _ = snapshot_jobs(job_graph)
             self.snapshots = snapshots
             self._render_summary(snapshots)
             self._render_jobs_table(snapshots)
@@ -202,7 +202,9 @@ def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: f
         def _render_jobs_table(self, snapshots: list[JobSnapshot]) -> None:
             table = self.query_one("#jobs", DataTable)
             columns = list(table.columns.keys())
-            deps_str = lambda s: ", ".join(s.dependencies) if s.dependencies else "-"
+
+            def deps_str(s: JobSnapshot) -> str:
+                return ", ".join(s.dependencies) if s.dependencies else "-"
 
             if len(self._row_keys) == len(snapshots):
                 for row_idx, snapshot in enumerate(snapshots):
