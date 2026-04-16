@@ -303,7 +303,6 @@ class DiskWorkspace(Workspace):
         Returns:
             Per-task directory path keyed by resolved hash.
         """
-        super().get_work_dir(task=task)
         key_str = task.resolved_hash(workspace=self).b32()
         d = Path(self._directory) / "work" / key_str[:2] / f"{key_str}"
         d.mkdir(parents=True, exist_ok=True)

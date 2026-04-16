@@ -186,7 +186,7 @@ def meta(
         resources = Resources()
     if isinstance(resources, Resources):
         # Normalize static resources into the callable shape expected by TaskMetadata.
-        resources = lambda r=resources, *_, **__: r  # noqa: E731
+        resources = lambda *_, r=resources, **__: r  # noqa: E731
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         """Attach task metadata to the decorated function.
