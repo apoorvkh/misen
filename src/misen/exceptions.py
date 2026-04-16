@@ -9,6 +9,7 @@ Subclasses:
 - :class:`CacheError`: cache miss or missing prerequisite cache entry.
 - :class:`ConfigError`: invalid or unresolvable TOML configuration.
 - :class:`HashError`: a value cannot be hashed by ``stable_hash``.
+- :class:`LockUnavailableError`: lock acquisition exceeded timeout.
 - :class:`SerializationError`: serializer load/save failure.
 """
 
@@ -18,6 +19,7 @@ __all__ = [
     "CacheError",
     "ConfigError",
     "HashError",
+    "LockUnavailableError",
     "MisenError",
     "SerializationError",
 ]
@@ -37,6 +39,10 @@ class ConfigError(MisenError):
 
 class HashError(MisenError):
     """Raised when ``stable_hash`` cannot hash a value."""
+
+
+class LockUnavailableError(MisenError, TimeoutError):
+    """Raised when lock acquisition exceeds timeout."""
 
 
 class SerializationError(MisenError):

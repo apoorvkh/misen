@@ -323,11 +323,19 @@ class ResultMap(MutableMapping[Task[Any], Any]):
                 return
             tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
             tmp_dir.mkdir(parents=True, exist_ok=True)
-            serde.save(value, tmp_dir, ser_cls=key.properties.serializer)
-            self.result_store[result_hash] = tmp_dir
-            logger.debug("Stored cached result for task %s at %s.", key, tmp_dir)
-            with contextlib.suppress(FileNotFoundError):
-                shutil.rmtree(tmp_dir)
+            try:
+                serde.save(value, tmp_dir, ser_cls=key.properties.serializer)
+                # ``result_store[...] = tmp_dir`` moves the directory into the
+                # store; tmp_dir is consumed on success.
+                self.result_store[result_hash] = tmp_dir
+                logger.debug("Stored cached result for task %s at %s.", key, tmp_dir)
+            finally:
+                # Always sweep the temp dir. Normally it has already been moved
+                # into the store (``FileNotFoundError`` -- suppressed below),
+                # but on a failed serde.save it still contains partial output
+                # we want to remove to avoid accumulating orphans.
+                with contextlib.suppress(FileNotFoundError):
+                    shutil.rmtree(tmp_dir)
 
     def __delitem__(self, key: Task[R], /) -> None:
         """Remove a cached result for a task.

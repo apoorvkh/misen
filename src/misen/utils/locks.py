@@ -1,5 +1,6 @@
 """Lock abstractions used by workspace/task/result coordination."""
 
+import logging
 import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -8,13 +9,11 @@ from typing import Protocol, Self
 
 import flufl.lock._lockfile as flufl
 
+from misen.exceptions import LockUnavailableError
+
 __all__ = ["LockLike", "LockUnavailableError", "NFSLock"]
 
-
-class LockUnavailableError(TimeoutError):
-    """Raised when lock acquisition exceeds timeout."""
-
-    # TODO: raise this in NFSLock?
+logger = logging.getLogger(__name__)
 
 
 class LockLike(Protocol):
@@ -77,9 +76,16 @@ class NFSLock:
         Args:
             blocking: Whether to block until lock is available.
             timeout: Maximum wait time in seconds when blocking.
+
+        Raises:
+            LockUnavailableError: If acquisition fails within ``timeout``.
         """
         timeout = timeout if blocking else 0
-        self._lock.lock(timeout=timeout)
+        try:
+            self._lock.lock(timeout=timeout)
+        except flufl.TimeOutError as e:
+            msg = f"Could not acquire lock {self._lock.lockfile!r} within {timeout}s."
+            raise LockUnavailableError(msg) from e
 
         if self._refresh_interval is not None:
             if self._thread is not None and self._thread.is_alive():
@@ -93,8 +99,20 @@ class NFSLock:
         """Release lock and stop refresh thread if active."""
         if self._refresh_interval is not None:
             self._stop.set()
-            if self._thread is not None and self._thread.is_alive():
-                self._thread.join(timeout=0.2)
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                # Give the refresh loop up to one full interval to notice the
+                # stop event and exit cleanly. If it doesn't, we log and move
+                # on -- ``_stop`` is still set, so the loop will terminate on
+                # its next iteration rather than refresh a released lock.
+                join_timeout = max(self._refresh_interval, 1)
+                thread.join(timeout=join_timeout)
+                if thread.is_alive():
+                    logger.warning(
+                        "Refresh thread for lock %s did not exit within %ss; releasing anyway.",
+                        self._lock.lockfile,
+                        join_timeout,
+                    )
             self._thread = None
 
         self._lock.unlock()
