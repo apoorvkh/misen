@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from misen.workspace import Workspace
 
 
-JobState = Literal["pending", "running", "done", "failed", "unknown"]
+JobState = Literal["pending", "running", "done", "failed"]
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +58,7 @@ class LocalJob(Job):
         self.assigned_gpu_indices: list[int] = []
 
         self._process: subprocess.Popen[bytes] | None = None
-        self._log_fp = None  # keep alive while the child runs
+        self._log_fp: FileIO | None = None  # keep alive while the child runs
         self._state: JobState = "pending"
         self._lock = threading.Lock()
 
@@ -89,11 +89,20 @@ class LocalJob(Job):
             )
             return self._state
 
-    def set_process(self, process: subprocess.Popen[bytes], log_fp: FileIO) -> None:
-        """Attach process/log handles and mark job as running."""
+    def set_process(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        log_fp: FileIO,
+        cpu_indices: list[int],
+        gpu_indices: list[int],
+    ) -> None:
+        """Attach process/log handles, bind allocations, and mark job as running."""
         with self._lock:
             self._process = process
             self._log_fp = log_fp
+            self.assigned_cpu_indices = cpu_indices
+            self.assigned_gpu_indices = gpu_indices
             self._state = "running"
             logger.info(
                 "Local job %s for %s is running (pid=%d).",

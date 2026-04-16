@@ -7,7 +7,7 @@ import os
 import subprocess
 import threading
 from bisect import insort
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
 
@@ -66,14 +66,14 @@ class LocalScheduler(msgspec.Struct, dict=True):
         while True:
             with self._condition:
                 self._collect_finished_locked()
-                started_any = self._start_ready_jobs_locked()
+                progress_made = self._start_ready_jobs_locked()
 
                 if not self._pending and not self._running:
                     self._condition.wait()
                     continue
 
-                # If we didn't start anything, sleep briefly (we'll be notified on submit).
-                if not started_any:
+                # If nothing changed, sleep briefly (we'll be notified on submit).
+                if not progress_made:
                     self._condition.wait(timeout=0.1)
 
     def _collect_finished_locked(self) -> None:
@@ -109,14 +109,19 @@ class LocalScheduler(msgspec.Struct, dict=True):
         Returns:
             ``True`` if at least one pending job changed state.
         """
-        started_any = False
+        progress_made = False
 
         for job in list(self._pending):
-            if not self._deps_ready(job):
-                # If deps failed, _deps_ready() marks failed and removes from pending.
-                started_any = started_any or (job not in self._pending)
+            status = self._dependency_status(job)
+            if status == "failed":
+                self._logger.error("Dependency failed; marking pending job failed for %s.", job.work_unit)
+                self._mark_pending_failed(job)
+                progress_made = True
+                continue
+            if status == "waiting":
                 continue
 
+            # Dependencies are satisfied; try to reserve resources and launch.
             if not self.available_budget.fits(job.resources):
                 continue
 
@@ -127,26 +132,27 @@ class LocalScheduler(msgspec.Struct, dict=True):
             cpu_indices, gpu_indices = allocations
             try:
                 self._launch_job(job, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
-            except (OSError, RuntimeError, ValueError):
+            except Exception:
+                self._logger.exception("Failed to launch local job for %s.", job.work_unit)
                 self._mark_pending_failed(job, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
-                started_any = True
+                progress_made = True
                 continue
 
             self.available_budget = self.available_budget.subtract(job.resources)
             self._pending.remove(job)
             self._running.add(job)
-            started_any = True
+            progress_made = True
 
-        return started_any
+        return progress_made
 
-    def _deps_ready(self, job: LocalJob) -> bool:
-        """Return whether all job dependencies are complete and successful."""
+    def _dependency_status(self, job: LocalJob) -> Literal["ready", "waiting", "failed"]:
+        """Return dependency readiness for a pending job."""
         states = {dep.state() for dep in job.dependencies}
         if "failed" in states:
-            self._logger.error("Dependency failed; marking pending job failed for %s.", job.work_unit)
-            self._mark_pending_failed(job)
-            return False
-        return not states or states == {"done"}
+            return "failed"
+        if not states or states == {"done"}:
+            return "ready"
+        return "waiting"
 
     def _launch_job(self, job: LocalJob, cpu_indices: list[int], gpu_indices: list[int]) -> None:
         """Spawn the child process for one job and bind resource metadata."""
@@ -186,9 +192,12 @@ class LocalScheduler(msgspec.Struct, dict=True):
             log_fp.close()
             raise
 
-        job.set_process(process, log_fp=log_fp)
-        job.assigned_cpu_indices = cpu_indices
-        job.assigned_gpu_indices = gpu_indices
+        job.set_process(
+            process,
+            log_fp=log_fp,
+            cpu_indices=cpu_indices,
+            gpu_indices=gpu_indices,
+        )
         self._logger.info(
             "Launched local subprocess for %s (job_id=%s, pid=%d).",
             job.work_unit,
