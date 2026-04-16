@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
+
+from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 
 
 def get_assigned_resources_slurm(env: Mapping[str, str] | None = None) -> AssignedResources:
@@ -69,12 +69,12 @@ def get_assigned_resources_slurm(env: Mapping[str, str] | None = None) -> Assign
     memory = _parse_slurm_memory_to_gib(_first_nonempty(resolved_env, ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU")))
     gpu_memory = _parse_slurm_memory_to_gib(resolved_env.get("SLURM_MEM_PER_GPU"))
 
-    return {
-        "cpu_indices": cpu_indices,
-        "gpu_indices": gpu_indices,
-        "memory": memory,
-        "gpu_memory": gpu_memory,
-    }
+    return AssignedResources(
+        cpu_indices=cpu_indices,
+        gpu_indices=gpu_indices,
+        memory=memory,
+        gpu_memory=gpu_memory,
+    )
 
 
 def get_assigned_resources_slurm_per_node(env: Mapping[str, str] | None = None) -> AssignedResourcesPerNode:
@@ -95,14 +95,11 @@ def get_assigned_resources_slurm_per_node(env: Mapping[str, str] | None = None) 
 
     resources = get_assigned_resources_slurm(env=resolved_env)
     return {
-        hostname: cast(
-            "AssignedResources",
-            {
-                "cpu_indices": [*resources["cpu_indices"]],
-                "gpu_indices": [*resources["gpu_indices"]],
-                "memory": resources["memory"],
-                "gpu_memory": resources["gpu_memory"],
-            },
+        hostname: AssignedResources(
+            cpu_indices=[*resources["cpu_indices"]],
+            gpu_indices=[*resources["gpu_indices"]],
+            memory=resources["memory"],
+            gpu_memory=resources["gpu_memory"],
         )
         for hostname in hostnames
     }

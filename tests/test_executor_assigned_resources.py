@@ -15,12 +15,12 @@ def _resources(
     memory: int | None,
     gpu_memory: int | None,
 ) -> AssignedResources:
-    return {
-        "cpu_indices": cpu_indices,
-        "gpu_indices": gpu_indices,
-        "memory": memory,
-        "gpu_memory": gpu_memory,
-    }
+    return AssignedResources(
+        cpu_indices=cpu_indices,
+        gpu_indices=gpu_indices,
+        memory=memory,
+        gpu_memory=gpu_memory,
+    )
 
 
 def test_get_assigned_resources_slurm_parses_cpu_gpu_and_memory() -> None:
