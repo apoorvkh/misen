@@ -4,6 +4,14 @@ Handlers decompose Python objects into primitive trees (nested structures of
 None, bool, int, float, str, bytes, tuple, list, set).  The ``digest``
 function encodes those trees into deterministic bytes and hashes them with
 xxh3-64.
+
+CRITICAL INVARIANT — DO NOT modify ``_encode``, ``hash_values``, or any
+``Handler.digest`` implementation in a way that changes its output.  Hash
+output is a persisted cache key: drift silently invalidates every existing
+workspace.  ``tests/test_hash_pinned.py`` pins the byte encoding and every
+handler's digest to known constants and will fail on any change.  If a
+change is genuinely required, it is a workspace-breaking change — wipe or
+migrate all caches and update the pinned constants in lockstep.
 """
 
 import struct
@@ -138,8 +146,6 @@ class Handler(ABC):
     ``digest`` is declared positional-only so primitive handlers can rename
     unused parameters (e.g. ``_element_hash``) without breaking LSP.
     """
-
-    version: int = 1
 
     @staticmethod
     def type_name(obj: Any) -> str:
