@@ -41,7 +41,7 @@ class HashError(MisenError):
     """Raised when ``stable_hash`` cannot hash a value."""
 
 
-class LockUnavailableError(MisenError, TimeoutError):
+class LockUnavailableError(MisenError):
     """Raised when lock acquisition exceeds timeout."""
 
 
