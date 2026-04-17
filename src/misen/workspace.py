@@ -198,8 +198,8 @@ class Workspace(Configurable):
         Raises:
             RuntimeError: If the task is non-cacheable.
         """
-        if not task.properties.cache:
-            msg = f"{task} cannot use workspace work_dir unless Task.properties.cache == True."
+        if not task.meta.cache:
+            msg = f"{task} cannot use workspace work_dir unless Task.meta.cache == True."
             raise RuntimeError(msg)
         return self._get_work_dir(task)
 
@@ -307,7 +307,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             msg = f"Result for task {key} not found in cache."
             raise KeyError(msg) from e
         logger.debug("Loading cached result for task %s from %s.", key, directory)
-        return serde.load(directory, ser_cls=key.properties.serializer)
+        return serde.load(directory, ser_cls=key.meta.serializer)
 
     def __setitem__(self, key: Task[R], value: R, /) -> None:
         """Persist result for the given task.
@@ -324,7 +324,7 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
             tmp_dir.mkdir(parents=True, exist_ok=True)
             try:
-                serde.save(value, tmp_dir, ser_cls=key.properties.serializer)
+                serde.save(value, tmp_dir, ser_cls=key.meta.serializer)
                 # ``result_store[...] = tmp_dir`` moves the directory into the
                 # store; tmp_dir is consumed on success.
                 self.result_store[result_hash] = tmp_dir

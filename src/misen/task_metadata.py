@@ -13,7 +13,7 @@ and external callables.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeAlias, TypedDict, TypeVar, cast
 
 from msgspec import Struct
 
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from misen.utils.serde import Serializer
 
-__all__ = ["GpuRuntime", "Resources", "TaskMetadata", "meta", "resolve_task_metadata"]
+__all__ = ["GpuRuntime", "Resources", "ResourcesOverrides", "TaskMetadata", "meta", "resolve_task_metadata"]
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -138,6 +138,18 @@ class Resources(Struct, frozen=True):
             ),
             gpu_runtime=gpu_runtime,
         )
+
+
+class ResourcesOverrides(TypedDict, total=False):
+    """Partial :class:`Resources` patch; used to type ``Task.with_resources`` kwargs."""
+
+    time: int | None
+    nodes: int
+    memory: int
+    cpus: int
+    gpus: int
+    gpu_memory: int | None
+    gpu_runtime: GpuRuntime
 
 
 def meta(

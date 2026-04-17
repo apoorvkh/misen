@@ -371,7 +371,7 @@ def _resolve_command_task(*, command: str, task_name: str | None) -> str:
 
 def _task_sort_key(task: Task[Any]) -> tuple[str, str]:
     """Return stable sort key for task display."""
-    return (task.properties.id, task.task_hash().b32())
+    return (task.meta.id, task.task_hash().b32())
 
 
 def _iter_task_closure(root_tasks: Iterable[Task[Any]]) -> list[Task[Any]]:
@@ -438,7 +438,7 @@ def _task_display_label(task: Task[Any]) -> str:
     if task_args is not None:
         styled_label += f"[dim]({escape(task_args)})[/dim]"
 
-    if task.properties.cache:
+    if task.meta.cache:
         styled_label += " [cyan][C][/cyan]"
     if hash_suffix is not None:
         styled_label += f" [blue][{escape(hash_suffix)}][/blue]"
@@ -466,7 +466,7 @@ def _build_task_tree(
     used_shared_marker = False
 
     def include_task(task: Task[Any]) -> bool:
-        if cacheable_only and not task.properties.cache:
+        if cacheable_only and not task.meta.cache:
             return False
         return not (incomplete_only and _task_done(task, workspace))
 
@@ -547,7 +547,7 @@ def _build_task_list_lines(
     lines: list[str] = []
 
     for task in _iter_task_closure(named_tasks.values()):
-        if cacheable_only and not task.properties.cache:
+        if cacheable_only and not task.meta.cache:
             continue
 
         done = _task_done(task, workspace)

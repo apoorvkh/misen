@@ -235,7 +235,7 @@ class _StatusWorkspace:
         self.done_ids = done_ids
 
     def get_result_hash(self, task: Task[int]) -> object:
-        if task.properties.id in self.done_ids:
+        if task.meta.id in self.done_ids:
             return object()
         msg = "Task not complete"
         raise CacheError(msg)
@@ -297,7 +297,7 @@ def test_task_repr_includes_arguments_without_dependent_tasks() -> None:
     assert downstream_repr == f"Task({task_label(downstream, include_arguments=True)})"
 
 
-def test_task_label_excludes_arguments_configured_in_properties() -> None:
+def test_task_label_excludes_arguments_configured_in_meta() -> None:
     label = task_label(Task(with_exclude, hidden=99, visible=1), include_arguments=True)
     assert "hidden=" not in label
     assert "visible=1" in label

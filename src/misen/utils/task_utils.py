@@ -55,7 +55,7 @@ def hash_task_arguments(
     signature: Signature,
     args: tuple[Any, ...],
     kwargs: Mapping[str, Any],
-    properties: TaskMetadata,
+    meta: TaskMetadata,
     hash_task_by_result: bool = False,
     workspace: Workspace | Literal["auto"] = "auto",
 ) -> dict[str, tuple[TaskHash | ResultHash, int]]:
@@ -65,7 +65,7 @@ def hash_task_arguments(
         signature: Function signature used for canonical binding/defaults.
         args: Positional arguments.
         kwargs: Keyword arguments.
-        properties: Task metadata controlling include/exclude/default/version.
+        meta: Task metadata controlling include/exclude/default/version.
         hash_task_by_result: Whether dependent tasks are represented by
             ``result_hash`` instead of ``task_hash``.
         workspace: Workspace used when hashing dependencies by result.
@@ -98,8 +98,8 @@ def hash_task_arguments(
         return ResultHash.from_object(map_nested_leaves(value, leaf_representation))
 
     def include_argument(name: str, value: Any) -> bool:
-        return name not in properties.exclude and (
-            name not in properties.defaults or properties.defaults[name] != value
+        return name not in meta.exclude and (
+            name not in meta.defaults or meta.defaults[name] != value
         )
 
     hashed_arguments: dict[str, tuple[TaskHash | ResultHash, int]] = {}
@@ -110,10 +110,10 @@ def hash_task_arguments(
         try:
             arg_hash = argument_hash(value)
         except HashError as exc:
-            prefix = f"Task '{properties.id}' argument '{name}' required unsupported hashing behavior. "
-            if properties.cache:
+            prefix = f"Task '{meta.id}' argument '{name}' required unsupported hashing behavior. "
+            if meta.cache:
                 prefix = (
-                    f"Cacheable task '{properties.id}' argument '{name}' required unsupported hashing behavior. "
+                    f"Cacheable task '{meta.id}' argument '{name}' required unsupported hashing behavior. "
                     "Cache correctness depends on stable hashes. "
                 )
 
@@ -124,7 +124,7 @@ def hash_task_arguments(
                 "`@meta(exclude=...)` / `@meta(versions=...)`."
             )
             raise HashError(msg) from exc
-        version = properties.versions.get((name, cast("ResultHash", arg_hash)), 0)
+        version = meta.versions.get((name, cast("ResultHash", arg_hash)), 0)
         hashed_arguments[name] = (arg_hash, version)
 
     return hashed_arguments
@@ -217,7 +217,7 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
 
     workspace.set_result_hash(task, result_hash)
 
-    if task.properties.cache:
+    if task.meta.cache:
         try:
             workspace.results[task] = result
         except Exception:
@@ -255,7 +255,7 @@ def _build_argument_resolver(
         """Return cache-backed or temporary work directory for this execution."""
         nonlocal work_directory
         if work_directory is None:
-            if task.properties.cache:
+            if task.meta.cache:
                 work_directory = workspace.get_work_dir(task=task)
             else:
                 resolved = task.resolved_hash(workspace=workspace).b32()
@@ -303,7 +303,7 @@ def build_task_dependency_graph(
 
         @cache
         def include_dependency(dependency: Task[Any]) -> bool:
-            return dependency.properties.cache is False
+            return dependency.meta.cache is False
 
     elif exclude_cached:
         if workspace is None:
