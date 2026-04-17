@@ -1,6 +1,9 @@
+import pytest
+
 from misen import Task, meta
+from misen.utils.hashing import TaskHash
 from misen.utils.work_unit import WorkUnit
-from misen.workspaces.disk import DiskWorkspace
+from misen.workspaces.disk import DiskWorkspace, LMDBMapping
 
 
 @meta(id="log_task_a", cache=True)
@@ -28,3 +31,19 @@ def test_job_log_iter_filters_by_work_unit(tmp_path) -> None:
 
     assert set(workspace.job_log_iter(work_unit=work_unit_a)) == {log_a_1, log_a_2}
     assert set(workspace.job_log_iter()) == {log_a_1, log_a_2, log_b_1}
+
+
+def test_disk_workspace_close_releases_lmdb_and_blocks_further_use(tmp_path) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen-close"))
+    cache = workspace._resolved_hash_cache  # noqa: SLF001
+    assert isinstance(cache, LMDBMapping)
+
+    workspace.close()
+    # Idempotent.
+    workspace.close()
+
+    sample_key = TaskHash.from_object(("close-test",))
+    with pytest.raises(RuntimeError, match="closed"):
+        _ = sample_key in cache
+    with pytest.raises(RuntimeError, match="closed"):
+        _ = len(cache)

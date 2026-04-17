@@ -46,8 +46,10 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     _value_type: type[VT]
     lock: NFSLock
     env: lmdb.Environment
+    _closed: bool
+    _path: str
 
-    __slots__ = ("_key_type", "_value_type", "env", "lock")
+    __slots__ = ("_closed", "_key_type", "_path", "_value_type", "env", "lock")
 
     def __class_getitem__(cls, item: tuple[type[KT], type[VT]]) -> type[Self]:
         """Parameterize mapping with concrete key/value hash types.
@@ -76,20 +78,37 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
 
         self.lock = NFSLock(database_path.with_suffix(".lock"), lifetime=10)
 
+        self._path = str(database_path)
         self.env = lmdb.Environment(
-            str(database_path),
+            self._path,
             subdir=False,
             lock=False,
             map_size=2**28,  # 256 MiB
             max_dbs=1,
         )
+        self._closed = False
+
+    def _check_open(self) -> None:
+        """Raise if the underlying environment has been closed."""
+        if self._closed:
+            msg = f"LMDBMapping at {self._path!r} is closed."
+            raise RuntimeError(msg)
+
+    def close(self) -> None:
+        """Close the LMDB environment. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        self.env.close()
 
     def __len__(self) -> int:
         """Return number of entries in the database."""
+        self._check_open()
         return self.env.stat()["entries"]
 
     def __iter__(self) -> Generator[KT]:
         """Iterate over typed keys in the database."""
+        self._check_open()
         with self.env.begin() as txn:
             for k, _ in txn.cursor():
                 yield self._key_type.decode(k)
@@ -105,6 +124,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         """
         if not isinstance(key, self._key_type):
             return False
+        self._check_open()
         with self.env.begin() as txn:
             return txn.get(key.encode()) is not None
 
@@ -114,6 +134,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         Raises:
             KeyError: If the key is not present.
         """
+        self._check_open()
         with self.env.begin() as txn:
             v: bytes | None = txn.get(key.encode(), default=None)
             if v is None:
@@ -127,6 +148,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             key: Hash key.
             value: Hash value.
         """
+        self._check_open()
         _key, _value = key.encode(), value.encode()
         with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
@@ -138,6 +160,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         Raises:
             KeyError: If the key is not present.
         """
+        self._check_open()
         _key = key.encode()
         with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
@@ -147,6 +170,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
 
     def clear(self) -> None:
         """Delete all entries from the database."""
+        self._check_open()
         with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
                 for _k, _ in txn.cursor():
@@ -268,6 +292,19 @@ class DiskWorkspace(Workspace):
             result_store=DiskResultStore(self._directory / "results"),
         )
         logger.info("Initialized DiskWorkspace at %s.", self._directory.resolve())
+
+    def close(self) -> None:
+        """Release LMDB environments backing the workspace caches.
+
+        Idempotent. Subsequent operations against the closed caches raise
+        ``RuntimeError``. Use ``contextlib.closing(workspace)`` for
+        scoped cleanup. Note that workspace instances are memoized by
+        constructor kwargs, so re-constructing the same workspace after
+        close returns the same (closed) instance within the process.
+        """
+        for cache in (self._resolved_hash_cache, self._result_hash_cache):
+            if isinstance(cache, LMDBMapping):
+                cache.close()
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
         """Return NFS-backed lock for task/result namespaces.
