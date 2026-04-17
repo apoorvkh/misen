@@ -27,11 +27,13 @@ import shutil
 from contextlib import nullcontext
 from inspect import Signature, signature
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, Unpack, cast
+
+import msgspec
 
 from misen.exceptions import CacheError
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
-from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
+from misen.task_metadata import Resources, ResourcesOverrides, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
@@ -56,7 +58,6 @@ R = TypeVar("R")
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
 
-
 class Task(FrozenMixin, Generic[R]):
     """A Task is a lazy wrapper for a function and its arguments.
 
@@ -64,7 +65,7 @@ class Task(FrozenMixin, Generic[R]):
         func: Underlying callable.
         args: Positional arguments for ``func``.
         kwargs: Keyword arguments for ``func``.
-        properties: Metadata resolved from :func:`misen.task_metadata.meta`.
+        meta: Metadata resolved from :func:`misen.task_metadata.meta`.
         resources: Runtime resource request derived from bound arguments.
         dependencies: Immediate dependent tasks discovered from nested args.
     """
@@ -76,7 +77,7 @@ class Task(FrozenMixin, Generic[R]):
         "dependencies",
         "func",
         "kwargs",
-        "properties",
+        "meta",
         "resources",
     )
 
@@ -100,17 +101,10 @@ class Task(FrozenMixin, Generic[R]):
         self.kwargs: Mapping[str, Any] = MappingProxyType(kwargs)
         self._signature: Signature = signature(func)
 
-        self.properties: TaskMetadata = resolve_task_metadata(func)
-        self.resources: Resources = self.properties.resources(*self.args, **self.kwargs)
+        self.meta: TaskMetadata = resolve_task_metadata(func)
+        self.resources: Resources = self.meta.resources(*self.args, **self.kwargs)
 
-        values = tuple(itertools.chain(self.args, self.kwargs.values()))
-
-        if self.resources.nodes > 1 and ASSIGNED_RESOURCES in values:
-            msg = "ASSIGNED_RESOURCES cannot be used when resources.nodes > 1; use ASSIGNED_RESOURCES_PER_NODE."
-            raise ValueError(msg)
-        if self.resources.nodes == 1 and ASSIGNED_RESOURCES_PER_NODE in values:
-            msg = "ASSIGNED_RESOURCES_PER_NODE cannot be used when resources.nodes == 1; use ASSIGNED_RESOURCES."
-            raise ValueError(msg)
+        self._validate_arguments(self.resources)
 
         self.dependencies: frozenset[Task[Any]] = collect_task_dependencies(self.args, self.kwargs)
         self._task_hash: TaskHash = self.task_hash()
@@ -133,7 +127,7 @@ class Task(FrozenMixin, Generic[R]):
             kwargs: New keyword arguments (with some Task deps resolved to values).
 
         Returns:
-            A new Task sharing func/properties/signature/resources from ``self``
+            A new Task sharing func/meta/signature/resources from ``self``
             but with updated args, kwargs, dependencies, and task_hash.
         """
         state = self.__getstate__()
@@ -144,23 +138,74 @@ class Task(FrozenMixin, Generic[R]):
             signature=self._signature,
             args=args,
             kwargs=kwargs,
-            properties=self.properties,
+            meta=self.meta,
         )
-        state["_task_hash"] = TaskHash.from_object((self.properties.id, hashed_args))
+        state["_task_hash"] = TaskHash.from_object((self.meta.id, hashed_args))
         state["_frozen"] = True
         new: Task[R] = object.__new__(Task)
         new.__setstate__(state)
         return new
 
+    def with_resources(self, **overrides: Unpack[ResourcesOverrides]) -> Task[R]:
+        """Create a copy of this task with selected :class:`Resources` fields replaced.
+
+        Useful when an upstream-authored task either declares conservative
+        resources or does not know its precise requirements (e.g. GPU memory);
+        a downstream caller can override only the fields they need, leaving
+        the rest intact. Task identity (``task_hash``, ``meta``, ``args``,
+        ``dependencies``) is preserved — only the resource request is adjusted.
+
+        Args:
+            **overrides: :class:`Resources` field values to replace on this
+                task. Accepts any field of :class:`Resources`.
+
+        Returns:
+            A new Task whose ``resources`` is this task's ``resources`` with
+            ``overrides`` applied.
+
+        Raises:
+            TypeError: If an override names a field not on :class:`Resources`.
+            ValueError: If the resulting ``resources.nodes`` is incompatible
+                with sentinel arguments already bound to this task.
+        """
+        new_resources = msgspec.structs.replace(self.resources, **overrides)
+
+        self._validate_arguments(new_resources)
+
+        state = self.__getstate__()
+        state["resources"] = new_resources
+        state["_frozen"] = True
+        new: Task[R] = object.__new__(Task)
+        new.__setstate__(state)
+        return new
+
+    def _validate_arguments(self, resources: Resources) -> None:
+        """Validate bound task arguments against the given :class:`Resources`.
+
+        Currently checks that ``ASSIGNED_RESOURCES*`` sentinels in the bound
+        arguments are consistent with ``resources.nodes``.
+
+        Raises:
+            ValueError: If a single-node sentinel is used with ``nodes > 1``
+                or a multi-node sentinel is used with ``nodes == 1``.
+        """
+        values = tuple(itertools.chain(self.args, self.kwargs.values()))
+        if resources.nodes > 1 and ASSIGNED_RESOURCES in values:
+            msg = "ASSIGNED_RESOURCES cannot be used when resources.nodes > 1; use ASSIGNED_RESOURCES_PER_NODE."
+            raise ValueError(msg)
+        if resources.nodes == 1 and ASSIGNED_RESOURCES_PER_NODE in values:
+            msg = "ASSIGNED_RESOURCES_PER_NODE cannot be used when resources.nodes == 1; use ASSIGNED_RESOURCES."
+            raise ValueError(msg)
+
     def __repr__(self) -> str:
         """Return compact debug representation."""
         argument_items = self._repr_argument_items()
-        label = self.properties.id
+        label = self.meta.id
         if argument_items:
             label = f"{label}({', '.join(argument_items)})"
         task_hash = self.task_hash()
         label = f"{label} [{task_hash.short_b32()}]"
-        return f"Task({label}){' [C]' if self.properties.cache else ''}"
+        return f"Task({label}){' [C]' if self.meta.cache else ''}"
 
     @staticmethod
     def _contains_task_reference(value: Any) -> bool:
@@ -181,7 +226,7 @@ class Task(FrozenMixin, Generic[R]):
         items: list[str] = []
 
         for name, value in bound.arguments.items():
-            if name in self.properties.exclude:
+            if name in self.meta.exclude:
                 continue
             if Task._contains_task_reference(value):
                 continue
@@ -210,7 +255,7 @@ class Task(FrozenMixin, Generic[R]):
         from misen.workspace import Workspace
 
         workspace = Workspace.resolve_auto(workspace)
-        return self.properties.cache and self in workspace.results
+        return self.meta.cache and self in workspace.results
 
     def uncached_deps(self, workspace: Workspace | Literal["auto"] = "auto") -> Iterator[Task]:
         """Yield immediate dependencies that are cacheable but currently missing.
@@ -224,7 +269,7 @@ class Task(FrozenMixin, Generic[R]):
         return (
             dependency
             for dependency in self.dependencies
-            if dependency.properties.cache and not dependency.is_cached(workspace=workspace)
+            if dependency.meta.cache and not dependency.is_cached(workspace=workspace)
         )
 
     def are_deps_cached(self, workspace: Workspace | Literal["auto"] = "auto") -> bool:
@@ -255,7 +300,7 @@ class Task(FrozenMixin, Generic[R]):
             workspace.get_result_hash(task=self)
         except CacheError:
             return False
-        if self.properties.cache:
+        if self.meta.cache:
             return self in workspace.results
         return True
 
@@ -324,14 +369,14 @@ class Task(FrozenMixin, Generic[R]):
         logger.debug(
             "Resolving task result for %s (cache=%s, compute_if_uncached=%s, compute_uncached_deps=%s, job_id=%s).",
             self,
-            self.properties.cache,
+            self.meta.cache,
             compute_if_uncached,
             compute_uncached_deps,
             _job_id,
         )
 
         # Fast path: return cached payload for cacheable tasks.
-        if self.properties.cache:
+        if self.meta.cache:
             if (result := workspace.results.get(self)) is not None:
                 logger.log(TRACE_LEVEL, "Cache hit for %s.", self)
                 return result
@@ -367,10 +412,10 @@ class Task(FrozenMixin, Generic[R]):
         }
 
         lock_context = (
-            self._runtime_lock(workspace=workspace).context(blocking=False) if self.properties.cache else nullcontext()
+            self._runtime_lock(workspace=workspace).context(blocking=False) if self.meta.cache else nullcontext()
         )
 
-        if self.properties.cache:
+        if self.meta.cache:
             logger.debug("Acquiring runtime lock for %s.", self)
         with lock_context:
             result, work_dir = execute_task(
@@ -383,7 +428,7 @@ class Task(FrozenMixin, Generic[R]):
 
         save_task_result(task=self, result=result, workspace=workspace)
         logger.debug("Persisted task result metadata for %s.", self)
-        should_cleanup = not self.properties.cache or self.properties.cleanup_work_dir
+        should_cleanup = not self.meta.cache or self.meta.cleanup_work_dir
         if should_cleanup and work_dir is not None and work_dir.exists():
             shutil.rmtree(work_dir)
             logger.debug("Removed work directory for %s at %s.", self, work_dir)
@@ -444,9 +489,9 @@ class Task(FrozenMixin, Generic[R]):
             signature=self._signature,
             args=self.args,
             kwargs=self.kwargs,
-            properties=self.properties,
+            meta=self.meta,
         )
-        return TaskHash.from_object((self.properties.id, hashed_args))
+        return TaskHash.from_object((self.meta.id, hashed_args))
 
     def resolved_hash(self, workspace: Workspace) -> ResolvedTaskHash:
         """Return resolved-input hash for this task.
@@ -466,11 +511,11 @@ class Task(FrozenMixin, Generic[R]):
                 signature=self._signature,
                 args=self.args,
                 kwargs=self.kwargs,
-                properties=self.properties,
+                meta=self.meta,
                 hash_task_by_result=True,
                 workspace=workspace,
             )
-            resolved_hash = ResolvedTaskHash.from_object((self.properties.id, hashed_args))
+            resolved_hash = ResolvedTaskHash.from_object((self.meta.id, hashed_args))
             workspace.set_resolved_hash(self, resolved_hash)
 
         return resolved_hash

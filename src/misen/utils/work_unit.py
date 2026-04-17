@@ -105,7 +105,7 @@ class WorkUnit:
             """Resolve non-cacheable task leaves from in-memory runtime results."""
 
             def resolve_leaf(leaf: Any) -> Any:
-                if isinstance(leaf, Task) and not leaf.properties.cache:
+                if isinstance(leaf, Task) and not leaf.meta.cache:
                     return task_results[leaf]
                 return leaf
 
@@ -172,7 +172,7 @@ def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
 
     # Keep only roots and cache boundaries, then retain induced connectivity.
     anchor_graph = task_graph.copy()
-    anchors = [i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].properties.cache]
+    anchors = [i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].meta.cache]
     anchor_graph.coarsen_to_anchors(anchors=anchors)
 
     # Materialize WorkUnit nodes preserving dependency topology.
