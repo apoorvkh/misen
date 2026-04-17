@@ -1,0 +1,12 @@
+[workspace]
+authors = ["apoorvkh <mail@apoorvkh.com>"]
+channels = ["conda-forge"]
+name = "misen_fixture"
+platforms = ["osx-arm64", "linux-64", "osx-64", "linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+zlib = ">=1.3.2,<2"
+xz = ">=5.8.3,<6"
