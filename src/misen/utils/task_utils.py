@@ -166,11 +166,6 @@ def execute_task(
     Returns:
         Task result value plus the runtime work directory used (if any).
     """
-    task_name = task_label(task)
-    logger.info("Task started: %s (job_id=%s).", task_name, job_id)
-    runtime_event(f"Task started: {task_name} (job_id={job_id})", style="yellow")
-    started_at = time.perf_counter()
-
     argument_resolver, work_directory = _build_argument_resolver(
         task=task,
         workspace=workspace,
@@ -178,24 +173,50 @@ def execute_task(
         assigned_resources=assigned_resources,
     )
 
+    resolved_args = tuple(argument_resolver(value) for value in task.args)
+    resolved_kwargs = {name: argument_resolver(value) for name, value in task.kwargs.items()}
+    display = _format_resolved_call(task, resolved_args, resolved_kwargs)
+    debug_name = task_label(task)
+
+    logger.info("Task started: %s (job_id=%s).", debug_name, job_id)
+    runtime_event(f"Task started: {display}", style="yellow")
+    started_at = time.perf_counter()
+
     with workspace.open_task_log(task=task, mode="a", job_id=job_id) as task_log:
         with capture_all_output(task_log, tee_to_stdout=True):
             try:
-                args = (argument_resolver(value) for value in task.args)
-                kwargs = {name: argument_resolver(value) for name, value in task.kwargs.items()}
-                result = task.func(*args, **kwargs)
+                result = task.func(*resolved_args, **resolved_kwargs)
             except Exception:
                 RichConsole(stderr=True).print_exception()
-                logger.exception("Task failed: %s after %.2fs.", task_name, time.perf_counter() - started_at)
+                logger.exception("Task failed: %s after %.2fs.", debug_name, time.perf_counter() - started_at)
                 runtime_event(
-                    f"Task failed: {task_name} in {(time.perf_counter() - started_at):.2f}s",
+                    f"Task failed: {display} in {(time.perf_counter() - started_at):.2f}s",
                     style="bold red",
                 )
                 raise
 
-    logger.info("Task finished: %s in %.2fs.", task_name, time.perf_counter() - started_at)
-    runtime_event(f"Task finished: {task_name} in {(time.perf_counter() - started_at):.2f}s", style="green")
+    logger.info("Task finished: %s in %.2fs.", debug_name, time.perf_counter() - started_at)
+    runtime_event(f"Task finished: {display} in {(time.perf_counter() - started_at):.2f}s", style="green")
     return cast("R", result), work_directory
+
+
+def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """Return ``name(arg=value, ...)`` using resolved runtime argument values.
+
+    Argument values are ``repr``'d and each individual rendering is capped at
+    80 characters to keep runtime messages readable when an argument is a
+    large object or a long path.
+    """
+    bound = task._signature.bind_partial(*args, **kwargs)  # noqa: SLF001
+    parts: list[str] = []
+    for name, value in bound.arguments.items():
+        if name in task.meta.exclude:
+            continue
+        text = repr(value)
+        if len(text) > 80:
+            text = text[:77] + "..."
+        parts.append(f"{name}={text}")
+    return f"{task.meta.id}({', '.join(parts)})" if parts else f"{task.meta.id}()"
 
 
 def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:
