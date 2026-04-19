@@ -6,7 +6,7 @@ import contextlib
 import importlib
 import importlib.util
 import sys
-from dataclasses import dataclass, field, make_dataclass
+from dataclasses import dataclass, field, fields, make_dataclass
 from datetime import UTC, datetime
 from hashlib import sha1
 from pathlib import Path
@@ -135,6 +135,27 @@ class _BootstrapArgs:
     config: Path | None = None
     executor: ExecutorType | str = "auto"
     workspace: WorkspaceType | str = "auto"
+
+
+@dataclass(frozen=True)
+class _ConfigGroup:
+    """Holds ``--config`` in its own help panel."""
+
+    config: Path | None = None
+
+
+@dataclass(frozen=True)
+class _WorkspaceGroup:
+    """Holds the ``--workspace`` selector in its own help panel."""
+
+    workspace: WorkspaceType | str = "auto"
+
+
+@dataclass(frozen=True)
+class _ExecutorGroup:
+    """Holds the ``--executor`` selector in its own help panel."""
+
+    executor: ExecutorType | str = "auto"
 
 
 @dataclass(frozen=True)
@@ -534,159 +555,80 @@ def _count_completion(named_tasks: Mapping[str, Task[Any]], workspace: Any) -> t
     return complete_count, total_count
 
 
-def _format_count_message(*, complete_count: int, total_count: int) -> str:
-    """Return human-readable completion summary for ``count`` command."""
-    task_word = "task" if total_count == 1 else "tasks"
-    return f"Completed {complete_count} of {total_count} {task_word}."
+def _unwrap(value: Any, attr: str) -> Any:
+    """Unwrap a single-field help-group dataclass by pulling ``attr`` out.
+
+    Real CLI parsing wraps ``--config``/``--workspace``/``--executor`` in
+    ``_ConfigGroup``/``_WorkspaceGroup``/``_ExecutorGroup``; tests pass the raw
+    value directly on ``args``. Accept either.
+    """
+    return getattr(value, attr) if hasattr(value, attr) and not isinstance(value, (str, Path)) else value
+
+
+def _args_config(args: Any) -> Path | None:
+    return _unwrap(args.config, "config")
+
+
+def _args_workspace(args: Any) -> Any:
+    return _unwrap(args.workspace, "workspace")
+
+
+def _args_executor(args: Any) -> Any:
+    return _unwrap(args.executor, "executor")
 
 
 def _resolve_workspace(args: Any) -> Any:
     """Resolve workspace instance from parsed CLI args."""
     from misen.workspace import Workspace
 
-    settings = Settings(config_file=args.config)
-    return Workspace.auto(settings=settings) if args.workspace == "auto" else args.workspace
+    settings = Settings(config_file=_args_config(args))
+    workspace = _args_workspace(args)
+    return Workspace.auto(settings=settings) if workspace == "auto" else workspace
 
 
 def _resolve_executor(args: Any) -> Any:
     """Resolve executor instance from parsed CLI args."""
     from misen.executor import Executor
 
-    settings = Settings(config_file=args.config)
-    return Executor.auto(settings=settings) if args.executor == "auto" else args.executor
+    settings = Settings(config_file=_args_config(args))
+    executor = _args_executor(args)
+    return Executor.auto(settings=settings) if executor == "auto" else executor
 
 
-def _command_name(command: object) -> ExperimentCommand:
-    """Normalize command value into a stable literal command name."""
-    if isinstance(command, str):
-        available_commands = set(get_args(ExperimentCommand))
-        if command in available_commands:
-            return cast("ExperimentCommand", command)
-        msg = f"Unknown command {command!r}. Expected one of: {sorted(available_commands)}."
+_COMMAND_TYPES: dict[ExperimentCommand, type[Any]] = {
+    "run": RunCommandArgs,
+    "list": ListCommandArgs,
+    "tree": TreeCommandArgs,
+    "count": CountCommandArgs,
+    "result": ResultCommandArgs,
+    "incomplete": IncompleteCommandArgs,
+    "logs": LogsCommandArgs,
+}
+_COMMAND_ATTR_PREFIX: dict[str, str] = {"incomplete": "tree"}
+
+
+def _coerce_command(args: Any) -> Any:
+    """Return ``args.command`` as a typed ``*CommandArgs`` dataclass.
+
+    Tests pass ``args.command`` as a string plus flat ``<prefix>_<field>``
+    attributes on ``args`` (e.g. ``tree_all``, ``list_incomplete``). This
+    helper folds both that test shape and the real parsed-tyro-dataclass
+    shape into a single typed value downstream code can consume directly.
+    """
+    command = args.command
+    if isinstance(command, tuple(_COMMAND_TYPES.values())):
+        return command
+    if not isinstance(command, str):
+        msg = f"Unsupported command payload type: {type(command)!r}"
+        raise TypeError(msg)
+
+    cls = _COMMAND_TYPES.get(cast("ExperimentCommand", command))
+    if cls is None:
+        msg = f"Unknown command {command!r}. Expected one of: {sorted(_COMMAND_TYPES)}."
         raise ValueError(msg)
-
-    command_type_to_name: dict[type[object], ExperimentCommand] = {
-        RunCommandArgs: "run",
-        ListCommandArgs: "list",
-        TreeCommandArgs: "tree",
-        CountCommandArgs: "count",
-        ResultCommandArgs: "result",
-        IncompleteCommandArgs: "incomplete",
-        LogsCommandArgs: "logs",
-    }
-    command_name = command_type_to_name.get(type(command))
-    if command_name is not None:
-        return command_name
-
-    msg = f"Unsupported command payload type: {type(command)!r}"
-    raise TypeError(msg)
-
-
-def _run_task(args: Any) -> str | None:
-    command = args.command
-    if isinstance(command, RunCommandArgs):
-        return command.task
-    return cast("str | None", getattr(args, "run_task", None))
-
-
-def _run_tui(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, RunCommandArgs):
-        return command.tui
-    return bool(getattr(args, "run_tui", True))
-
-
-def _tree_all(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, (TreeCommandArgs, IncompleteCommandArgs)):
-        return command.all
-    return bool(getattr(args, "tree_all", False))
-
-
-def _tree_max_depth(args: Any) -> int | None:
-    command = args.command
-    if isinstance(command, (TreeCommandArgs, IncompleteCommandArgs)):
-        return command.max_depth
-    return cast("int | None", getattr(args, "tree_max_depth", None))
-
-
-def _tree_cacheable_only(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, (TreeCommandArgs, IncompleteCommandArgs)):
-        return command.cacheable_only
-    return bool(getattr(args, "tree_cacheable_only", False))
-
-
-def _tree_incomplete(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, TreeCommandArgs):
-        return command.incomplete
-    if isinstance(command, IncompleteCommandArgs):
-        return True
-    return bool(getattr(args, "tree_incomplete", False))
-
-
-def _tree_task(args: Any) -> str | None:
-    command = args.command
-    if isinstance(command, TreeCommandArgs):
-        return command.task
-    return cast("str | None", getattr(args, "tree_task", None))
-
-
-def _list_cacheable_only(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, ListCommandArgs):
-        return command.cacheable_only
-    return bool(getattr(args, "list_cacheable_only", False))
-
-
-def _list_incomplete(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, ListCommandArgs):
-        return command.incomplete
-    return bool(getattr(args, "list_incomplete", False))
-
-
-def _result_task(args: Any) -> str | None:
-    command = args.command
-    if isinstance(command, ResultCommandArgs):
-        return command.task
-    return cast("str | None", getattr(args, "result_task", None))
-
-
-def _logs_task(args: Any) -> str | None:
-    command = args.command
-    if isinstance(command, LogsCommandArgs):
-        return command.task
-    return cast("str | None", getattr(args, "logs_task", None))
-
-
-def _logs_job_id(args: Any) -> str | None:
-    command = args.command
-    if isinstance(command, LogsCommandArgs):
-        return command.job_id
-    return cast("str | None", getattr(args, "logs_job_id", None))
-
-
-def _logs_job(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, LogsCommandArgs):
-        return command.job
-    return bool(getattr(args, "logs_job", False))
-
-
-def _logs_list(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, LogsCommandArgs):
-        return command.list
-    return bool(getattr(args, "logs_list", False))
-
-
-def _logs_all(args: Any) -> bool:
-    command = args.command
-    if isinstance(command, LogsCommandArgs):
-        return command.all
-    return bool(getattr(args, "logs_all", False))
+    prefix = _COMMAND_ATTR_PREFIX.get(command, command)
+    kwargs = {f.name: getattr(args, f"{prefix}_{f.name}") for f in fields(cls) if hasattr(args, f"{prefix}_{f.name}")}
+    return cls(**kwargs)
 
 
 def _resolve_task_or_hash(experiment: Any, query: str) -> Task[Any]:
@@ -796,160 +738,179 @@ def _print_log_content(log_path: Path, console: Console, *, rule_title: str | No
 
 def _execute_command(*, args: Any, console: Console) -> None:
     """Execute resolved experiment CLI command."""
-    command_name = _command_name(args.command)
-    match command_name:
-        case "run":
-            executor = _resolve_executor(args)
-            workspace = _resolve_workspace(args)
-            run_task = _run_task(args)
-            run_tui = _run_tui(args)
-            if run_task is None and run_tui:
-                tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
-            elif run_task is None and not run_tui:
-                tasks = set(args.experiment.tasks().values())
-                executor.submit(tasks=tasks, workspace=workspace, blocking=True)
-            else:
-                task_name = _resolve_command_task(command=command_name, task_name=run_task)
-                args.experiment[task_name].submit(executor=executor, workspace=workspace, blocking=True)
-        case "count":
-            workspace = _resolve_workspace(args)
-            complete_count, total_count = _count_completion(args.experiment.tasks(), workspace)
-            console.print(_format_count_message(complete_count=complete_count, total_count=total_count))
-        case "tree" | "incomplete":
-            workspace = _resolve_workspace(args)
-            all_named_tasks = args.experiment.tasks()
-            tree_task_arg = _tree_task(args) if command_name == "tree" else None
-            if tree_task_arg is not None:
-                if tree_task_arg not in all_named_tasks:
-                    msg = f"Experiment has no task named {tree_task_arg!r}. Known tasks: {sorted(all_named_tasks)}"
-                    raise ValueError(msg)
-                named_tasks: Mapping[str, Task[Any]] = {tree_task_arg: all_named_tasks[tree_task_arg]}
-            else:
-                named_tasks = all_named_tasks
-            complete_count, total_count = _count_completion(named_tasks, workspace)
-            incomplete_only = command_name == "incomplete" or _tree_incomplete(args)
-            if incomplete_only and complete_count == total_count:
-                console.print("[green]No incomplete tasks.[/green]")
-                return
-            tree = _build_task_tree(
-                named_tasks,
-                workspace,
-                title="Incomplete Tasks" if incomplete_only else "Tasks",
-                show_all=_tree_all(args),
-                max_depth=_tree_max_depth(args),
-                cacheable_only=_tree_cacheable_only(args),
-                incomplete_only=incomplete_only,
-            )
-            console.print(tree)
-        case "list":
-            workspace = _resolve_workspace(args)
-            complete_count, total_count = _count_completion(args.experiment.tasks(), workspace)
-            list_incomplete = _list_incomplete(args)
-            if list_incomplete and complete_count == total_count:
-                console.print("[green]No incomplete tasks.[/green]")
-                return
+    command = _coerce_command(args)
+    match command:
+        case RunCommandArgs():
+            _cmd_run(command, args)
+        case CountCommandArgs():
+            _cmd_count(args, console)
+        case TreeCommandArgs() | IncompleteCommandArgs():
+            _cmd_tree(command, args, console)
+        case ListCommandArgs():
+            _cmd_list(command, args, console)
+        case ResultCommandArgs():
+            _cmd_result(command, args, console)
+        case LogsCommandArgs():
+            _cmd_logs(command, args, console)
+        case _:
+            msg = f"Unsupported command type {type(command)!r}"
+            raise TypeError(msg)
 
-            title = "Incomplete Tasks" if list_incomplete else "Tasks"
-            lines = _build_task_list_lines(
-                args.experiment.tasks(),
-                workspace,
-                cacheable_only=_list_cacheable_only(args),
-                incomplete_only=list_incomplete,
-            )
 
-            if not lines:
-                console.print("[yellow]No tasks matched filters.[/yellow]")
-                return
+def _cmd_run(command: RunCommandArgs, args: Any) -> None:
+    executor = _resolve_executor(args)
+    workspace = _resolve_workspace(args)
+    if command.task is None:
+        if command.tui:
+            tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
+        else:
+            tasks = set(args.experiment.tasks().values())
+            executor.submit(tasks=tasks, workspace=workspace, blocking=True)
+        return
+    args.experiment[command.task].submit(executor=executor, workspace=workspace, blocking=True)
 
-            console.print(_styled_title(title))
-            for line in lines:
-                console.print(line)
-        case "result":
-            workspace = _resolve_workspace(args)
-            task_key = _resolve_command_task(command=command_name, task_name=_result_task(args))
-            console.print(Pretty(args.experiment.result(task_key, workspace=workspace)))
-        case "logs":
-            workspace = _resolve_workspace(args)
-            task_query = _logs_task(args)
-            job_id = _logs_job_id(args)
-            job_mode = _logs_job(args)
-            list_mode = _logs_list(args)
-            show_all = _logs_all(args)
 
-            if not job_mode:
-                # Task log mode.
-                if task_query is not None:
-                    task = _resolve_task_or_hash(args.experiment, task_query)
-                    if list_mode:
-                        status = _status_indicator(done=_task_done(task, workspace))
-                        console.print(f"{status} {_task_display_label(task)}")
-                        _list_task_logs(task, workspace, console)
-                    else:
-                        try:
-                            with workspace.open_task_log(task, mode="r", job_id=job_id) as f:
-                                log_content = f.read()
-                        except FileNotFoundError:
-                            console.print("[dim]No logs found.[/dim]")
-                            return
-                        status = _status_indicator(done=_task_done(task, workspace))
-                        console.rule(f"{status} {_task_display_label(task)}")
-                        console.print(Text.from_ansi(log_content))
-                else:
-                    tasks = _iter_task_closure(args.experiment.tasks().values())
-                    printed_any = False
-                    for task in tasks:
-                        if list_mode:
-                            status = _status_indicator(done=_task_done(task, workspace))
-                            console.print(f"{status} {_task_display_label(task)}")
-                            _list_task_logs(task, workspace, console)
-                            printed_any = True
-                        else:
-                            try:
-                                with workspace.open_task_log(task, mode="r", job_id=job_id) as f:
-                                    log_content = f.read()
-                            except FileNotFoundError:
-                                continue
-                            status = _status_indicator(done=_task_done(task, workspace))
-                            console.rule(f"{status} {_task_display_label(task)}")
-                            console.print(Text.from_ansi(log_content))
-                            printed_any = True
-                    if not printed_any:
-                        console.print("[dim]No logs found.[/dim]")
-            # Job log mode.
-            elif task_query is not None:
-                task = _resolve_task_or_hash(args.experiment, task_query)
-                work_unit = _find_work_unit_for_task(args.experiment, task)
-                log_paths = sorted(workspace.job_log_iter(work_unit), key=lambda p: p.stat().st_mtime)
+def _cmd_count(args: Any, console: Console) -> None:
+    workspace = _resolve_workspace(args)
+    complete, total = _count_completion(args.experiment.tasks(), workspace)
+    word = "task" if total == 1 else "tasks"
+    console.print(f"Completed {complete} of {total} {word}.")
 
-                if job_id is not None:
-                    log_paths = [p for p in log_paths if f"_{job_id}.log" in p.name]
 
-                if not log_paths:
-                    console.print("[dim]No job logs found.[/dim]")
-                    return
+def _cmd_tree(command: TreeCommandArgs | IncompleteCommandArgs, args: Any, console: Console) -> None:
+    workspace = _resolve_workspace(args)
+    all_named = args.experiment.tasks()
 
-                if list_mode:
-                    _list_job_logs(log_paths, console)
-                else:
-                    logs_to_show = log_paths if show_all else log_paths[-1:]
-                    for log_path in logs_to_show:
-                        _print_log_content(
-                            log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
-                        )
-            else:
-                log_paths = sorted(workspace.job_log_iter(), key=lambda p: p.stat().st_mtime)
-                if not log_paths:
-                    console.print("[dim]No job logs found.[/dim]")
-                    return
+    tree_task = command.task if isinstance(command, TreeCommandArgs) else None
+    if tree_task is not None:
+        if tree_task not in all_named:
+            msg = f"Experiment has no task named {tree_task!r}. Known tasks: {sorted(all_named)}"
+            raise ValueError(msg)
+        named_tasks: Mapping[str, Task[Any]] = {tree_task: all_named[tree_task]}
+    else:
+        named_tasks = all_named
 
-                if list_mode:
-                    _list_job_logs(log_paths, console)
-                else:
-                    logs_to_show = log_paths if show_all else log_paths[-1:]
-                    for log_path in logs_to_show:
-                        _print_log_content(
-                            log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
-                        )
+    incomplete_only = isinstance(command, IncompleteCommandArgs) or command.incomplete
+    complete, total = _count_completion(named_tasks, workspace)
+    if incomplete_only and complete == total:
+        console.print("[green]No incomplete tasks.[/green]")
+        return
+
+    tree = _build_task_tree(
+        named_tasks,
+        workspace,
+        title="Incomplete Tasks" if incomplete_only else "Tasks",
+        show_all=command.all,
+        max_depth=command.max_depth,
+        cacheable_only=command.cacheable_only,
+        incomplete_only=incomplete_only,
+    )
+    console.print(tree)
+
+
+def _cmd_list(command: ListCommandArgs, args: Any, console: Console) -> None:
+    workspace = _resolve_workspace(args)
+    complete, total = _count_completion(args.experiment.tasks(), workspace)
+    if command.incomplete and complete == total:
+        console.print("[green]No incomplete tasks.[/green]")
+        return
+
+    title = "Incomplete Tasks" if command.incomplete else "Tasks"
+    lines = _build_task_list_lines(
+        args.experiment.tasks(),
+        workspace,
+        cacheable_only=command.cacheable_only,
+        incomplete_only=command.incomplete,
+    )
+    if not lines:
+        console.print("[yellow]No tasks matched filters.[/yellow]")
+        return
+
+    console.print(_styled_title(title))
+    for line in lines:
+        console.print(line)
+
+
+def _cmd_result(command: ResultCommandArgs, args: Any, console: Console) -> None:
+    workspace = _resolve_workspace(args)
+    task_key = _resolve_command_task(command="result", task_name=command.task)
+    console.print(Pretty(args.experiment.result(task_key, workspace=workspace)))
+
+
+def _cmd_logs(command: LogsCommandArgs, args: Any, console: Console) -> None:
+    workspace = _resolve_workspace(args)
+    if command.job:
+        _cmd_logs_job_mode(command, args, workspace, console)
+    else:
+        _cmd_logs_task_mode(command, args, workspace, console)
+
+
+def _cmd_logs_task_mode(command: LogsCommandArgs, args: Any, workspace: Any, console: Console) -> None:
+    if command.task is not None:
+        task = _resolve_task_or_hash(args.experiment, command.task)
+        _show_task_log(task, workspace, console, job_id=command.job_id, list_mode=command.list)
+        return
+
+    printed_any = False
+    for task in _iter_task_closure(args.experiment.tasks().values()):
+        if _show_task_log(task, workspace, console, job_id=command.job_id, list_mode=command.list, skip_missing=True):
+            printed_any = True
+    if not printed_any:
+        console.print("[dim]No logs found.[/dim]")
+
+
+def _show_task_log(
+    task: Task[Any],
+    workspace: Any,
+    console: Console,
+    *,
+    job_id: str | None,
+    list_mode: bool,
+    skip_missing: bool = False,
+) -> bool:
+    """Print one task's log (or its log entry listing). Return whether anything was printed."""
+    status = _status_indicator(done=_task_done(task, workspace))
+    header = f"{status} {_task_display_label(task)}"
+    if list_mode:
+        console.print(header)
+        _list_task_logs(task, workspace, console)
+        return True
+    try:
+        with workspace.open_task_log(task, mode="r", job_id=job_id) as f:
+            log_content = f.read()
+    except FileNotFoundError:
+        if skip_missing:
+            return False
+        console.print("[dim]No logs found.[/dim]")
+        return False
+    console.rule(header)
+    console.print(Text.from_ansi(log_content))
+    return True
+
+
+def _cmd_logs_job_mode(command: LogsCommandArgs, args: Any, workspace: Any, console: Console) -> None:
+    if command.task is not None:
+        task = _resolve_task_or_hash(args.experiment, command.task)
+        work_unit = _find_work_unit_for_task(args.experiment, task)
+        log_paths = sorted(workspace.job_log_iter(work_unit), key=lambda p: p.stat().st_mtime)
+    else:
+        log_paths = sorted(workspace.job_log_iter(), key=lambda p: p.stat().st_mtime)
+
+    if command.job_id is not None:
+        log_paths = [p for p in log_paths if f"_{command.job_id}.log" in p.name]
+
+    if not log_paths:
+        console.print("[dim]No job logs found.[/dim]")
+        return
+
+    if command.list:
+        _list_job_logs(log_paths, console)
+        return
+
+    for log_path in (log_paths if command.all else log_paths[-1:]):
+        _print_log_content(
+            log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
+        )
 
 
 def _resolve_command(*, command_token: str | None, unknown_args: list[str]) -> ExperimentCommand:
@@ -1002,22 +963,45 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
     }
     resolved_command = _resolve_command(command_token=None, unknown_args=unknown_args)
 
+    # Each CLI group lives in its own single-field wrapper so tyro renders a
+    # dedicated help panel ("config options", "workspace options", ...). Field
+    # order drives help-panel order. ``kw_only=True`` on the generated class
+    # lets us mix required (concrete executor/workspace) and defaulted fields
+    # without reordering.
     cli_fields: list[tuple[Any, ...]] = [
-        ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls]),  # ty:ignore[invalid-type-form]
+        (
+            "config",
+            tyro.conf.OmitArgPrefixes[_ConfigGroup],  # ty:ignore[invalid-type-form]
+            field(default_factory=lambda: _ConfigGroup(config=bootstrap_args.config)),
+        ),
     ]
-    if bootstrap_args.executor != "auto":
-        cli_fields.append(("executor", Executor.resolve_type(bootstrap_args.executor)))
-    if bootstrap_args.workspace != "auto":
+    if bootstrap_args.workspace == "auto":
+        cli_fields.append(
+            (
+                "workspace",
+                tyro.conf.OmitArgPrefixes[_WorkspaceGroup],  # ty:ignore[invalid-type-form]
+                field(default_factory=lambda: _WorkspaceGroup(workspace=bootstrap_args.workspace)),
+            )
+        )
+    else:
         cli_fields.append(("workspace", Workspace.resolve_type(bootstrap_args.workspace)))
+    if bootstrap_args.executor == "auto":
+        cli_fields.append(
+            (
+                "executor",
+                tyro.conf.OmitArgPrefixes[_ExecutorGroup],  # ty:ignore[invalid-type-form]
+                field(default_factory=lambda: _ExecutorGroup(executor=bootstrap_args.executor)),
+            )
+        )
+    else:
+        cli_fields.append(("executor", Executor.resolve_type(bootstrap_args.executor)))
     cli_fields.extend(
         [
+            ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls]),  # ty:ignore[invalid-type-form]
             ("command", ExperimentCommandArgs, field(default_factory=command_default_factories[resolved_command])),
-            ("config", Path | None, bootstrap_args.config),
-            ("executor", ExecutorType | str, bootstrap_args.executor),
-            ("workspace", WorkspaceType | str, bootstrap_args.workspace),
         ]
     )
 
     console = Console()
-    parsed = tyro.cli(make_dataclass("", cli_fields), args=args_list)
+    parsed = tyro.cli(make_dataclass("", cli_fields, kw_only=True), args=unknown_args)
     _execute_command(args=cast("Any", parsed), console=console)

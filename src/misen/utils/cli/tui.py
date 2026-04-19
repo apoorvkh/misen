@@ -243,7 +243,7 @@ def _run_textual_task_monitor(
             self._repaint_tree()
             self._render_summary_widget()
             self._update_log_title()
-            self._show_log_placeholder()
+            self._stream_log_chunk()
             self.call_after_refresh(self._post_mount_focus)
             self.set_interval(max(0.1, poll_interval_s), self._tick)
 
@@ -266,9 +266,7 @@ def _run_textual_task_monitor(
             ) -> None:
                 if task in rendered or task in ancestry:
                     return
-                node_wu = index.work_unit_of_root(task)
-                if node_wu is None:
-                    node_wu = parent_wu
+                node_wu = index.work_unit_of_root(task) or parent_wu
                 entry = _TaskTreeNode(
                     task=task,
                     tree_node=None,
@@ -276,11 +274,12 @@ def _run_textual_task_monitor(
                     named_as=named_as,
                     work_unit=node_wu,
                 )
-                label = _render_node_label(entry)
-                node = parent_node.add(label, data=entry, expand=True)
+                node = parent_node.add(_render_node_label(entry), data=entry, expand=True)
                 entry.tree_node = node
                 self._entries.append(entry)
                 self._entry_by_node_id[id(node)] = entry
+                if node_wu is not None and node_wu not in self._wu_canonical:
+                    self._wu_canonical[node_wu] = entry
 
                 rendered.add(task)
                 next_ancestry = ancestry | {task}
@@ -289,10 +288,6 @@ def _run_textual_task_monitor(
 
             for alias, task in sorted(named_tasks.items()):
                 add_subtree(tree.root, task, None, alias, set(), None)
-
-            for entry in self._entries:
-                if entry.work_unit is not None and entry.work_unit not in self._wu_canonical:
-                    self._wu_canonical[entry.work_unit] = entry
 
             if self._entries and self._cursor_entry is None:
                 self._cursor_entry = self._entries[0]
@@ -384,16 +379,13 @@ def _run_textual_task_monitor(
             log_viewer = self.query_one("#log-viewer", RichLog)
             log_viewer.clear()
 
-        def _show_log_placeholder(self) -> None:
-            self._stream_log_chunk()
-
         def _stream_log_chunk(self) -> None:
             entry = self._cursor_entry
             if entry is None:
                 return
             log_viewer = self.query_one("#log-viewer", RichLog)
 
-            key, opener, error = self._resolve_log_source(entry)
+            key, opener, placeholder = self._resolve_log_source(entry)
             is_new_source = key != self._log_key
             if is_new_source:
                 self._log_key = key
@@ -402,7 +394,7 @@ def _run_textual_task_monitor(
 
             if opener is None:
                 if is_new_source:
-                    log_viewer.write(Text(error or "(no log yet)", style="dim italic"))
+                    log_viewer.write(Text(placeholder, style="dim italic"))
                 return
 
             try:
@@ -412,11 +404,13 @@ def _run_textual_task_monitor(
                     self._log_offset = f.tell()
             except FileNotFoundError:
                 if is_new_source:
-                    log_viewer.write(Text("(log file not found)", style="dim italic"))
+                    log_viewer.write(Text(placeholder, style="dim italic"))
                 return
             except Exception as exc:  # noqa: BLE001
                 if is_new_source:
-                    log_viewer.write(Text(f"(log unavailable: {exc.__class__.__name__})", style="dim italic"))
+                    log_viewer.write(
+                        Text(f"(log unavailable: {exc.__class__.__name__})", style="dim italic")
+                    )
                 return
 
             if chunk:
@@ -424,24 +418,16 @@ def _run_textual_task_monitor(
 
         def _resolve_log_source(
             self, entry: _TaskTreeNode
-        ) -> tuple[tuple[Any, ...], Any, str | None]:
-            """Return ``(key, opener, error)`` for the log matching the current mode.
+        ) -> tuple[tuple[Any, ...], Any, str]:
+            """Return ``(key, opener, placeholder)`` for the log matching the current mode.
 
-            ``key`` identifies the source so we can detect transitions; ``opener``
-            returns a readable text file object or ``None`` when no log exists.
+            ``opener`` is either a zero-arg callable returning a readable text file or
+            ``None`` when no log is resolvable. ``placeholder`` is the message shown
+            when there's nothing to stream (either resolution failed or the file is missing).
             """
             if self._mode == "task":
                 key: tuple[Any, ...] = ("task", id(entry.task))
-                try:
-                    # Eagerly open once just to confirm the log exists; callers
-                    # re-open via the same workspace API to seek + read.
-                    workspace.open_task_log(entry.task, mode="r").close()
-                except FileNotFoundError:
-                    return key, None, "(no task log yet)"
-                except Exception as exc:  # noqa: BLE001
-                    return key, None, f"(log unavailable: {exc.__class__.__name__})"
-                return key, lambda: workspace.open_task_log(entry.task, mode="r"), None
-
+                return key, lambda: workspace.open_task_log(entry.task, mode="r"), "(no task log yet)"
             wu = entry.work_unit
             if wu is None:
                 return ("job", None), None, "(no job assigned)"
@@ -451,7 +437,7 @@ def _run_textual_task_monitor(
             return (
                 ("job", str(log_path)),
                 lambda: log_path.open("r", encoding="utf-8", errors="replace"),
-                None,
+                "(no job log yet)",
             )
 
         def _resolve_job_log_path(self, wu: WorkUnit):
@@ -479,31 +465,27 @@ def _run_textual_task_monitor(
 
 
 @contextlib.contextmanager
-def _runtime_events_suppressed() -> Iterator[None]:
+def _env_var(name: str, value: str) -> Iterator[None]:
+    """Temporarily set environment variable ``name`` to ``value``."""
+    previous = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
+
+def _runtime_events_suppressed() -> Any:
     """Disable runtime event widgets while the Textual app is running."""
-    previous = os.environ.get("MISEN_RUNTIME_EVENTS")
-    os.environ["MISEN_RUNTIME_EVENTS"] = "0"
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("MISEN_RUNTIME_EVENTS", None)
-        else:
-            os.environ["MISEN_RUNTIME_EVENTS"] = previous
+    return _env_var("MISEN_RUNTIME_EVENTS", "0")
 
 
-@contextlib.contextmanager
-def _runtime_job_board_suppressed() -> Iterator[None]:
-    """Disable runtime job-board rows while keeping regular runtime events."""
-    previous = os.environ.get("MISEN_RUNTIME_JOB_BOARD")
-    os.environ["MISEN_RUNTIME_JOB_BOARD"] = "0"
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("MISEN_RUNTIME_JOB_BOARD", None)
-        else:
-            os.environ["MISEN_RUNTIME_JOB_BOARD"] = previous
+def _runtime_job_board_suppressed() -> Any:
+    """Disable the runtime job-board rows while keeping regular runtime events."""
+    return _env_var("MISEN_RUNTIME_JOB_BOARD", "0")
 
 
 def _print_final_summary(jobs: list[Job]) -> None:
