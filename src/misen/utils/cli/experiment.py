@@ -28,6 +28,7 @@ from misen.utils.settings import Settings
 from misen.workspace import WorkspaceType
 
 from . import tui
+from .display import format_task_line_markup, iter_task_arg_children
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
@@ -77,7 +78,7 @@ LogsJobArg = Annotated[
     bool,
     tyro.conf.arg(
         name="job",
-        help="Show job log for the containing work unit instead of the task log.",
+        help="Show the task's job log instead of the task log.",
     ),
 ]
 LogsListArg = Annotated[
@@ -150,6 +151,7 @@ class ListCommandArgs:
 
 @dataclass(frozen=True)
 class TreeCommandArgs:
+    task: tyro.conf.Positional[str | None] = None
     all: TreeAllArg = False
     max_depth: TreeDepthArg = None
     cacheable_only: TreeCacheableOnlyArg = False
@@ -401,27 +403,6 @@ def _status_indicator(*, done: bool) -> str:
     return "[green]✓[/green]" if done else "[yellow]○[/yellow]"
 
 
-def _split_hash_suffix(label: str) -> tuple[str, str | None]:
-    """Split trailing `` [HASH]`` suffix from a task label."""
-    if not label.endswith("]"):
-        return label, None
-
-    prefix, separator, remainder = label.rpartition(" [")
-    if not separator or not remainder.endswith("]"):
-        return label, None
-
-    hash_suffix = remainder[:-1]
-    return (prefix, hash_suffix) if hash_suffix else (label, None)
-
-
-def _split_call_signature(label: str) -> tuple[str, str | None]:
-    """Split ``name(args)`` text into name and args."""
-    if "(" not in label or not label.endswith(")"):
-        return label, None
-    name, _, arg_tail = label.partition("(")
-    return name, arg_tail[:-1]
-
-
 def _styled_title(title: str) -> str:
     """Return consistently-styled title text for list/tree outputs."""
     color = "yellow" if "Incomplete" in title else "cyan"
@@ -429,21 +410,8 @@ def _styled_title(title: str) -> str:
 
 
 def _task_display_label(task: Task[Any]) -> str:
-    """Return one task label with CLI-specific cache marker placement."""
-    label = task_label(task, include_arguments=True)
-    label_without_hash, hash_suffix = _split_hash_suffix(label)
-    task_name, task_args = _split_call_signature(label_without_hash)
-
-    styled_label = f"[bright_white]{escape(task_name)}[/bright_white]"
-    if task_args is not None:
-        styled_label += f"[dim]({escape(task_args)})[/dim]"
-
-    if task.meta.cache:
-        styled_label += " [cyan][C][/cyan]"
-    if hash_suffix is not None:
-        styled_label += f" [blue][{escape(hash_suffix)}][/blue]"
-
-    return styled_label
+    """Return one task label for CLI list/tree output (no hash, no job id)."""
+    return format_task_line_markup(task)
 
 
 def _build_task_tree(
@@ -455,7 +423,7 @@ def _build_task_tree(
     max_depth: int | None = None,
     cacheable_only: bool = False,
     incomplete_only: bool = False,
-) -> tuple[Tree, bool]:
+) -> Tree:
     """Build a rich tree for experiment tasks and dependencies."""
     if max_depth is not None and max_depth < 0:
         msg = "Tree max depth must be >= 0."
@@ -474,66 +442,66 @@ def _build_task_tree(
         branch: Tree,
         task: Task[Any],
         *,
-        name: str | None,
+        arg_prefix: str | None,
         ancestry: set[Task[Any]],
         depth: int,
     ) -> None:
         if not include_task(task):
             return
+        if not show_all and task in rendered:
+            return
 
-        nonlocal used_shared_marker
         status = _status_indicator(done=_task_done(task, workspace))
-        name_prefix = f"[bold magenta]{escape(name)}[/bold magenta]: " if name is not None else ""
-        line = f"{status} {name_prefix}{_task_display_label(task)}"
+        task_line = format_task_line_markup(task, prefix=arg_prefix)
+        line = f"{status} {task_line}"
 
         if task in ancestry:
             branch.add(f"{line} [red](cycle)[/red]")
             return
-        if not show_all and task in rendered:
-            used_shared_marker = True
-            branch.add(f"{line} [dim](*)[/dim]")
-            return
 
-        child_ancestry = set(ancestry)
-        child_ancestry.add(task)
-        dependencies: list[Task[Any]] = []
-        skipped_shared_dependency = False
-        for dependency in sorted(task.dependencies, key=_task_sort_key):
-            if not include_task(dependency):
-                continue
-            if not show_all and dependency in rendered and dependency not in child_ancestry:
-                skipped_shared_dependency = True
-                continue
-            dependencies.append(dependency)
-        if skipped_shared_dependency:
-            used_shared_marker = True
-            line = f"{line} [dim](*)[/dim]"
-
-        rendered.add(task)
         child_branch = branch.add(line)
 
         if max_depth is not None and depth >= max_depth:
             return
 
-        for dependency in dependencies:
+        rendered.add(task)
+        child_ancestry = ancestry | {task}
+        for child_label, dependency in iter_task_arg_children(task):
             add_task(
                 child_branch,
                 dependency,
-                name=None,
+                arg_prefix=child_label,
                 ancestry=child_ancestry,
                 depth=depth + 1,
             )
 
+    root_tasks = _filter_root_named_tasks(named_tasks)
     rendered_any = False
-    for name, task in sorted(named_tasks.items()):
+    for _, task in sorted(root_tasks.items()):
         if not include_task(task):
             continue
-        add_task(tree, task, name=name, ancestry=set(), depth=0)
+        add_task(tree, task, arg_prefix=None, ancestry=set(), depth=0)
         rendered_any = True
 
     if not rendered_any:
         tree.add("[dim]No tasks matched filters.[/dim]")
-    return tree, used_shared_marker and not show_all
+    return tree
+
+
+def _filter_root_named_tasks(named_tasks: Mapping[str, Task[Any]]) -> Mapping[str, Task[Any]]:
+    """Return the named tasks that are not dependencies of any other named task.
+
+    A named task is a "root" for tree display when nothing else in the named
+    task map transitively depends on it. Intermediate named tasks are still
+    reachable through their parents' subtrees.
+    """
+    non_roots: set[Task[Any]] = set()
+    for task in named_tasks.values():
+        for dep in _iter_task_closure([task]):
+            if dep is not task:
+                non_roots.add(dep)
+    roots = {name: task for name, task in named_tasks.items() if task not in non_roots}
+    return roots or named_tasks
 
 
 def _build_task_list_lines(
@@ -658,6 +626,13 @@ def _tree_incomplete(args: Any) -> bool:
     return bool(getattr(args, "tree_incomplete", False))
 
 
+def _tree_task(args: Any) -> str | None:
+    command = args.command
+    if isinstance(command, TreeCommandArgs):
+        return command.task
+    return cast("str | None", getattr(args, "tree_task", None))
+
+
 def _list_cacheable_only(args: Any) -> bool:
     command = args.command
     if isinstance(command, ListCommandArgs):
@@ -767,7 +742,7 @@ def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
         if task == work_unit.root or task in set(work_unit.graph.nodes()):
             return work_unit
 
-    msg = f"No work unit found containing task {task_label(task)}."
+    msg = f"No job found containing task {task_label(task)}."
     raise ValueError(msg)
 
 
@@ -842,13 +817,22 @@ def _execute_command(*, args: Any, console: Console) -> None:
             console.print(_format_count_message(complete_count=complete_count, total_count=total_count))
         case "tree" | "incomplete":
             workspace = _resolve_workspace(args)
-            complete_count, total_count = _count_completion(args.experiment.tasks(), workspace)
+            all_named_tasks = args.experiment.tasks()
+            tree_task_arg = _tree_task(args) if command_name == "tree" else None
+            if tree_task_arg is not None:
+                if tree_task_arg not in all_named_tasks:
+                    msg = f"Experiment has no task named {tree_task_arg!r}. Known tasks: {sorted(all_named_tasks)}"
+                    raise ValueError(msg)
+                named_tasks: Mapping[str, Task[Any]] = {tree_task_arg: all_named_tasks[tree_task_arg]}
+            else:
+                named_tasks = all_named_tasks
+            complete_count, total_count = _count_completion(named_tasks, workspace)
             incomplete_only = command_name == "incomplete" or _tree_incomplete(args)
             if incomplete_only and complete_count == total_count:
                 console.print("[green]No incomplete tasks.[/green]")
                 return
-            tree, has_shared_dependencies = _build_task_tree(
-                args.experiment.tasks(),
+            tree = _build_task_tree(
+                named_tasks,
                 workspace,
                 title="Incomplete Tasks" if incomplete_only else "Tasks",
                 show_all=_tree_all(args),
@@ -857,8 +841,6 @@ def _execute_command(*, args: Any, console: Console) -> None:
                 incomplete_only=incomplete_only,
             )
             console.print(tree)
-            if has_shared_dependencies:
-                console.print("[dim](*) Dependencies already listed.[/dim]")
         case "list":
             workspace = _resolve_workspace(args)
             complete_count, total_count = _count_completion(args.experiment.tasks(), workspace)

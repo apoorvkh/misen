@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 from misen.executor import Executor, Job
 from misen.executors.local.budget import ResourceBudget
 from misen.executors.local.scheduler import LocalScheduler
-from misen.utils.runtime_events import runtime_job_pending, work_unit_label
+from misen.utils.runtime_events import runtime_job_pending, task_label, work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
@@ -225,7 +225,10 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             resources,
             len(dependencies),
         )
-        runtime_job_pending(id(job), label=work_unit_label(work_unit))
+        runtime_job_pending(
+            id(job),
+            label=task_label(work_unit.root, include_hash=False, include_arguments=True),
+        )
         self._scheduler.submit(job)
         return job
 

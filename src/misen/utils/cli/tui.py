@@ -1,32 +1,37 @@
-"""Terminal UI helpers for monitoring submitted job graphs."""
+"""Terminal UI for monitoring submitted task graphs."""
 
 from __future__ import annotations
 
 import contextlib
 import os
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from rich.console import Console
 from rich.text import Text
 
+from misen.utils.cli.display import format_task_line_text, iter_task_arg_children
 from misen.utils.runtime_events import RuntimeJobSummary, runtime_job_summary_lines, task_label
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
     from misen.executor import Job
+    from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
+    from misen.utils.work_unit import WorkUnit
+    from misen.workspace import Workspace
 
 __all__ = [
-    "JobSnapshot",
-    "snapshot_jobs",
+    "JobState",
+    "Mode",
     "submit_and_watch_jobs",
-    "watch_job_graph",
+    "watch_tasks",
 ]
 
 JobState = Literal["pending", "running", "done", "failed", "unknown"]
+Mode = Literal["task", "job"]
 _TERMINAL_STATES = frozenset({"done", "failed"})
 _STATE_STYLES: dict[JobState, str] = {
     "pending": "yellow",
@@ -35,287 +40,109 @@ _STATE_STYLES: dict[JobState, str] = {
     "failed": "bold red",
     "unknown": "magenta",
 }
-
-
-@dataclass(frozen=True)
-class JobSnapshot:
-    """One polled view of a submitted job."""
-
-    index: int
-    label: str
-    summary_label: str
-    state: JobState
-    job_id: str
-    pid: int | None
-    log_file: str
-    dependencies: tuple[str, ...]
+_STATE_ICONS: dict[JobState, str] = {
+    "pending": "○",
+    "running": "◐",
+    "done": "●",
+    "failed": "✗",
+    "unknown": "?",
+}
+_TASK_EMPHASIS_STYLE = "underline"
+_JOB_EMPHASIS_STYLE = "on grey35"
 
 
 def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> None:
-    """Submit experiment tasks and monitor resulting jobs with the TUI."""
-    tasks = set(experiment.tasks().values())
-    # Keep submit-time runtime events visible (e.g. snapshot/submission messages),
-    # but hide the runtime job board rows because Textual will render job states.
+    """Submit experiment tasks and monitor resulting jobs via the TUI."""
+    named_tasks = experiment.tasks()
+    tasks = set(named_tasks.values())
     with _runtime_job_board_suppressed():
         job_graph, snapshot = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
         with _runtime_events_suppressed():
-            job_snapshots = watch_job_graph(job_graph=job_graph)
-    if all(s.state in ("done", "failed") for s in job_snapshots):
+            watch_tasks(named_tasks=named_tasks, job_graph=job_graph, workspace=workspace)
+    jobs = list(job_graph.nodes())
+    if all(_safe_job_state(job) in _TERMINAL_STATES for job in jobs):
         executor.cleanup_snapshot(snapshot)
-    _print_final_summary(job_snapshots)
+    _print_final_summary(jobs)
 
 
-def watch_job_graph(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[JobSnapshot]:
-    """Render the submitted job graph in a Textual app."""
+def watch_tasks(
+    *,
+    named_tasks: Mapping[str, Task[Any]],
+    job_graph: DependencyGraph[Job],
+    workspace: Workspace,
+    poll_interval_s: float = 0.2,
+) -> None:
+    """Render the task dependency tree and stream logs until users exit."""
     console = Console(stderr=True, soft_wrap=True)
     if not job_graph.nodes():
-        console.print("[bold blue][misen][/bold blue] No work units were submitted.", style="dim")
-        return []
-
-    return _run_textual_job_monitor(job_graph=job_graph, poll_interval_s=poll_interval_s)
-
-
-def snapshot_jobs(
-    job_graph: DependencyGraph[Job],
-) -> tuple[list[JobSnapshot], dict[int, list[int]], bool]:
-    """Collect one state snapshot for each job node."""
-    node_indices = job_graph.node_indices()
-    labels = {idx: _job_label(job_graph[idx]) for idx in node_indices}
-    index_by_job = {job_graph[idx]: idx for idx in node_indices}
-
-    dependency_indices = {
-        idx: sorted((index_by_job[dep] for dep in job_graph.successors(idx)), key=lambda dep_idx: labels[dep_idx])
-        for idx in node_indices
-    }
-
-    snapshots: list[JobSnapshot] = []
-    done = True
-    for idx in sorted(node_indices, key=lambda node_idx: labels[node_idx]):
-        job = job_graph[idx]
-        state = _safe_job_state(job)
-        if state not in _TERMINAL_STATES:
-            done = False
-        snapshots.append(
-            JobSnapshot(
-                index=idx,
-                label=labels[idx],
-                summary_label=_job_summary_label(job),
-                state=state,
-                job_id=job.job_id or "-",
-                pid=_job_pid(job),
-                log_file=str(job.log_path) if job.log_path is not None else "-",
-                dependencies=tuple(labels[dep_idx] for dep_idx in dependency_indices[idx]),
-            )
-        )
-    return snapshots, dependency_indices, done
+        console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
+        return
+    _run_textual_task_monitor(
+        named_tasks=named_tasks,
+        job_graph=job_graph,
+        workspace=workspace,
+        poll_interval_s=poll_interval_s,
+    )
 
 
-def _run_textual_job_monitor(job_graph: DependencyGraph[Job], poll_interval_s: float) -> list[JobSnapshot]:
+@dataclass
+class _TaskTreeNode:
+    """Bookkeeping for a rendered tree node backed by a ``Task``."""
+
+    task: Task[Any]
+    tree_node: Any
+    arg_prefix: str | None
+    named_as: str | None
+    work_unit: WorkUnit | None = None
+    state: JobState = "unknown"
+
+
+@dataclass
+class _JobStateIndex:
+    """Map work units and cacheable root tasks to the backing ``Job``."""
+
+    wu_to_job: dict[WorkUnit, Job] = field(default_factory=dict)
+    wu_by_root: dict[Task[Any], WorkUnit] = field(default_factory=dict)
+
+    @classmethod
+    def build(cls, job_graph: DependencyGraph[Job]) -> _JobStateIndex:
+        index = cls()
+        for job in job_graph.nodes():
+            wu = job.work_unit
+            index.wu_to_job[wu] = job
+            index.wu_by_root[wu.root] = wu
+        return index
+
+    def job_for_work_unit(self, wu: WorkUnit | None) -> Job | None:
+        return self.wu_to_job.get(wu) if wu is not None else None
+
+    def work_unit_of_root(self, task: Task[Any]) -> WorkUnit | None:
+        return self.wu_by_root.get(task)
+
+
+def _safe_job_state(job: Job) -> JobState:
     try:
-        from textual.app import App, ComposeResult
-        from textual.containers import Horizontal, Vertical
-        from textual.widgets import DataTable, Footer, Header, RichLog, Static, Tree
-    except ModuleNotFoundError as e:
-        msg = (
-            "Textual is required for the run TUI but is not installed. "
-            "Install dependencies (for example: `uv sync`) and retry."
-        )
-        raise RuntimeError(msg) from e
-
-    class _JobMonitorApp(App[None]):
-        TITLE = "misen run"
-        BINDINGS = (("q", "quit", "Quit"),)
-        CSS = """
-        Screen {
-            layout: vertical;
-        }
-
-        #summary {
-            height: auto;
-            padding: 0 1;
-        }
-
-        #main-content {
-            height: 1fr;
-        }
-
-        #left-panel {
-            width: 1fr;
-        }
-
-        #jobs {
-            height: 1fr;
-            min-height: 8;
-        }
-
-        #dependency-graph {
-            height: 1fr;
-            min-height: 8;
-        }
-
-        #log-viewer {
-            width: 1fr;
-            border-left: solid green;
-        }
-        """
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.snapshots: list[JobSnapshot] = []
-            self._selected_job_index: int | None = None
-            self._log_offset: int = 0
-            self._row_keys: list[Any] = []
-
-        def compose(self) -> ComposeResult:
-            yield Header(show_clock=True)
-            yield Static(id="summary")
-            with Horizontal(id="main-content"):
-                with Vertical(id="left-panel"):
-                    yield DataTable(id="jobs")
-                    yield Tree("Dependency Graph", id="dependency-graph")
-                yield RichLog(id="log-viewer", highlight=True, markup=False)
-            yield Footer()
-
-        def on_mount(self) -> None:
-            table = self.query_one("#jobs", DataTable)
-            table.cursor_type = "row"
-            table.add_columns("Job", "State", "Job ID", "Log File", "Depends On")
-
-            tree = self.query_one("#dependency-graph", Tree)
-            tree.root.expand()
-
-            self._refresh()
-            self.set_interval(max(0.05, poll_interval_s), self._refresh)
-
-        def _refresh(self) -> None:
-            snapshots, dependency_indices, _ = snapshot_jobs(job_graph)
-            self.snapshots = snapshots
-            self._render_summary(snapshots)
-            self._render_jobs_table(snapshots)
-            self._render_dependency_tree(snapshots=snapshots, dependency_indices=dependency_indices)
-            self._refresh_log_viewer()
-
-        def _render_summary(self, snapshots: list[JobSnapshot]) -> None:
-            summary_widget = self.query_one("#summary", Static)
-            summary_widget.update(_render_summary(snapshots))
-
-        def _render_jobs_table(self, snapshots: list[JobSnapshot]) -> None:
-            table = self.query_one("#jobs", DataTable)
-            columns = list(table.columns.keys())
-
-            def deps_str(s: JobSnapshot) -> str:
-                return ", ".join(s.dependencies) if s.dependencies else "-"
-
-            if len(self._row_keys) == len(snapshots):
-                for row_idx, snapshot in enumerate(snapshots):
-                    row_key = self._row_keys[row_idx]
-                    for col_idx, value in enumerate(
-                        [snapshot.label, snapshot.state, snapshot.job_id, snapshot.log_file, deps_str(snapshot)]
-                    ):
-                        table.update_cell(row_key, columns[col_idx], value)
-            else:
-                table.clear(columns=False)
-                self._row_keys = []
-                for snapshot in snapshots:
-                    row_key = table.add_row(
-                        snapshot.label,
-                        snapshot.state,
-                        snapshot.job_id,
-                        snapshot.log_file,
-                        deps_str(snapshot),
-                    )
-                    self._row_keys.append(row_key)
-
-        def _render_dependency_tree(
-            self,
-            *,
-            snapshots: list[JobSnapshot],
-            dependency_indices: dict[int, list[int]],
-        ) -> None:
-            tree = self.query_one("#dependency-graph", Tree)
-            root = tree.root
-            root.label = Text("Dependency Graph")
-            root.remove_children()
-
-            snapshots_by_index = {snapshot.index: snapshot for snapshot in snapshots}
-            roots = [idx for idx in job_graph.node_indices() if job_graph.is_root(idx)]
-            for idx in sorted(roots, key=lambda root_idx: snapshots_by_index[root_idx].label):
-                self._add_dependency_tree_node(
-                    parent=root,
-                    node_idx=idx,
-                    snapshots_by_index=snapshots_by_index,
-                    dependency_indices=dependency_indices,
-                    stack=set(),
-                )
-            root.expand()
-
-        def _add_dependency_tree_node(
-            self,
-            *,
-            parent: Any,
-            node_idx: int,
-            snapshots_by_index: dict[int, JobSnapshot],
-            dependency_indices: dict[int, list[int]],
-            stack: set[int],
-        ) -> None:
-            snapshot = snapshots_by_index[node_idx]
-            branch = parent.add(_tree_node_label(snapshot))
-            branch.expand()
-
-            next_stack = set(stack)
-            next_stack.add(node_idx)
-            for dep_idx in dependency_indices.get(node_idx, []):
-                if dep_idx in stack:
-                    dep_snapshot = snapshots_by_index[dep_idx]
-                    cycle_text = _tree_node_label(dep_snapshot)
-                    cycle_text.append(" (cycle)", style="bold red")
-                    branch.add(cycle_text)
-                    continue
-                self._add_dependency_tree_node(
-                    parent=branch,
-                    node_idx=dep_idx,
-                    snapshots_by_index=snapshots_by_index,
-                    dependency_indices=dependency_indices,
-                    stack=next_stack,
-                )
-
-        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-            if event.cursor_row is None or event.cursor_row >= len(self.snapshots):
-                return
-            snapshot = self.snapshots[event.cursor_row]
-            if self._selected_job_index != snapshot.index:
-                self._selected_job_index = snapshot.index
-                self._log_offset = 0
-                log_viewer = self.query_one("#log-viewer", RichLog)
-                log_viewer.clear()
-
-        def _refresh_log_viewer(self) -> None:
-            if self._selected_job_index is None:
-                return
-            job = job_graph[self._selected_job_index]
-            if job.log_path is None:
-                return
-            try:
-                with job.log_path.open("r", encoding="utf-8", errors="replace") as f:
-                    f.seek(self._log_offset)
-                    chunk = f.read()
-                    self._log_offset = f.tell()
-            except FileNotFoundError:
-                return
-            if chunk:
-                log_viewer = self.query_one("#log-viewer", RichLog)
-                log_viewer.write(Text.from_ansi(chunk.rstrip("\n")))
-
-    app = _JobMonitorApp()
-    app.run()
-    return app.snapshots
+        state = job.state()
+    except (FileNotFoundError, OSError, RuntimeError):
+        return "unknown"
+    return state if state in _STATE_STYLES else "unknown"
 
 
-def _render_summary(snapshots: list[JobSnapshot]) -> Text:
-    """Return the summary line shown above the jobs table."""
-    counts = Counter(snapshot.state for snapshot in snapshots)
+def _render_node_label(entry: _TaskTreeNode, *, emphasis_style: str | None = None) -> Text:
+    """Return the styled Textual label for a task tree node."""
+    text = Text()
+    text.append(_STATE_ICONS[entry.state], style=_STATE_STYLES[entry.state])
+    text.append(" ")
+    text.append_text(format_task_line_text(entry.task, prefix=entry.arg_prefix))
+    if emphasis_style is not None:
+        text.stylize(emphasis_style)
+    return text
+
+
+def _render_summary(jobs: list[Job], states: list[JobState]) -> Text:
+    counts = Counter(states)
     summary = Text("Jobs: ")
-    summary.append(str(len(snapshots)), style="bold")
+    summary.append(str(len(jobs)), style="bold")
     summary.append("  ")
     for state in ("pending", "running", "done", "failed", "unknown"):
         summary.append(f"{state}=", style="dim")
@@ -324,44 +151,331 @@ def _render_summary(snapshots: list[JobSnapshot]) -> Text:
     return summary
 
 
-def _tree_node_label(snapshot: JobSnapshot) -> Text:
-    """Format a dependency tree label for one job snapshot."""
-    text = Text(snapshot.label)
-    text.append(" [")
-    text.append(snapshot.state, style=_STATE_STYLES[snapshot.state])
-    text.append("]")
-    return text
-
-
-def _job_label(job: Job) -> str:
-    return f"{job.root.meta.id} ({job.root.task_hash().short_b32()})"
-
-
-def _job_summary_label(job: Job) -> str:
-    return task_label(job.root, include_hash=True, include_arguments=True)
-
-
-def _job_pid(job: Job) -> int | None:
-    pid = getattr(job, "pid", None)
-    if isinstance(pid, int):
-        return pid
-
-    process = getattr(job, "_process", None)
-    if process is None:
-        return None
-    process_pid = getattr(process, "pid", None)
-    if isinstance(process_pid, int):
-        return process_pid
-    return None
-
-
-def _safe_job_state(job: Job) -> JobState:
-    """Poll one job state, mapping backend query errors to ``unknown``."""
+def _run_textual_task_monitor(
+    *,
+    named_tasks: Mapping[str, Task[Any]],
+    job_graph: DependencyGraph[Job],
+    workspace: Workspace,
+    poll_interval_s: float,
+) -> None:
     try:
-        state = job.state()
-    except (FileNotFoundError, OSError, RuntimeError):
-        return "unknown"
-    return state if state in _STATE_STYLES else "unknown"
+        from textual.app import App, ComposeResult
+        from textual.binding import Binding
+        from textual.containers import Horizontal, Vertical
+        from textual.widgets import Footer, Header, RichLog, Static, Tree
+    except ModuleNotFoundError as e:
+        msg = (
+            "Textual is required for the run TUI but is not installed. "
+            "Install dependencies (for example: `uv sync`) and retry."
+        )
+        raise RuntimeError(msg) from e
+
+    index = _JobStateIndex.build(job_graph)
+
+    class _FilteredTree(Tree):
+        """Tree whose arrow-key cursor snaps to an explicit list of stop lines."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.scrollable_lines: list[int] = []
+
+        def action_cursor_up(self) -> None:
+            self._move_cursor(-1)
+
+        def action_cursor_down(self) -> None:
+            self._move_cursor(+1)
+
+        def _move_cursor(self, direction: int) -> None:
+            if not self.scrollable_lines:
+                return
+            current = self.cursor_line
+            if direction > 0:
+                later = [line for line in self.scrollable_lines if line > current]
+                target = min(later) if later else max(self.scrollable_lines)
+            else:
+                earlier = [line for line in self.scrollable_lines if line < current]
+                target = max(earlier) if earlier else min(self.scrollable_lines)
+            self.cursor_line = target
+
+    class _TaskMonitorApp(App[None]):
+        TITLE = "misen run"
+        ENABLE_COMMAND_PALETTE = False
+        BINDINGS = (
+            Binding("escape", "quit", "Quit"),
+            Binding("tab", "toggle_mode", "Toggle task/job log", priority=True),
+        )
+        CSS = """
+        Screen { layout: vertical; }
+        #summary { height: 1; padding: 0 1; }
+        #main-content { height: 1fr; }
+        #task-tree { width: 1fr; min-width: 32; padding: 0 1; }
+        #log-panel { width: 1fr; border-left: solid green; }
+        #log-title { height: 1; padding: 0 1; color: $accent; text-style: bold; }
+        #log-viewer { height: 1fr; padding: 0 1; }
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._mode: Mode = "task"
+            self._entries: list[_TaskTreeNode] = []
+            self._entry_by_node_id: dict[int, _TaskTreeNode] = {}
+            self._wu_canonical: dict[WorkUnit, _TaskTreeNode] = {}
+            self._cursor_entry: _TaskTreeNode | None = None
+            self._log_offset: int = 0
+            self._log_key: tuple[Any, ...] | None = None
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            yield Static(id="summary")
+            with Horizontal(id="main-content"):
+                yield _FilteredTree("Experiment", id="task-tree")
+                with Vertical(id="log-panel"):
+                    yield Static("Task log", id="log-title")
+                    yield RichLog(id="log-viewer", highlight=True, markup=False, wrap=True)
+            yield Footer()
+
+        def on_mount(self) -> None:
+            tree = self.query_one("#task-tree", _FilteredTree)
+            tree.show_root = False
+            tree.root.expand()
+            self._build_tree(tree)
+            self._refresh_states()
+            self._repaint_tree()
+            self._render_summary_widget()
+            self._update_log_title()
+            self._show_log_placeholder()
+            self.call_after_refresh(self._post_mount_focus)
+            self.set_interval(max(0.1, poll_interval_s), self._tick)
+
+        def _post_mount_focus(self) -> None:
+            tree = self.query_one("#task-tree", _FilteredTree)
+            tree.focus()
+            self._recompute_scrollable_lines()
+            self._snap_cursor_to_mode_stop()
+
+        def _build_tree(self, tree: Any) -> None:
+            rendered: set[Task[Any]] = set()
+
+            def add_subtree(
+                parent_node: Any,
+                task: Task[Any],
+                arg_prefix: str | None,
+                named_as: str | None,
+                ancestry: set[Task[Any]],
+                parent_wu: WorkUnit | None,
+            ) -> None:
+                if task in rendered or task in ancestry:
+                    return
+                node_wu = index.work_unit_of_root(task)
+                if node_wu is None:
+                    node_wu = parent_wu
+                entry = _TaskTreeNode(
+                    task=task,
+                    tree_node=None,
+                    arg_prefix=arg_prefix,
+                    named_as=named_as,
+                    work_unit=node_wu,
+                )
+                label = _render_node_label(entry)
+                node = parent_node.add(label, data=entry, expand=True)
+                entry.tree_node = node
+                self._entries.append(entry)
+                self._entry_by_node_id[id(node)] = entry
+
+                rendered.add(task)
+                next_ancestry = ancestry | {task}
+                for child_prefix, child_task in iter_task_arg_children(task):
+                    add_subtree(node, child_task, child_prefix, None, next_ancestry, node_wu)
+
+            for alias, task in sorted(named_tasks.items()):
+                add_subtree(tree.root, task, None, alias, set(), None)
+
+            for entry in self._entries:
+                if entry.work_unit is not None and entry.work_unit not in self._wu_canonical:
+                    self._wu_canonical[entry.work_unit] = entry
+
+            if self._entries and self._cursor_entry is None:
+                self._cursor_entry = self._entries[0]
+
+        def _refresh_states(self) -> None:
+            for entry in self._entries:
+                job = index.job_for_work_unit(entry.work_unit)
+                entry.state = _safe_job_state(job) if job is not None else "unknown"
+
+        def _repaint_tree(self) -> None:
+            cursor_entry = self._cursor_entry
+            emphasized_deps: set[Task[Any]] = set()
+            emphasized_wu_tasks: set[Task[Any]] = set()
+            if cursor_entry is not None:
+                if self._mode == "task":
+                    emphasized_deps = set(cursor_entry.task.dependencies)
+                elif cursor_entry.work_unit is not None:
+                    emphasized_wu_tasks = set(cursor_entry.work_unit.graph.nodes())
+            for entry in self._entries:
+                if entry is cursor_entry:
+                    style: str | None = None
+                elif self._mode == "task":
+                    style = _TASK_EMPHASIS_STYLE if entry.task in emphasized_deps else None
+                else:
+                    style = _JOB_EMPHASIS_STYLE if entry.task in emphasized_wu_tasks else None
+                entry.tree_node.set_label(_render_node_label(entry, emphasis_style=style))
+
+        def _render_summary_widget(self) -> None:
+            summary_widget = self.query_one("#summary", Static)
+            jobs = list(job_graph.nodes())
+            states = [_safe_job_state(job) for job in jobs]
+            summary_widget.update(_render_summary(jobs, states))
+
+        def _update_log_title(self) -> None:
+            title = self.query_one("#log-title", Static)
+            title.update("Task log" if self._mode == "task" else "Job log")
+
+        def _tick(self) -> None:
+            if not self.is_mounted:
+                return
+            self._refresh_states()
+            self._repaint_tree()
+            self._render_summary_widget()
+            self._stream_log_chunk()
+
+        def action_toggle_mode(self) -> None:
+            self._mode = "job" if self._mode == "task" else "task"
+            self._update_log_title()
+            self._recompute_scrollable_lines()
+            self._snap_cursor_to_mode_stop()
+            self._reset_log()
+            self._repaint_tree()
+            self._stream_log_chunk()
+
+        def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+            entry = self._entry_by_node_id.get(id(event.node))
+            if entry is None or entry is self._cursor_entry:
+                return
+            self._cursor_entry = entry
+            self._reset_log()
+            self._repaint_tree()
+            self._stream_log_chunk()
+
+        def _recompute_scrollable_lines(self) -> None:
+            tree = self.query_one("#task-tree", _FilteredTree)
+            entries = self._entries if self._mode == "task" else list(self._wu_canonical.values())
+            tree.scrollable_lines = sorted(
+                {e.tree_node.line for e in entries if e.tree_node.line >= 0}
+            )
+
+        def _snap_cursor_to_mode_stop(self) -> None:
+            if self._cursor_entry is None:
+                return
+            if self._mode == "task":
+                target: _TaskTreeNode | None = self._cursor_entry
+            else:
+                target = self._wu_canonical.get(self._cursor_entry.work_unit)
+                if target is None:
+                    target = next(iter(self._wu_canonical.values()), None)
+            if target is not None and target is not self._cursor_entry:
+                self._cursor_entry = target
+            if target is not None and target.tree_node.line >= 0:
+                tree = self.query_one("#task-tree", _FilteredTree)
+                tree.cursor_line = target.tree_node.line
+
+        def _reset_log(self) -> None:
+            self._log_key = None
+            self._log_offset = 0
+            log_viewer = self.query_one("#log-viewer", RichLog)
+            log_viewer.clear()
+
+        def _show_log_placeholder(self) -> None:
+            self._stream_log_chunk()
+
+        def _stream_log_chunk(self) -> None:
+            entry = self._cursor_entry
+            if entry is None:
+                return
+            log_viewer = self.query_one("#log-viewer", RichLog)
+
+            key, opener, error = self._resolve_log_source(entry)
+            is_new_source = key != self._log_key
+            if is_new_source:
+                self._log_key = key
+                self._log_offset = 0
+                log_viewer.clear()
+
+            if opener is None:
+                if is_new_source:
+                    log_viewer.write(Text(error or "(no log yet)", style="dim italic"))
+                return
+
+            try:
+                with opener() as f:
+                    f.seek(self._log_offset)
+                    chunk = f.read()
+                    self._log_offset = f.tell()
+            except FileNotFoundError:
+                if is_new_source:
+                    log_viewer.write(Text("(log file not found)", style="dim italic"))
+                return
+            except Exception as exc:  # noqa: BLE001
+                if is_new_source:
+                    log_viewer.write(Text(f"(log unavailable: {exc.__class__.__name__})", style="dim italic"))
+                return
+
+            if chunk:
+                log_viewer.write(Text.from_ansi(chunk.rstrip("\n")))
+
+        def _resolve_log_source(
+            self, entry: _TaskTreeNode
+        ) -> tuple[tuple[Any, ...], Any, str | None]:
+            """Return ``(key, opener, error)`` for the log matching the current mode.
+
+            ``key`` identifies the source so we can detect transitions; ``opener``
+            returns a readable text file object or ``None`` when no log exists.
+            """
+            if self._mode == "task":
+                key: tuple[Any, ...] = ("task", id(entry.task))
+                try:
+                    # Eagerly open once just to confirm the log exists; callers
+                    # re-open via the same workspace API to seek + read.
+                    workspace.open_task_log(entry.task, mode="r").close()
+                except FileNotFoundError:
+                    return key, None, "(no task log yet)"
+                except Exception as exc:  # noqa: BLE001
+                    return key, None, f"(log unavailable: {exc.__class__.__name__})"
+                return key, lambda: workspace.open_task_log(entry.task, mode="r"), None
+
+            wu = entry.work_unit
+            if wu is None:
+                return ("job", None), None, "(no job assigned)"
+            log_path = self._resolve_job_log_path(wu)
+            if log_path is None:
+                return ("job", id(wu)), None, "(no job log yet)"
+            return (
+                ("job", str(log_path)),
+                lambda: log_path.open("r", encoding="utf-8", errors="replace"),
+                None,
+            )
+
+        def _resolve_job_log_path(self, wu: WorkUnit):
+            """Return the freshest job log path for a work unit, if one exists.
+
+            Prefers the live ``Job.log_path`` when the file is present; otherwise
+            falls back to the most recently modified archived log discoverable via
+            ``workspace.job_log_iter(wu)``.
+            """
+            candidates: list[Any] = []
+            job = index.job_for_work_unit(wu)
+            if job is not None and job.log_path is not None:
+                candidates.append(job.log_path)
+            try:
+                candidates.extend(workspace.job_log_iter(wu))
+            except (AttributeError, OSError, FileNotFoundError):
+                pass
+            existing = [p for p in candidates if p.exists()]
+            if not existing:
+                return None
+            return max(existing, key=lambda p: p.stat().st_mtime)
+
+    app = _TaskMonitorApp()
+    app.run()
 
 
 @contextlib.contextmanager
@@ -392,18 +506,15 @@ def _runtime_job_board_suppressed() -> Iterator[None]:
             os.environ["MISEN_RUNTIME_JOB_BOARD"] = previous
 
 
-def _print_final_summary(snapshots: list[JobSnapshot]) -> None:
-    lines = runtime_job_summary_lines(
-        [
-            RuntimeJobSummary(
-                label=snapshot.summary_label,
-                state=snapshot.state,
-                job_id=None if snapshot.job_id == "-" else snapshot.job_id,
-                pid=snapshot.pid,
-            )
-            for snapshot in snapshots
-        ]
-    )
+def _print_final_summary(jobs: list[Job]) -> None:
+    rows = [
+        RuntimeJobSummary(
+            label=task_label(job.root, include_hash=False, include_arguments=True),
+            state=_safe_job_state(job),
+        )
+        for job in jobs
+    ]
+    lines = runtime_job_summary_lines(rows)
     if not lines:
         return
 

@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from functools import cache
 from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar, cast
 
-from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, work_unit_label
+from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, task_label, work_unit_label
 from misen.utils.settings import Configurable
 from misen.utils.snapshot import LocalSnapshot
 from misen.utils.work_unit import build_work_graph
@@ -41,6 +41,11 @@ ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
 JobT = TypeVar("JobT", bound="Job")
 SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
 logger = logging.getLogger(__name__)
+
+
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    """Return ``singular`` when ``count == 1`` else ``plural`` (default: ``singular + 's'``)."""
+    return singular if count == 1 else (plural if plural is not None else f"{singular}s")
 
 
 class Executor(Configurable, Generic[JobT, SnapshotT]):
@@ -123,7 +128,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             logger.info("%s created snapshot in %.2fs.", executor_name, elapsed_s)
             runtime_event(f"Created a snapshot of the project environment in {elapsed_s:.2f}s", style="green")
 
-            with runtime_progress(f"Submitting work units to {executor_name}", total=num_dispatch) as progress_bar:
+            with runtime_progress(f"Submitting jobs to {executor_name}", total=num_dispatch) as progress_bar:
                 for work_unit in pending_work_units:
                     started_at = time.perf_counter()
                     try:
@@ -161,19 +166,29 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
                             elapsed_s,
                         )
                         runtime_event(
-                            (f"Dispatch failed for {work_unit_label(work_unit)} in {elapsed_s:.2f}s"),
+                            (
+                                f"Dispatch failed for "
+                                f"{task_label(work_unit.root, include_hash=False, include_arguments=True)} "
+                                f"in {elapsed_s:.2f}s"
+                            ),
                             style="bold red",
                         )
                         raise
                     progress_bar(1)
 
-        runtime_event(
-            (
-                f"Submitted {num_dispatch} work unit(s) to {executor_name}"
-                f"{f' ({num_complete} already complete)' if num_complete > 0 else ''}"
-            ),
-            style="green bold",
+        dispatched_task_count = sum(len(wu.graph.nodes()) for wu in pending_work_units)
+        completed_task_count = sum(len(wu.graph.nodes()) for wu in work_units) - dispatched_task_count
+        summary = (
+            f"Submitted {num_dispatch} {_plural(num_dispatch, 'job')} / "
+            f"{dispatched_task_count} {_plural(dispatched_task_count, 'task')} "
+            f"to {executor_name}"
         )
+        if num_complete > 0:
+            summary += (
+                f" ({num_complete} {_plural(num_complete, 'job')} / "
+                f"{completed_task_count} {_plural(completed_task_count, 'task')} already complete)"
+            )
+        runtime_event(summary, style="green bold")
         logger.info(
             "%s submitted %d work unit(s) (%d already complete).",
             executor_name,
