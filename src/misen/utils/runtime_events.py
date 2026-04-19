@@ -66,8 +66,6 @@ class RuntimeJobSummary:
 
     label: str
     state: RuntimeJobState
-    job_id: str | None = None
-    pid: int | None = None
 
 
 class _RuntimeJobBoard:
@@ -171,8 +169,7 @@ class _RuntimeJobBoard:
                 case "failed":
                     indicator = Text("failed", style="bold red")
 
-            detail_suffix = _job_detail_suffix(job_id=line.job_id, pid=line.pid)
-            table.add_row(indicator, Text(f"{line.label}{detail_suffix}"))
+            table.add_row(indicator, Text(line.label))
 
         return table
 
@@ -301,8 +298,7 @@ def runtime_job_summary_lines(rows: list[RuntimeJobSummary]) -> list[str]:
     lines: list[str] = []
     for row in ordered_rows:
         state_text = "complete" if row.state == "done" else row.state
-        detail_suffix = _job_detail_suffix(job_id=row.job_id, pid=row.pid)
-        lines.append(f"{state_text:<8} {row.label}{detail_suffix}")
+        lines.append(f"{state_text:<8} {row.label}")
     return lines
 
 
@@ -391,15 +387,6 @@ def _job_board_action(
     if not _events_enabled() or not _job_board_enabled():
         return
     action(*args, **kwargs)
-
-
-def _job_detail_suffix(*, job_id: str | None, pid: int | None) -> str:
-    details: list[str] = []
-    if job_id is not None:
-        details.append(f"job_id={job_id}")
-    if pid is not None:
-        details.append(f"pid={pid}")
-    return f" ({', '.join(details)})" if details else ""
 
 
 def _live_context_active() -> bool:

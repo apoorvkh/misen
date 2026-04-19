@@ -363,7 +363,7 @@ def test_experiment_cli_tree_command_prints_tree(monkeypatch, capsys, tmp_path) 
 
     output = capsys.readouterr().out
     assert "Tasks" in output
-    assert "task:" in output
+    assert "task:" not in output
     assert "source" in output
     assert "sink" in output
     assert "source(x=1)" in output
@@ -400,7 +400,7 @@ def test_experiment_cli_tree_command_max_depth(monkeypatch, capsys, tmp_path) ->
     experiment_cli(CliExperiment)
 
     output = capsys.readouterr().out
-    assert "task:" in output
+    assert "task:" not in output
     assert "sink" in output
     assert "source" not in output
 
@@ -496,8 +496,8 @@ def test_experiment_cli_tree_command_collapses_shared_dependencies_by_default(mo
     experiment_cli(SharedDepsExperiment)
 
     output = capsys.readouterr().out
-    assert "(*)" in output
-    assert "Dependencies already listed." in output
+    assert "(*)" not in output
+    assert "Dependencies already listed." not in output
     assert output.count("source") == 1
 
 
@@ -539,7 +539,7 @@ def test_experiment_cli_list_command_prints_flat_tasks(monkeypatch, capsys, tmp_
     assert "task:" not in output
 
 
-def test_experiment_cli_list_command_places_cache_marker_after_task_name(monkeypatch, capsys, tmp_path) -> None:
+def test_experiment_cli_list_command_omits_cache_marker(monkeypatch, capsys, tmp_path) -> None:
     config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
         command="list",
@@ -563,7 +563,8 @@ def test_experiment_cli_list_command_places_cache_marker_after_task_name(monkeyp
     experiment_cli(CachedExperiment)
 
     output = capsys.readouterr().out
-    assert "cached_only(x=1) [C] [" in output
+    assert "cached_only(x=1)" in output
+    assert "[C]" not in output
     assert "[NC]" not in output
 
 
@@ -903,6 +904,30 @@ def test_experiment_cli_parses_run_no_tui_flag(monkeypatch) -> None:
     assert submit_calls[0][2] is True
 
 
+def test_experiment_cli_tree_command_with_task_positional(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["prog", "tree", "task"])
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set()))
+    )
+
+    experiment_cli(CliExperiment)
+
+    output = capsys.readouterr().out
+    assert "task:" not in output
+    assert "sink" in output
+    assert "source(x=1)" in output
+
+
+def test_experiment_cli_tree_command_rejects_unknown_task(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["prog", "tree", "missing"])
+    monkeypatch.setattr(
+        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set()))
+    )
+
+    with pytest.raises(ValueError, match=r"no task named 'missing'"):
+        experiment_cli(CliExperiment)
+
+
 def test_experiment_cli_parses_tree_short_depth_flag(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["prog", "tree", "-L", "0", "--cacheable-only"])
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set())))
@@ -1061,19 +1086,28 @@ def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> Non
 
     seen: dict[str, object] = {}
 
-    def fake_watch(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[tui_module.JobSnapshot]:
+    def fake_watch(
+        *,
+        named_tasks: dict[str, Task[int]],
+        job_graph: DependencyGraph[Job],
+        workspace: object,
+        poll_interval_s: float = 0.2,
+    ) -> None:
+        seen["named_tasks"] = named_tasks
         seen["job_graph"] = job_graph
+        seen["workspace"] = workspace
         seen["poll_interval_s"] = poll_interval_s
-        return []
 
     workspace = object()
-    monkeypatch.setattr(tui_module, "watch_job_graph", fake_watch)
+    monkeypatch.setattr(tui_module, "watch_tasks", fake_watch)
     tui_module.submit_and_watch_jobs(experiment=StubExperiment(), executor=StubExecutor(), workspace=workspace)
 
     assert submit_args["blocking"] is False
     assert submit_args["workspace"] is workspace
     assert len(cast("set[Task[int]]", submit_args["tasks"])) == 1
     assert seen["job_graph"] is graph
+    assert seen["workspace"] is workspace
+    assert set(cast("dict[str, Task[int]]", seen["named_tasks"]).keys()) == {"task"}
 
 
 def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monkeypatch) -> None:
@@ -1101,15 +1135,20 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
         def tasks(self) -> dict[str, Task[int]]:
             return {"task": Task(source, x=1)}
 
-    def fake_watch(job_graph: DependencyGraph[Job], poll_interval_s: float = 0.2) -> list[tui_module.JobSnapshot]:
-        _ = job_graph, poll_interval_s
+    def fake_watch(
+        *,
+        named_tasks: dict[str, Task[int]],
+        job_graph: DependencyGraph[Job],
+        workspace: object,
+        poll_interval_s: float = 0.2,
+    ) -> None:
+        _ = named_tasks, job_graph, workspace, poll_interval_s
         seen["during_watch"] = os.environ.get("MISEN_RUNTIME_EVENTS")
         seen["during_watch_job_board"] = os.environ.get("MISEN_RUNTIME_JOB_BOARD")
-        return []
 
     monkeypatch.delenv("MISEN_RUNTIME_EVENTS", raising=False)
     monkeypatch.delenv("MISEN_RUNTIME_JOB_BOARD", raising=False)
-    monkeypatch.setattr(tui_module, "watch_job_graph", fake_watch)
+    monkeypatch.setattr(tui_module, "watch_tasks", fake_watch)
     tui_module.submit_and_watch_jobs(experiment=StubExperiment(), executor=StubExecutor(), workspace=object())
 
     assert seen["during_submit"] is None
@@ -1120,27 +1159,26 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
     assert os.environ.get("MISEN_RUNTIME_JOB_BOARD") is None
 
 
-def test_snapshot_jobs_captures_dependencies_and_log_path() -> None:
+def test_job_state_index_maps_roots_and_jobs() -> None:
     dep_wu = WorkUnit(root=Task(source, x=1), dependencies=set())
     parent_wu = WorkUnit(root=Task(sink, x=2), dependencies={dep_wu})
     dep_job = FakeJob(work_unit=dep_wu, states=["running"], job_id="dep-1", log_path=Path("/tmp/dep.log"))
     parent_job = FakeJob(work_unit=parent_wu, states=["pending"], job_id=None, log_path=None)
 
     graph: DependencyGraph[Job] = DependencyGraph()
-    parent_idx = graph.add_node(parent_job)
-    dep_idx = graph.add_node(dep_job)
-    graph.add_edge(parent_idx, dep_idx, None)
+    graph.add_node(parent_job)
+    graph.add_node(dep_job)
 
-    snapshots, dependency_indices, done = tui_module.snapshot_jobs(graph)
-    snapshots_by_index = {snapshot.index: snapshot for snapshot in snapshots}
+    index = tui_module._JobStateIndex.build(graph)
 
-    assert done is False
-    assert dependency_indices[parent_idx] == [dep_idx]
-    assert snapshots_by_index[parent_idx].dependencies == (snapshots_by_index[dep_idx].label,)
-    assert snapshots_by_index[dep_idx].log_file == "/tmp/dep.log"
+    assert index.work_unit_of_root(dep_wu.root) is dep_wu
+    assert index.work_unit_of_root(parent_wu.root) is parent_wu
+    assert index.job_for_work_unit(dep_wu) is dep_job
+    assert index.job_for_work_unit(parent_wu) is parent_job
+    assert index.job_for_work_unit(None) is None
 
 
-def test_final_summary_lines_include_job_id_and_pid() -> None:
+def test_final_summary_lines_omit_hash_and_job_id(capsys) -> None:
     done_job = FakeJob(
         work_unit=WorkUnit(root=Task(source, x=1), dependencies=set()),
         states=["done"],
@@ -1154,47 +1192,51 @@ def test_final_summary_lines_include_job_id_and_pid() -> None:
     done_job.pid = 12345
     failed_job.pid = 67890
 
-    graph: DependencyGraph[Job] = DependencyGraph()
-    graph.add_node(done_job)
-    graph.add_node(failed_job)
+    tui_module._print_final_summary([done_job, failed_job])
 
-    snapshots, _, _ = tui_module.snapshot_jobs(graph)
-    lines = runtime_job_summary_lines(
-        [
-            RuntimeJobSummary(
-                label=snapshot.summary_label,
-                state=snapshot.state,
-                job_id=None if snapshot.job_id == "-" else snapshot.job_id,
-                pid=snapshot.pid,
-            )
-            for snapshot in snapshots
-        ]
-    )
-
+    output = capsys.readouterr().err
+    lines = [line for line in output.splitlines() if line.strip()]
     assert lines
     assert lines[0].startswith("complete ")
-    assert any("job_id=DONE1" in line and "pid=12345" in line for line in lines)
-    assert any(line.startswith("failed") and "job_id=FAIL1" in line and "pid=67890" in line for line in lines)
+    assert "source(x=1)" in lines[0]
+    assert any(line.startswith("failed") and "sink(x=2)" in line for line in lines)
+    joined = "\n".join(lines)
+    assert "job_id" not in joined
+    assert "pid=" not in joined
+    assert "[" not in joined  # no hash bracket suffix
 
 
-def test_watch_job_graph_uses_textual_runner(monkeypatch) -> None:
+def test_watch_tasks_uses_textual_runner(monkeypatch) -> None:
     graph: DependencyGraph[Job] = DependencyGraph()
     work_unit = WorkUnit(root=Task(source, x=3), dependencies=set())
     graph.add_node(FakeJob(work_unit=work_unit, states=["done"]))
+    named_tasks = {"task": work_unit.root}
 
     seen: dict[str, object] = {}
 
-    def fake_run_textual(job_graph: DependencyGraph[Job], poll_interval_s: float) -> list[tui_module.JobSnapshot]:
+    def fake_run_textual(
+        *,
+        named_tasks: dict[str, Task[int]],
+        job_graph: DependencyGraph[Job],
+        workspace: object,
+        poll_interval_s: float,
+    ) -> None:
+        seen["named_tasks"] = named_tasks
         seen["job_graph"] = job_graph
+        seen["workspace"] = workspace
         seen["poll_interval_s"] = poll_interval_s
-        snapshots, _, _ = tui_module.snapshot_jobs(job_graph)
-        return snapshots
 
-    monkeypatch.setattr(tui_module, "_run_textual_job_monitor", fake_run_textual)
+    monkeypatch.setattr(tui_module, "_run_textual_task_monitor", fake_run_textual)
 
-    snapshots = tui_module.watch_job_graph(graph, poll_interval_s=0.0)
+    workspace = object()
+    tui_module.watch_tasks(
+        named_tasks=named_tasks,
+        job_graph=graph,
+        workspace=workspace,
+        poll_interval_s=0.0,
+    )
 
-    assert snapshots
-    assert snapshots[0].state == "done"
     assert seen["job_graph"] is graph
+    assert seen["workspace"] is workspace
+    assert seen["named_tasks"] is named_tasks
     assert seen["poll_interval_s"] == 0.0
