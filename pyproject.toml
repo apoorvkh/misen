@@ -27,7 +27,7 @@ dependencies = [
 misen = "misen.cli:main"
 
 [dependency-groups]
-dev = ["pytest==8.3.3", "ruff==0.15.10", "ty==0.0.31"]
+dev = ["pytest==9.0.3", "ruff==0.15.10", "ty==0.0.31"]
 docs = ["mkdocstrings-python==2.0.1", "zensical==0.0.17"]
 
 [build-system]
