@@ -36,7 +36,9 @@ my-project
 └── uv.lock
 ```
 
-Put your code in `src/my_project/` and run it as a module — e.g. `uv run -m my_project.experiment` for `src/my_project/experiment.py`.
+Put your code in `src/my_project/` and run it as a module — e.g. `uv run -m my_project.experiments.training` for `src/my_project/experiments/training.py`.
+
+If you have a `uv` project, use `uv run` instead of `python` and `uv run misen` instead of `misen` in the instructions below.
 
 ## Tasks
 
@@ -90,7 +92,12 @@ class TrainingExperiment(Experiment):
         eval_task  = Task(evaluate, trained_model=train_task.T)
         plot_task  = Task(plot, metrics=eval_task.T)
         return {"metrics": eval_task, "plot": plot_task}
+
+if __name__ == "__main__":
+    TrainingExperiment.cli()
 ```
+
+We suggest putting each `Experiment` in its own script, like `src/my_project/experiments/training.py`.
 
 Run it from Python:
 
@@ -101,24 +108,40 @@ TrainingExperiment(lr=0.1, dim=512).run()
 or from the command line:
 
 ```bash
-misen experiment my_project.experiment:TrainingExperiment run --lr 0.1
-```
+misen experiment my_project.experiments.training:TrainingExperiment run --lr 0.1
 
-For an auto-generated per-experiment CLI, add this at the bottom of the module:
+# or
 
-```python
-if __name__ == "__main__":
-    TrainingExperiment.cli()
-```
-
-```bash
-uv run -m my_project.experiment --lr 0.1
+python -m my_project.experiments.training --lr 0.1
 ```
 
 Pull a named result declaratively:
 
 ```python
 metrics = TrainingExperiment(lr=0.1, dim=512)["metrics"].result()
+```
+
+### Named configs
+
+You can also pin a specific set of parameters in a named config file (e.g. `src/my_project/configs/training.py`):
+
+```python
+from my_project.experiments.training import TrainingExperiment
+
+__config__ = TrainingExperiment(lr=0.1, dim=512)
+
+if __name__ == "__main__":
+    __config__.cli()
+```
+
+Run it with `python -m my_project.configs.training`.
+
+Or retrieve a result like:
+
+```python
+from my_project.configs.training import __config__ as training_experiment
+
+training_experiment["metrics"].result()
 ```
 
 ### Inspecting an experiment
@@ -177,7 +200,7 @@ The **Executor** decides where tasks run:
 Switch backends from the CLI or a config file — no code changes:
 
 ```bash
-uv run -m my_project.experiment --executor-type slurm
+python -m my_project.experiments.training --executor-type slurm
 ```
 
 For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`, `qos`, `constraint`, plus any `default_flags`). For GPUs on a local machine, declare what's available to the executor via `num_cuda_gpus` / `cuda_gpu_indices` (same for `rocm` and `xpu`).
@@ -219,7 +242,7 @@ pip install "git+https://github.com/ORG/REPO.git"
 ```
 
 ```python
-from my_project.experiments import TrainingSweep
+from my_project.experiments.training_sweep import TrainingSweep
 plot = TrainingSweep()["plot"].result()
 ```
 
