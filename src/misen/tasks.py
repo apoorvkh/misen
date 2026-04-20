@@ -25,7 +25,6 @@ import itertools
 import logging
 import shutil
 from contextlib import nullcontext
-from inspect import Signature, signature
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, Unpack, cast
 
@@ -33,15 +32,16 @@ from misen.exceptions import CacheError
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
 from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
-from misen.utils.function_introspection import is_function_object
+from misen.utils.function_introspection import is_function_object, task_function_signature
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.snapshot import token_base32
 from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+    from inspect import Signature
     from pathlib import Path
-    from types import FunctionType
+    from types import BuiltinFunctionType, FunctionType
 
     from misen.executor import Executor, Job
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
@@ -89,16 +89,18 @@ class Task(FrozenMixin, Generic[R]):
             **kwargs: Keyword arguments.
 
         Raises:
-            TypeError: If ``func`` is not a Python function object.
+            TypeError: If ``func`` is not a Python function or C builtin
+                function, or if ``func`` is a builtin whose signature cannot
+                be introspected.
         """
         if not is_function_object(func):
-            msg = "Task func must be a Python function object."
+            msg = "Task func must be a Python function or C builtin function."
             raise TypeError(msg)
 
-        self.func: FunctionType = func
+        self._signature: Signature = task_function_signature(func)
+        self.func: FunctionType | BuiltinFunctionType = func
         self.args: tuple[Any, ...] = args
         self.kwargs: Mapping[str, Any] = MappingProxyType(kwargs)
-        self._signature: Signature = signature(func)
 
         self.meta: TaskMetadata = resolve_task_metadata(func)
         self.resources: Resources = self.meta.resolve_resources(*self.args, **self.kwargs)

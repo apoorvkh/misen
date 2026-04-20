@@ -27,7 +27,7 @@ from misen.utils.hashing import ResultHash
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-    from types import FunctionType
+    from types import BuiltinFunctionType, FunctionType
 
     from misen.utils.serde import Serializer
 
@@ -229,11 +229,11 @@ def meta(
     return decorator
 
 
-def resolve_task_metadata(func: FunctionType) -> TaskMetadata:
+def resolve_task_metadata(func: FunctionType | BuiltinFunctionType) -> TaskMetadata:
     """Resolve :class:`TaskMetadata` for a function object.
 
     Args:
-        func: Python function object.
+        func: Python function or C builtin function object.
 
     Returns:
         Resolved task metadata.

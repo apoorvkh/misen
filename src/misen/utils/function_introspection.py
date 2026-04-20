@@ -5,12 +5,12 @@ from __future__ import annotations
 from ast import Lambda, dump, parse, walk
 from contextlib import suppress
 from hashlib import sha256
-from inspect import getfile, getsourcefile, getsourcelines, unwrap
+from inspect import Signature, getfile, getsourcefile, getsourcelines, signature, unwrap
 from pathlib import Path
 from site import getusersitepackages
 from sysconfig import get_paths
 from textwrap import dedent
-from types import FunctionType
+from types import BuiltinFunctionType, FunctionType
 from typing import TypeGuard
 
 __all__ = [
@@ -20,6 +20,7 @@ __all__ = [
     "is_lambda_function",
     "is_local_project_function",
     "lambda_task_id",
+    "task_function_signature",
 ]
 
 
@@ -38,16 +39,16 @@ def _external_library_roots() -> tuple[Path, ...]:
 _EXTERNAL_LIBRARY_ROOTS = _external_library_roots()
 
 
-def is_function_object(obj: object) -> TypeGuard[FunctionType]:
-    """Return whether object is a Python function (including lambdas)."""
-    return isinstance(obj, FunctionType)
+def is_function_object(obj: object) -> TypeGuard[FunctionType | BuiltinFunctionType]:
+    """Return whether object is a Python function, lambda, or C builtin function."""
+    return isinstance(obj, (FunctionType, BuiltinFunctionType))
 
 
-def is_local_project_function(func: FunctionType) -> bool:
+def is_local_project_function(func: FunctionType | BuiltinFunctionType) -> bool:
     """Return whether callable source appears to come from project code.
 
     Args:
-        func: Function object to inspect.
+        func: Function object to inspect. C builtins always return ``False``.
 
     Returns:
         ``True`` if source path is outside known stdlib/site-packages roots.
@@ -67,7 +68,7 @@ def is_local_project_function(func: FunctionType) -> bool:
     return not any(source_path.is_relative_to(root) for root in _EXTERNAL_LIBRARY_ROOTS)
 
 
-def is_lambda_function(func: FunctionType) -> bool:
+def is_lambda_function(func: FunctionType | BuiltinFunctionType) -> bool:
     """Return whether callable is a lambda function."""
     return func.__name__ == "<lambda>"
 
@@ -111,6 +112,29 @@ def lambda_task_id(func: FunctionType) -> str:
     return f"lambda.{digest}"
 
 
-def external_callable_id(func: FunctionType) -> str:
+def external_callable_id(func: FunctionType | BuiltinFunctionType) -> str:
     """Return default identifier for an external callable."""
     return f"{func.__module__}.{func.__qualname__}"
+
+
+def task_function_signature(func: FunctionType | BuiltinFunctionType) -> Signature:
+    """Return the inspectable signature for a task's function.
+
+    Args:
+        func: Python function or C builtin function object.
+
+    Returns:
+        Resolved :class:`inspect.Signature`.
+
+    Raises:
+        TypeError: If the signature cannot be introspected (common for some
+            C builtins without ``__text_signature__``).
+    """
+    try:
+        return signature(func)
+    except ValueError as exc:
+        msg = (
+            f"Could not introspect signature of builtin {func.__module__}.{func.__qualname__}; "
+            "wrap it in a Python function to use it as a Task."
+        )
+        raise TypeError(msg) from exc
