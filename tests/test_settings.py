@@ -161,7 +161,8 @@ class TestConfigurable:
         ex = Executor.auto(settings=Settings(config_file=tmp_path / "empty.toml"))
         assert isinstance(ex, LocalExecutor)
 
-    def test_workspace_auto_from_toml(self, tmp_path: Path) -> None:
+    def test_workspace_auto_from_toml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
         f = tmp_path / "cfg.toml"
         f.write_text('[workspace]\ntype = "disk"\ndirectory = "custom_dir"\n', encoding="utf-8")
 
@@ -202,13 +203,15 @@ class TestConfigurable:
         ws = Workspace.resolve_auto("auto")
         assert isinstance(ws, DiskWorkspace)
 
-    def test_resolve_auto_instance(self) -> None:
+    def test_resolve_auto_instance(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
         from misen.workspaces.disk import DiskWorkspace
 
         instance = DiskWorkspace(directory=".test")
         assert DiskWorkspace.resolve_auto(instance) is instance
 
-    def test_default_kwargs_without_type(self, tmp_path: Path) -> None:
+    def test_default_kwargs_without_type(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
         f = tmp_path / "cfg.toml"
         f.write_text('[workspace]\ndirectory = "from_defaults"\n', encoding="utf-8")
 

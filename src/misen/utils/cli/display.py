@@ -76,7 +76,7 @@ def format_task_line_markup(task: Task[Any], *, prefix: str | None = None) -> st
     are expected to be rendered as tree children by the caller.
     """
     parts = task_args(task)
-    line = f"[bright_white]{escape(task.meta.id)}[/bright_white]"
+    line = f"[bright_white]{escape(task.func.__name__)}[/bright_white]"
     if parts.scalar_items:
         fragments = ", ".join(
             f"[dim]{escape(name)}=[/dim]{escape(value_repr)}" for name, value_repr in parts.scalar_items
@@ -98,7 +98,7 @@ def format_task_line_text(
     text = Text()
     if prefix is not None:
         text.append(f"{prefix} = ", style=dim_style)
-    text.append(task.meta.id, style=name_style)
+    text.append(task.func.__name__, style=name_style)
     parts = task_args(task)
     if parts.scalar_items:
         text.append("(")

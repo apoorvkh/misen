@@ -214,7 +214,7 @@ def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[s
         if len(text) > 80:  # noqa: PLR2004
             text = text[:77] + "..."
         parts.append(f"{name}={text}")
-    return f"{task.meta.id}({', '.join(parts)})" if parts else f"{task.meta.id}()"
+    return f"{task.func.__name__}({', '.join(parts)})" if parts else f"{task.func.__name__}()"
 
 
 def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:

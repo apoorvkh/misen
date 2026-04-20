@@ -315,19 +315,18 @@ def task_label(
         task: Task to format.
         include_hash: Include task hash suffix.
         include_arguments: Include formatted function arguments.
-        include_dependent_arguments: Kept for compatibility. ``Task.__repr__``
-            excludes dependent-task arguments by design, so this has no effect.
+        include_dependent_arguments: Kept for compatibility. Dependent-task
+            arguments are excluded by design, so this has no effect.
     """
     _ = include_dependent_arguments
-    label = _task_repr_label(repr(task))
-    label_without_hash, hash_suffix = _split_hash_suffix(label)
-    label_core = label_without_hash
+    label_core = task.func.__name__
+    if include_arguments:
+        argument_items = task._repr_argument_items()  # noqa: SLF001
+        if argument_items:
+            label_core = f"{label_core}({', '.join(argument_items)})"
 
-    if not include_arguments and label_core.endswith(")") and "(" in label_core:
-        label_core = label_core[: label_core.index("(")]
-
-    if include_hash and hash_suffix is not None:
-        return f"{label_core} [{hash_suffix}]"
+    if include_hash:
+        return f"{label_core} [{task.task_hash().short_b32()}]"
 
     return label_core
 
@@ -337,32 +336,11 @@ def work_unit_label(work_unit: WorkUnit) -> str:
     return _work_unit_repr_label(repr(work_unit))
 
 
-def _task_repr_label(task_repr: str) -> str:
-    """Extract inner label from ``Task.__repr__`` output."""
-    task_repr = task_repr.removesuffix(" [C]")
-    if task_repr.startswith("Task(") and task_repr.endswith(")"):
-        return task_repr[len("Task(") : -1]
-    return task_repr
-
-
 def _work_unit_repr_label(work_unit_repr: str) -> str:
     """Extract inner label from ``WorkUnit.__repr__`` output."""
     if work_unit_repr.startswith("WorkUnit(") and work_unit_repr.endswith(")"):
         return work_unit_repr[len("WorkUnit(") : -1]
     return work_unit_repr
-
-
-def _split_hash_suffix(label: str) -> tuple[str, str | None]:
-    """Split trailing `` [HASH]`` suffix from a task label."""
-    if not label.endswith("]"):
-        return label, None
-
-    prefix, separator, remainder = label.rpartition(" [")
-    if not separator or not remainder.endswith("]"):
-        return label, None
-
-    hash_suffix = remainder[:-1]
-    return (prefix, hash_suffix) if hash_suffix else (label, None)
 
 
 def _events_enabled() -> bool:

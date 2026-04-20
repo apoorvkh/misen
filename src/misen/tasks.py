@@ -201,14 +201,12 @@ class Task(FrozenMixin, Generic[R]):
             raise ValueError(msg)
 
     def __repr__(self) -> str:
-        """Return compact debug representation."""
-        argument_items = self._repr_argument_items()
-        label = self.meta.id
-        if argument_items:
-            label = f"{label}({', '.join(argument_items)})"
-        task_hash = self.task_hash()
-        label = f"{label} [{task_hash.short_b32()}]"
-        return f"Task({label}){' [C]' if self.meta.cache else ''}"
+        """Return a Python-call-like representation of the task."""
+        func_ref = f"{self.func.__module__}.{self.func.__qualname__}"
+        parts = [func_ref]
+        parts.extend(repr(arg) for arg in self.args)
+        parts.extend(f"{name}={value!r}" for name, value in self.kwargs.items())
+        return f"Task({', '.join(parts)})"
 
     @staticmethod
     def _contains_task_reference(value: Any) -> bool:
@@ -224,7 +222,7 @@ class Task(FrozenMixin, Generic[R]):
         return False
 
     def _repr_argument_items(self) -> list[str]:
-        """Return argument fragments included in ``Task.__repr__``."""
+        """Return scalar ``name=value`` argument fragments for compact task labels."""
         bound = self._signature.bind_partial(*self.args, **self.kwargs)
         items: list[str] = []
 

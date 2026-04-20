@@ -337,17 +337,15 @@ def test_task_label_includes_arguments_without_dependent_tasks() -> None:
     assert "x=" not in downstream_label
 
 
-def test_task_repr_includes_arguments_without_dependent_tasks() -> None:
+def test_task_repr_uses_function_qualname_and_bound_arguments() -> None:
     upstream = Task(source, x=7)
     downstream = Task(sink, x=upstream.T)
 
     upstream_repr = repr(upstream)
     downstream_repr = repr(downstream)
 
-    assert "x=7" in upstream_repr
-    assert "x=" not in downstream_repr
-    assert upstream_repr == f"Task({task_label(upstream, include_arguments=True)})"
-    assert downstream_repr == f"Task({task_label(downstream, include_arguments=True)})"
+    assert upstream_repr == f"Task({source.__module__}.{source.__qualname__}, x=7)"
+    assert downstream_repr == f"Task({sink.__module__}.{sink.__qualname__}, x={upstream_repr})"
 
 
 def test_task_label_excludes_arguments_configured_in_meta() -> None:
