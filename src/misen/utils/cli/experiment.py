@@ -22,8 +22,10 @@ from rich.text import Text
 from rich.tree import Tree
 
 from misen.exceptions import CacheError
+from misen.executor import ExecutorType  # noqa: TC001
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
+from misen.workspace import WorkspaceType  # noqa: TC001
 
 from . import tui
 from .display import format_task_line_markup, iter_task_arg_children
@@ -32,9 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
 
     from misen import Experiment
-    from misen.executor import ExecutorType
     from misen.tasks import Task
-    from misen.workspace import WorkspaceType
 
 
 __all__ = [
