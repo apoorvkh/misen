@@ -20,8 +20,10 @@ if importlib.util.find_spec("transformers") is not None:
     class TransformersModelSerializer(Serializer[Any]):
         """Serialize HuggingFace ``PreTrainedModel`` via ``save_pretrained``.
 
-        Uses ``AutoModel.from_pretrained`` on load, which reads the model
-        architecture from the saved ``config.json``.
+        Records the model's concrete class (e.g. ``GPT2LMHeadModel``) so
+        the task-specific subclass — LM head, classification head, etc. —
+        is restored on load. ``AutoModel.from_pretrained`` cannot be used
+        here because it returns the base model and drops task heads.
         """
 
         @staticmethod
@@ -35,13 +37,17 @@ if importlib.util.find_spec("transformers") is not None:
             import transformers
 
             obj.save_pretrained(str(directory))
-            return {"transformers_version": transformers.__version__}
+            return {
+                "transformers_version": transformers.__version__,
+                "architecture": type(obj).__name__,
+            }
 
         @staticmethod
-        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
-            from transformers import AutoModel
+        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:
+            import transformers
 
-            return AutoModel.from_pretrained(str(directory))
+            cls = getattr(transformers, meta["architecture"])
+            return cls.from_pretrained(str(directory))
 
     class TransformersTokenizerSerializer(Serializer[Any]):
         """Serialize HuggingFace ``PreTrainedTokenizerBase`` via ``save_pretrained``.
