@@ -16,6 +16,7 @@ from misen.utils.runtime_events import RuntimeJobSummary, runtime_job_summary_li
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
+    from pathlib import Path
 
     from misen.executor import Job
     from misen.tasks import Task
@@ -354,9 +355,7 @@ def _run_textual_task_monitor(
         def _recompute_scrollable_lines(self) -> None:
             tree = self.query_one("#task-tree", _FilteredTree)
             entries = self._entries if self._mode == "task" else list(self._wu_canonical.values())
-            tree.scrollable_lines = sorted(
-                {e.tree_node.line for e in entries if e.tree_node.line >= 0}
-            )
+            tree.scrollable_lines = sorted({e.tree_node.line for e in entries if e.tree_node.line >= 0})
 
         def _snap_cursor_to_mode_stop(self) -> None:
             if self._cursor_entry is None:
@@ -364,7 +363,8 @@ def _run_textual_task_monitor(
             if self._mode == "task":
                 target: _TaskTreeNode | None = self._cursor_entry
             else:
-                target = self._wu_canonical.get(self._cursor_entry.work_unit)
+                wu = self._cursor_entry.work_unit
+                target = self._wu_canonical.get(wu) if wu is not None else None
                 if target is None:
                     target = next(iter(self._wu_canonical.values()), None)
             if target is not None and target is not self._cursor_entry:
@@ -408,17 +408,13 @@ def _run_textual_task_monitor(
                 return
             except Exception as exc:  # noqa: BLE001
                 if is_new_source:
-                    log_viewer.write(
-                        Text(f"(log unavailable: {exc.__class__.__name__})", style="dim italic")
-                    )
+                    log_viewer.write(Text(f"(log unavailable: {exc.__class__.__name__})", style="dim italic"))
                 return
 
             if chunk:
                 log_viewer.write(Text.from_ansi(chunk.rstrip("\n")))
 
-        def _resolve_log_source(
-            self, entry: _TaskTreeNode
-        ) -> tuple[tuple[Any, ...], Any, str]:
+        def _resolve_log_source(self, entry: _TaskTreeNode) -> tuple[tuple[Any, ...], Any, str]:
             """Return ``(key, opener, placeholder)`` for the log matching the current mode.
 
             ``opener`` is either a zero-arg callable returning a readable text file or
@@ -440,21 +436,19 @@ def _run_textual_task_monitor(
                 "(no job log yet)",
             )
 
-        def _resolve_job_log_path(self, wu: WorkUnit):
+        def _resolve_job_log_path(self, wu: WorkUnit) -> Path | None:
             """Return the freshest job log path for a work unit, if one exists.
 
             Prefers the live ``Job.log_path`` when the file is present; otherwise
             falls back to the most recently modified archived log discoverable via
             ``workspace.job_log_iter(wu)``.
             """
-            candidates: list[Any] = []
+            candidates: list[Path] = []
             job = index.job_for_work_unit(wu)
             if job is not None and job.log_path is not None:
                 candidates.append(job.log_path)
-            try:
+            with contextlib.suppress(AttributeError, OSError, FileNotFoundError):
                 candidates.extend(workspace.job_log_iter(wu))
-            except (AttributeError, OSError, FileNotFoundError):
-                pass
             existing = [p for p in candidates if p.exists()]
             if not existing:
                 return None

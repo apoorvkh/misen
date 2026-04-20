@@ -205,8 +205,8 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
         if not self._resource_budget.fits(resources):
             msg = (
                 "Requested resources exceed LocalExecutor limits: "
-                f"requested cpus={resources.cpus}, memory={resources.memory}, "
-                f"gpus={resources.gpus} (runtime={resources.gpu_runtime}); "
+                f"requested cpus={resources['cpus']}, memory={resources['memory']}, "
+                f"gpus={resources['gpus']} (runtime={resources['gpu_runtime']}); "
                 f"limits cpus={self._resource_budget.cpus}, memory={self._resource_budget.memory}, "
                 f"cuda_gpus={self._resource_budget.cuda_gpus}, rocm_gpus={self._resource_budget.rocm_gpus}, "
                 f"xpu_gpus={self._resource_budget.xpu_gpus}."

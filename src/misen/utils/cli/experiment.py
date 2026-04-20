@@ -22,10 +22,8 @@ from rich.text import Text
 from rich.tree import Tree
 
 from misen.exceptions import CacheError
-from misen.executor import ExecutorType
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
-from misen.workspace import WorkspaceType
 
 from . import tui
 from .display import format_task_line_markup, iter_task_arg_children
@@ -34,7 +32,9 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
 
     from misen import Experiment
+    from misen.executor import ExecutorType
     from misen.tasks import Task
+    from misen.workspace import WorkspaceType
 
 
 __all__ = [
@@ -452,7 +452,6 @@ def _build_task_tree(
 
     tree = Tree(_styled_title(title))
     rendered: set[Task[Any]] = set()
-    used_shared_marker = False
 
     def include_task(task: Task[Any]) -> bool:
         if cacheable_only and not task.meta.cache:
@@ -907,10 +906,8 @@ def _cmd_logs_job_mode(command: LogsCommandArgs, args: Any, workspace: Any, cons
         _list_job_logs(log_paths, console)
         return
 
-    for log_path in (log_paths if command.all else log_paths[-1:]):
-        _print_log_content(
-            log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]"
-        )
+    for log_path in log_paths if command.all else log_paths[-1:]:
+        _print_log_content(log_path, console, rule_title=f"[bright_white]{escape(log_path.name)}[/bright_white]")
 
 
 def _resolve_command(*, command_token: str | None, unknown_args: list[str]) -> ExperimentCommand:
@@ -971,7 +968,7 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
     cli_fields: list[tuple[Any, ...]] = [
         (
             "config",
-            tyro.conf.OmitArgPrefixes[_ConfigGroup],  # ty:ignore[invalid-type-form]
+            tyro.conf.OmitArgPrefixes[_ConfigGroup],
             field(default_factory=lambda: _ConfigGroup(config=bootstrap_args.config)),
         ),
     ]
@@ -979,7 +976,7 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
         cli_fields.append(
             (
                 "workspace",
-                tyro.conf.OmitArgPrefixes[_WorkspaceGroup],  # ty:ignore[invalid-type-form]
+                tyro.conf.OmitArgPrefixes[_WorkspaceGroup],
                 field(default_factory=lambda: _WorkspaceGroup(workspace=bootstrap_args.workspace)),
             )
         )
@@ -989,7 +986,7 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
         cli_fields.append(
             (
                 "executor",
-                tyro.conf.OmitArgPrefixes[_ExecutorGroup],  # ty:ignore[invalid-type-form]
+                tyro.conf.OmitArgPrefixes[_ExecutorGroup],
                 field(default_factory=lambda: _ExecutorGroup(executor=bootstrap_args.executor)),
             )
         )

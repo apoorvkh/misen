@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
-from misen.task_metadata import Resources
+from misen.task_metadata import Resources, aggregate_resources
 from misen.utils.nested import map_nested_leaves
 from misen.utils.task_utils import build_task_dependency_graph
 
@@ -61,7 +61,7 @@ class WorkUnit:
         self.graph = build_task_dependency_graph(task=root, exclude_cacheable=True)
 
         # Compute one scheduler request that satisfies every task in the unit.
-        self.resources = Resources.aggregate(task.resources for task in self.graph.nodes())
+        self.resources = aggregate_resources(task.resources for task in self.graph.nodes())
 
     def __hash__(self) -> int:
         """Return hash keyed by root task identity."""

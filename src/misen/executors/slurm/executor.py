@@ -134,13 +134,13 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             "--ntasks-per-node",
             "1",
             "--nodes",
-            str(resources.nodes),
+            str(resources["nodes"]),
             "--cpus-per-task",
-            str(resources.cpus),
+            str(resources["cpus"]),
             "--mem",
-            f"{resources.memory}G",
+            f"{resources['memory']}G",
             "--time",
-            str(resources.time or 1),
+            str(resources["time"] or 1),
         ]
         sbatch_cmd.extend(
             _resolve_dynamic_sbatch_flags(
@@ -170,9 +170,9 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             work_unit=work_unit,
             workspace=workspace,
             assigned_resources_getter=(
-                get_assigned_resources_slurm_per_node if resources.nodes > 1 else get_assigned_resources_slurm
+                get_assigned_resources_slurm_per_node if resources["nodes"] > 1 else get_assigned_resources_slurm
             ),
-            gpu_runtime=resources.gpu_runtime,
+            gpu_runtime=resources["gpu_runtime"],
         )
 
         job_log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
@@ -241,15 +241,15 @@ def _resolve_dynamic_sbatch_flags(
         if _rule_matches(resources, rule.when):
             resolved |= rule.set
 
-    if "gpu-type" in resolved and resources.gpus > 0:
-        resolved["gpus-per-node"] = f"{resolved['gpu-type']}:{resources.gpus}"
+    if "gpu-type" in resolved and resources["gpus"] > 0:
+        resolved["gpus-per-node"] = f"{resolved['gpu-type']}:{resources['gpus']}"
 
     return _render_flags(resolved)
 
 
 def _rule_matches(resources: Resources, when: dict[ResourceKey, ResourceCondition]) -> bool:
     for key, cond in when.items():
-        value = getattr(resources, key)
+        value = resources[key]
         if not _match_condition(value, cond):
             return False
     return True

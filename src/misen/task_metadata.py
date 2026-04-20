@@ -31,10 +31,103 @@ if TYPE_CHECKING:
 
     from misen.utils.serde import Serializer
 
-__all__ = ["GpuRuntime", "Resources", "ResourcesOverrides", "TaskMetadata", "meta", "resolve_task_metadata"]
+__all__ = [
+    "GpuRuntime",
+    "Resources",
+    "TaskMetadata",
+    "aggregate_resources",
+    "meta",
+    "resolve_task_metadata",
+]
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+GpuRuntime: TypeAlias = Literal["cuda", "rocm", "xpu"]
+
+
+class Resources(TypedDict, total=False):
+    """Resource requirements for executing a task.
+
+    Attributes:
+        time: Requested wall-clock time in minutes, if known.
+        nodes: Number of nodes required.
+        memory: Memory in GiB.
+        cpus: CPU cores.
+        gpus: GPU count.
+        gpu_memory: Optional requested GPU memory in GiB.
+        gpu_runtime: Requested GPU runtime.
+    """
+
+    time: int | None
+    nodes: int
+    memory: int
+    cpus: int
+    gpus: int
+    gpu_memory: int | None
+    gpu_runtime: GpuRuntime
+
+
+_DEFAULT_RESOURCES: Resources = {
+    "time": None,
+    "nodes": 1,
+    "memory": 8,
+    "cpus": 1,
+    "gpus": 0,
+    "gpu_memory": None,
+    "gpu_runtime": "cuda",
+}
+
+
+def aggregate_resources(resources: Iterable[Resources]) -> Resources:
+    """Combine multiple resource requests into one conservative request.
+
+    CPU/memory/GPU counts use ``max`` (pick the largest request), finite
+    runtimes are summed (``None`` if any request is unbounded), and
+    ``gpu_runtime`` must agree across GPU-using requests.
+
+    Args:
+        resources: Iterable of fully-populated :class:`Resources` to merge.
+
+    Returns:
+        A single :class:`Resources` that satisfies every input request.
+
+    Raises:
+        ValueError: If the iterable is empty or GPU-using requests disagree
+            on ``gpu_runtime``.
+    """
+    resource_list = list(resources)
+    if not resource_list:
+        msg = "aggregate_resources requires at least one Resources instance."
+        raise ValueError(msg)
+
+    gpu_runtimes = {r["gpu_runtime"] for r in resource_list if r["gpus"] > 0}
+    match len(gpu_runtimes):
+        case 0:
+            gpu_runtime: GpuRuntime = "cuda"
+        case 1:
+            (gpu_runtime,) = gpu_runtimes
+        case _:
+            msg = f"Incompatible gpu_runtime requirements: {gpu_runtimes}"
+            raise ValueError(msg)
+
+    return Resources(
+        time=(
+            None
+            if any(r["time"] is None for r in resource_list)
+            else sum(cast("int", r["time"]) for r in resource_list)
+        ),
+        nodes=max(r["nodes"] for r in resource_list),
+        memory=max(r["memory"] for r in resource_list),
+        cpus=max(r["cpus"] for r in resource_list),
+        gpus=max(r["gpus"] for r in resource_list),
+        gpu_memory=(
+            None
+            if all(r["gpu_memory"] is None for r in resource_list)
+            else max(r["gpu_memory"] for r in resource_list if r["gpu_memory"] is not None)
+        ),
+        gpu_runtime=gpu_runtime,
+    )
 
 
 class TaskMetadata(Struct, frozen=True):
@@ -59,97 +152,13 @@ class TaskMetadata(Struct, frozen=True):
     exclude: set[str] = set()
     defaults: dict[str, Any] = {}
     versions: dict[tuple[str, ResultHash], int] = {}
-    resources: Callable[..., Resources] = lambda *_, **__: Resources()
+    resources: Callable[..., Resources] = lambda *_, **__: _DEFAULT_RESOURCES
     serializer: type[Serializer] | None = None
     cleanup_work_dir: bool = False
 
-
-GpuRuntime: TypeAlias = Literal["cuda", "rocm", "xpu"]
-
-
-class Resources(Struct, frozen=True):
-    """Resource requirements for executing a task.
-
-    Attributes:
-        time: Requested wall-clock time in minutes, if known.
-        nodes: Number of nodes required.
-        memory: Memory in GiB.
-        cpus: CPU cores.
-        gpus: GPU count.
-        gpu_memory: Optional requested GPU memory in GiB.
-        gpu_runtime: Requested GPU runtime.
-    """
-
-    time: int | None = None
-    nodes: int = 1
-    memory: int = 8
-    cpus: int = 1
-    gpus: int = 0
-    gpu_memory: int | None = None
-    gpu_runtime: GpuRuntime = "cuda"
-
-    @classmethod
-    def aggregate(cls, resources: Iterable[Resources]) -> Resources:
-        """Combine multiple resource requests into one conservative request.
-
-        CPU/memory/GPU counts use ``max`` (pick the largest request), finite
-        runtimes are summed (``None`` if any request is unbounded), and
-        ``gpu_runtime`` must agree across GPU-using requests.
-
-        Args:
-            resources: Iterable of :class:`Resources` to merge.
-
-        Returns:
-            A single :class:`Resources` that satisfies every input request.
-
-        Raises:
-            ValueError: If the iterable is empty or GPU-using requests disagree
-                on ``gpu_runtime``.
-        """
-        resource_list = list(resources)
-        if not resource_list:
-            msg = "Resources.aggregate requires at least one Resources instance."
-            raise ValueError(msg)
-
-        gpu_runtimes = {resource.gpu_runtime for resource in resource_list if resource.gpus > 0}
-        match len(gpu_runtimes):
-            case 0:
-                gpu_runtime: GpuRuntime = "cuda"
-            case 1:
-                (gpu_runtime,) = gpu_runtimes
-            case _:
-                msg = f"Incompatible gpu_runtime requirements: {gpu_runtimes}"
-                raise ValueError(msg)
-
-        return cls(
-            time=(
-                None
-                if any(resource.time is None for resource in resource_list)
-                else sum(cast("int", resource.time) for resource in resource_list)
-            ),
-            nodes=max(resource.nodes for resource in resource_list),
-            memory=max(resource.memory for resource in resource_list),
-            cpus=max(resource.cpus for resource in resource_list),
-            gpus=max(resource.gpus for resource in resource_list),
-            gpu_memory=(
-                None
-                if all(resource.gpu_memory is None for resource in resource_list)
-                else max(resource.gpu_memory for resource in resource_list if resource.gpu_memory is not None)
-            ),
-            gpu_runtime=gpu_runtime,
-        )
-
-
-class ResourcesOverrides(TypedDict, total=False):
-    """Partial :class:`Resources` patch; used to type ``Task.with_resources`` kwargs."""
-
-    time: int | None
-    nodes: int
-    memory: int
-    cpus: int
-    gpus: int
-    gpu_memory: int | None
-    gpu_runtime: GpuRuntime
+    def resolve_resources(self, *args: Any, **kwargs: Any) -> Resources:
+        """Compute resource requirements for this task, merging with defaults."""
+        return cast("Resources", {**_DEFAULT_RESOURCES, **self.resources(*args, **kwargs)})
 
 
 def meta(
@@ -183,19 +192,16 @@ def meta(
 
     Raises:
         ValueError: If ``id`` is not provided.
-
-    .. deprecated::
-        The old name ``task`` is deprecated; use ``meta`` instead.
     """
     if id is None:
         msg = "id must be provided."
         raise ValueError(msg)
 
-    if resources is None:
-        resources = Resources()
-    if isinstance(resources, Resources):
-        # Normalize static resources into the callable shape expected by TaskMetadata.
-        resources = lambda *_, r=resources, **__: r  # noqa: E731
+    resources_fn: Callable[..., Resources]
+    if resources is None or isinstance(resources, dict):
+        resources_fn = lambda *_, r=resources, **__: cast("Resources", r or Resources())  # noqa: E731
+    else:
+        resources_fn = cast("Callable[..., Resources]", resources)
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         """Attach task metadata to the decorated function.
@@ -213,7 +219,7 @@ def meta(
             exclude=(exclude or set()),
             defaults=(defaults or {}),
             versions=_normalize_versions(versions=versions),
-            resources=resources,
+            resources=resources_fn,
             serializer=serializer,
             cleanup_work_dir=cleanup_work_dir,
         )
