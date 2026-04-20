@@ -332,6 +332,12 @@ stdlib_serializers: list[type[Serializer]] = [
     MsgpackSerializer,  # catch-all — must be last
 ]
 
+# NOTE: ``dict`` and ``OrderedDict`` are intentionally omitted from this fast
+# path.  They are registered as ``volatile_types`` on the serde registry so
+# dispatch re-evaluates per call — that lets content-sensitive serializers
+# (e.g. ``DictOfTensorsSerializer`` in ``libs/torch.py``) intercept dicts
+# whose values are tensors/ndarrays before falling through to
+# :class:`MsgpackSerializer` here as the catch-all.
 _stdlib_serializers_by_type: dict[type[Any], type[Serializer]] = {
     bytes: BytesSerializer,
     bytearray: BytesSerializer,
@@ -344,7 +350,6 @@ _stdlib_serializers_by_type: dict[type[Any], type[Serializer]] = {
     tuple: MsgpackSerializer,
     set: MsgpackSerializer,
     frozenset: MsgpackSerializer,
-    dict: MsgpackSerializer,
     complex: MsgpackSerializer,
     datetime.datetime: MsgpackSerializer,
     datetime.date: MsgpackSerializer,
@@ -369,7 +374,6 @@ _stdlib_serializers_by_type: dict[type[Any], type[Serializer]] = {
     ipaddress.IPv4Interface: MsgpackSerializer,
     ipaddress.IPv6Interface: MsgpackSerializer,
     types.SimpleNamespace: MsgpackSerializer,
-    OrderedDict: MsgpackSerializer,
     deque: MsgpackSerializer,
 }
 

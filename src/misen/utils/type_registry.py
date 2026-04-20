@@ -39,14 +39,24 @@ class TypeDispatchRegistry(Generic[T]):
     predicate:
         Callable used during the linear-scan fallback to decide whether a
         candidate value matches ``obj``.
+    volatile_types:
+        Optional set of types whose dispatch depends on an object's *contents*
+        rather than its type alone (e.g. ``dict`` / ``OrderedDict`` in the
+        serde registry, where a dict of tensors dispatches differently from a
+        dict of primitives).  Instances of these types bypass both the
+        memoization cache and the ``by_type_name`` fast path and go straight
+        to the linear-scan predicate check, so every call re-evaluates the
+        match against the actual contents.
 
     Notes:
     -----
     Lookup results are memoized by the runtime ``type(obj)``, so subsequent
-    calls with the same type are O(1).
+    calls with the same type are O(1).  The cache is skipped for
+    ``volatile_types`` members since the same concrete type can map to
+    different registered values depending on contents.
     """
 
-    __slots__ = ("_by_type_name", "_cache", "_candidates", "_predicate")
+    __slots__ = ("_by_type_name", "_cache", "_candidates", "_predicate", "_volatile_types")
 
     def __init__(
         self,
@@ -54,12 +64,14 @@ class TypeDispatchRegistry(Generic[T]):
         by_type_name: Mapping[str, T],
         candidates: Iterable[T],
         predicate: Callable[[T, Any], bool],
+        volatile_types: Iterable[type[Any]] | None = None,
     ) -> None:
         """Build a registry from a name-keyed mapping and a candidate list."""
         self._by_type_name: dict[str, T] = dict(by_type_name)
         self._candidates: list[T] = list(candidates)
         self._predicate = predicate
         self._cache: dict[type[Any], T] = {}
+        self._volatile_types: frozenset[type[Any]] = frozenset(volatile_types or ())
 
     @property
     def by_type_name(self) -> Mapping[str, T]:
@@ -78,6 +90,15 @@ class TypeDispatchRegistry(Generic[T]):
         ``None`` is returned, so each call site can produce its own message.
         """
         obj_type = type(obj)
+
+        if obj_type in self._volatile_types:
+            # Content-sensitive: the same type can map to different
+            # registered values depending on contents, so skip the cache and
+            # the by-type fast path and re-evaluate the predicate every call.
+            for value in self._candidates:
+                if self._predicate(value, obj):
+                    return value
+            return None
 
         cached = self._cache.get(obj_type)
         if cached is not None:

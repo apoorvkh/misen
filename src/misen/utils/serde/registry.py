@@ -14,6 +14,7 @@ the only public save/load surface the package exposes.
 """
 
 import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +28,17 @@ __all__ = ["load", "save"]
 _META_FILENAME = "serde_meta.json"
 
 
+# ``dict`` / ``OrderedDict`` are content-sensitive: the same concrete type
+# can dispatch to different serializers depending on value types (e.g.
+# ``DictOfTensorsSerializer`` for dicts of ``torch.Tensor``,
+# ``MsgpackSerializer`` for dicts of primitives).  Listing them as volatile
+# bypasses both the cache and the by-type fast path so every call
+# re-evaluates the candidate match predicates.
 _serializer_registry: TypeDispatchRegistry[type[Serializer]] = TypeDispatchRegistry(
     by_type_name=all_serializers_by_type,
     candidates=all_serializers,
     predicate=lambda ser_cls, obj: ser_cls.match(obj),
+    volatile_types={dict, OrderedDict},
 )
 
 # Map from serializer qualified name → class (for meta-based load dispatch).
