@@ -29,11 +29,9 @@ from inspect import Signature, signature
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, Unpack, cast
 
-import msgspec
-
 from misen.exceptions import CacheError
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
-from misen.task_metadata import Resources, ResourcesOverrides, TaskMetadata, resolve_task_metadata
+from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
@@ -57,6 +55,7 @@ P = ParamSpec("P")
 R = TypeVar("R")
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
+
 
 class Task(FrozenMixin, Generic[R]):
     """A Task is a lazy wrapper for a function and its arguments.
@@ -102,7 +101,7 @@ class Task(FrozenMixin, Generic[R]):
         self._signature: Signature = signature(func)
 
         self.meta: TaskMetadata = resolve_task_metadata(func)
-        self.resources: Resources = self.meta.resources(*self.args, **self.kwargs)
+        self.resources: Resources = self.meta.resolve_resources(*self.args, **self.kwargs)
 
         self._validate_arguments(self.resources)
 
@@ -146,7 +145,7 @@ class Task(FrozenMixin, Generic[R]):
         new.__setstate__(state)
         return new
 
-    def with_resources(self, **overrides: Unpack[ResourcesOverrides]) -> Task[R]:
+    def with_resources(self, **overrides: Unpack[Resources]) -> Task[R]:
         """Create a copy of this task with selected :class:`Resources` fields replaced.
 
         Useful when an upstream-authored task either declares conservative
@@ -165,10 +164,14 @@ class Task(FrozenMixin, Generic[R]):
 
         Raises:
             TypeError: If an override names a field not on :class:`Resources`.
-            ValueError: If the resulting ``resources.nodes`` is incompatible
+            ValueError: If the resulting ``resources["nodes"]`` is incompatible
                 with sentinel arguments already bound to this task.
         """
-        new_resources = msgspec.structs.replace(self.resources, **overrides)
+        invalid = set(overrides) - set(Resources.__annotations__)
+        if invalid:
+            msg = f"Unknown Resources fields: {sorted(invalid)}"
+            raise TypeError(msg)
+        new_resources = cast("Resources", {**self.resources, **overrides})
 
         self._validate_arguments(new_resources)
 
@@ -183,18 +186,18 @@ class Task(FrozenMixin, Generic[R]):
         """Validate bound task arguments against the given :class:`Resources`.
 
         Currently checks that ``ASSIGNED_RESOURCES*`` sentinels in the bound
-        arguments are consistent with ``resources.nodes``.
+        arguments are consistent with ``resources["nodes"]``.
 
         Raises:
             ValueError: If a single-node sentinel is used with ``nodes > 1``
                 or a multi-node sentinel is used with ``nodes == 1``.
         """
         values = tuple(itertools.chain(self.args, self.kwargs.values()))
-        if resources.nodes > 1 and ASSIGNED_RESOURCES in values:
-            msg = "ASSIGNED_RESOURCES cannot be used when resources.nodes > 1; use ASSIGNED_RESOURCES_PER_NODE."
+        if resources["nodes"] > 1 and ASSIGNED_RESOURCES in values:
+            msg = "ASSIGNED_RESOURCES cannot be used when resources['nodes'] > 1; use ASSIGNED_RESOURCES_PER_NODE."
             raise ValueError(msg)
-        if resources.nodes == 1 and ASSIGNED_RESOURCES_PER_NODE in values:
-            msg = "ASSIGNED_RESOURCES_PER_NODE cannot be used when resources.nodes == 1; use ASSIGNED_RESOURCES."
+        if resources["nodes"] == 1 and ASSIGNED_RESOURCES_PER_NODE in values:
+            msg = "ASSIGNED_RESOURCES_PER_NODE cannot be used when resources['nodes'] == 1; use ASSIGNED_RESOURCES."
             raise ValueError(msg)
 
     def __repr__(self) -> str:

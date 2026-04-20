@@ -10,7 +10,7 @@ def noop_task(x: int) -> int:
     return x
 
 
-@meta(id="multinode_task", cache=False, exclude={"x"}, resources=Resources(nodes=2, gpus=1))
+@meta(id="multinode_task", cache=False, exclude={"x"}, resources={"nodes": 2, "gpus": 1})
 def multinode_task(x: object) -> None:
     _ = x
 
@@ -19,10 +19,10 @@ def test_with_resources_overrides_only_named_fields() -> None:
     task = Task(noop_task, x=1)
     patched = task.with_resources(gpu_memory=40)
 
-    assert patched.resources.gpu_memory == 40
-    assert patched.resources.gpus == task.resources.gpus
-    assert patched.resources.memory == task.resources.memory
-    assert patched.resources.cpus == task.resources.cpus
+    assert patched.resources["gpu_memory"] == 40
+    assert patched.resources["gpus"] == task.resources["gpus"]
+    assert patched.resources["memory"] == task.resources["memory"]
+    assert patched.resources["cpus"] == task.resources["cpus"]
 
 
 def test_with_resources_preserves_task_identity() -> None:
@@ -38,17 +38,17 @@ def test_with_resources_preserves_task_identity() -> None:
 
 def test_with_resources_returns_new_instance_and_does_not_mutate() -> None:
     task = Task(noop_task, x=1)
-    original_gpu_memory = task.resources.gpu_memory
+    original_gpu_memory = task.resources["gpu_memory"]
     patched = task.with_resources(gpu_memory=40)
 
     assert patched is not task
-    assert task.resources.gpu_memory == original_gpu_memory
+    assert task.resources["gpu_memory"] == original_gpu_memory
 
 
 def test_with_resources_rejects_unknown_field() -> None:
     task = Task(noop_task, x=1)
     with pytest.raises(TypeError):
-        task.with_resources(not_a_field=1)
+        task.with_resources(not_a_field=1)  # ty:ignore[unknown-argument]
 
 
 def test_with_resources_rejects_per_node_sentinel_when_nodes_collapse_to_one() -> None:

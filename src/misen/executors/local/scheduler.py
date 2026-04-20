@@ -93,7 +93,9 @@ class LocalScheduler(msgspec.Struct, dict=True):
         for job, state in finished:
             self._running.remove(job)
             self.available_budget = self.available_budget.add(job.resources)
-            self._release_allocations(job.assigned_cpu_indices, job.resources.gpu_runtime, job.assigned_gpu_indices)
+            self._release_allocations(
+                job.assigned_cpu_indices, job.resources["gpu_runtime"], job.assigned_gpu_indices
+            )
             if state == "done":
                 self._logger.info("LocalScheduler observed job completion for %s.", job.work_unit)
                 runtime_job_done(id(job))
@@ -159,15 +161,15 @@ class LocalScheduler(msgspec.Struct, dict=True):
         assigned_resources = AssignedResources(
             cpu_indices=cpu_indices,
             gpu_indices=gpu_indices,
-            memory=job.resources.memory,
-            gpu_memory=job.resources.gpu_memory,
+            memory=job.resources["memory"],
+            gpu_memory=job.resources["gpu_memory"],
         )
 
         job.job_id, argv, env_overrides = job.snapshot.prepare_job(
             work_unit=job.work_unit,
             workspace=job.workspace,
             assigned_resources_getter=(lambda r=assigned_resources: r),
-            gpu_runtime=job.resources.gpu_runtime,
+            gpu_runtime=job.resources["gpu_runtime"],
         )
 
         job.log_path = job.workspace.get_job_log(job_id=job.job_id, work_unit=job.work_unit)
@@ -208,14 +210,14 @@ class LocalScheduler(msgspec.Struct, dict=True):
 
     def _reserve_indices(self, resources: Resources) -> tuple[list[int], list[int]] | None:
         """Reserve CPU/GPU indices for a resource request."""
-        cpu_indices = self._allocate_indices(self.available_cpu_indices, resources.cpus)
+        cpu_indices = self._allocate_indices(self.available_cpu_indices, resources["cpus"])
         if cpu_indices is None:
             return None
 
-        gpu_pool = self._gpu_index_pool(resources.gpu_runtime)
-        gpu_indices = self._allocate_indices(gpu_pool, resources.gpus)
+        gpu_pool = self._gpu_index_pool(resources["gpu_runtime"])
+        gpu_indices = self._allocate_indices(gpu_pool, resources["gpus"])
         if gpu_indices is None:
-            self._release_allocations(cpu_indices, resources.gpu_runtime, [])
+            self._release_allocations(cpu_indices, resources["gpu_runtime"], [])
             return None
         return cpu_indices, gpu_indices
 
@@ -235,7 +237,7 @@ class LocalScheduler(msgspec.Struct, dict=True):
             cpu_indices = []
         if gpu_indices is None:
             gpu_indices = []
-        self._release_allocations(cpu_indices, job.resources.gpu_runtime, gpu_indices)
+        self._release_allocations(cpu_indices, job.resources["gpu_runtime"], gpu_indices)
         job.mark_failed()
         if job in self._pending:
             self._pending.remove(job)

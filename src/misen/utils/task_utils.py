@@ -98,9 +98,7 @@ def hash_task_arguments(
         return ResultHash.from_object(map_nested_leaves(value, leaf_representation))
 
     def include_argument(name: str, value: Any) -> bool:
-        return name not in meta.exclude and (
-            name not in meta.defaults or meta.defaults[name] != value
-        )
+        return name not in meta.exclude and (name not in meta.defaults or meta.defaults[name] != value)
 
     hashed_arguments: dict[str, tuple[TaskHash | ResultHash, int]] = {}
 
@@ -213,7 +211,7 @@ def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[s
         if name in task.meta.exclude:
             continue
         text = repr(value)
-        if len(text) > 80:
+        if len(text) > 80:  # noqa: PLR2004
             text = text[:77] + "..."
         parts.append(f"{name}={text}")
     return f"{task.meta.id}({', '.join(parts)})" if parts else f"{task.meta.id}()"
