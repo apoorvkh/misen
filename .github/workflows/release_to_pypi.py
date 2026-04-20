@@ -1,0 +1,18 @@
+name: release_to_pypi
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  release-to-pypi:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8
+        with:
+          version: "0.11.7"
+      - run: uv build
+      - run: uv publish
