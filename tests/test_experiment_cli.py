@@ -217,6 +217,59 @@ def test_resolve_experiment_class_registers_module_for_value_pickling(monkeypatc
     assert getattr(cast("object", seen["module"]), "__name__", None) == "tests.test_experiment_cli"
 
 
+@pytest.fixture
+def captured_args(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def fake_execute(*, args: object, console: object) -> None:  # noqa: ARG001
+        captured["args"] = args
+
+    monkeypatch.setattr(experiment_module, "_execute_command", fake_execute)
+    return captured
+
+
+def test_experiment_cli_instance_seeds_defaults_from_bound_fields(captured_args) -> None:
+    experiment_cli(CliExperiment(value=42), argv=["count"])
+    exp = cast("CliExperiment", getattr(captured_args["args"], "experiment"))
+    assert isinstance(exp, CliExperiment)
+    assert exp.value == 42
+
+
+def test_experiment_cli_instance_defaults_still_overridable_by_flags(captured_args) -> None:
+    experiment_cli(CliExperiment(value=42), argv=["--value", "99", "count"])
+    exp = cast("CliExperiment", getattr(captured_args["args"], "experiment"))
+    assert exp.value == 99
+
+
+def test_resolve_experiment_reference_accepts_instance(monkeypatch, tmp_path) -> None:
+    project_src = tmp_path / "src" / "config_pkg"
+    project_src.mkdir(parents=True)
+    (project_src / "__init__.py").write_text("", encoding="utf-8")
+    (project_src / "config.py").write_text(
+        (
+            "from misen import Experiment, Task, meta\n\n"
+            "@meta(id='inst_task', cache=False)\n"
+            "def inst_task(x: int) -> int:\n"
+            "    return x\n\n"
+            "class MyExp(Experiment):\n"
+            "    value: int = 1\n\n"
+            "    def tasks(self):\n"
+            "        return {'t': Task(inst_task, x=self.value)}\n\n"
+            "__config__ = MyExp(value=7)\n"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    sys.modules.pop("config_pkg", None)
+    sys.modules.pop("config_pkg.config", None)
+
+    resolved = experiment_module.resolve_experiment_reference("config_pkg.config:__config__")
+
+    assert not isinstance(resolved, type)
+    assert getattr(resolved, "value") == 7
+
+
 def test_misen_main_dispatches_experiment(monkeypatch) -> None:
     seen: dict[str, object] = {}
 

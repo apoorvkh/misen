@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import importlib
 import importlib.util
 import sys
@@ -31,7 +32,7 @@ from . import tui
 from .display import format_task_line_markup, iter_task_arg_children
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
     from misen import Experiment
     from misen.tasks import Task
@@ -41,6 +42,7 @@ __all__ = [
     "experiment",
     "experiment_cli",
     "resolve_experiment_class",
+    "resolve_experiment_reference",
 ]
 
 
@@ -320,28 +322,42 @@ def _resolve_experiment_module(module_reference: str) -> ModuleType:
     return _import_module_from_file(file_path)
 
 
-def resolve_experiment_class(reference: str) -> type[Experiment]:
-    """Resolve an experiment class from ``module:Class`` or ``path.py:Class`` reference text."""
-    module_reference, class_name = _parse_experiment_reference(reference)
+def resolve_experiment_reference(reference: str) -> type[Experiment] | Experiment:
+    """Resolve ``module:Symbol`` or ``path.py:Symbol`` to an Experiment class or instance.
+
+    Instance references (for example ``my_project.configs.training:__config__``)
+    let the shared ``misen experiment`` CLI use the instance's bound field values
+    as defaults, matching the ``python -m`` entry point.
+    """
+    module_reference, attr_name = _parse_experiment_reference(reference)
     module = _resolve_experiment_module(module_reference)
     _register_module_pickle_by_value(module)
 
-    if not hasattr(module, class_name):
-        msg = f"Module {module_reference!r} has no attribute {class_name!r}."
+    if not hasattr(module, attr_name):
+        msg = f"Module {module_reference!r} has no attribute {attr_name!r}."
         raise ValueError(msg)
-
-    experiment_cls = getattr(module, class_name)
-    if not isinstance(experiment_cls, type):
-        msg = f"Referenced symbol {reference!r} is not a class."
-        raise TypeError(msg)
 
     from misen import Experiment
 
-    if not issubclass(experiment_cls, Experiment):
-        msg = f"Referenced class {reference!r} is not a misen.Experiment subclass."
-        raise TypeError(msg)
+    target = getattr(module, attr_name)
+    if isinstance(target, type):
+        if not issubclass(target, Experiment):
+            msg = f"Referenced class {reference!r} is not a misen.Experiment subclass."
+            raise TypeError(msg)
+        return target
+    if isinstance(target, Experiment):
+        return target
+    msg = f"Referenced symbol {reference!r} is not a misen.Experiment class or instance."
+    raise TypeError(msg)
 
-    return experiment_cls
+
+def resolve_experiment_class(reference: str) -> type[Experiment]:
+    """Resolve an experiment class from ``module:Class`` or ``path.py:Class`` reference text."""
+    target = resolve_experiment_reference(reference)
+    if not isinstance(target, type):
+        msg = f"Referenced symbol {reference!r} is not a class."
+        raise TypeError(msg)
+    return cast("type[Experiment]", target)
 
 
 def _system_exit_code(exc: SystemExit) -> int:
@@ -375,12 +391,12 @@ def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
     )
 
     try:
-        experiment_cls = resolve_experiment_class(parsed.reference)
+        experiment_ref = resolve_experiment_reference(parsed.reference)
     except (ImportError, TypeError, ValueError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
 
-    experiment_cli(experiment_cls, argv=unknown_args)
+    experiment_cli(experiment_ref, argv=unknown_args)
     return 0
 
 
@@ -928,11 +944,15 @@ def _resolve_command(*, command_token: str | None, unknown_args: list[str]) -> E
     return "run"
 
 
-def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] | None = None) -> None:
+def experiment_cli(
+    experiment_ref: type[Experiment] | Experiment,
+    argv: list[str] | tuple[str, ...] | None = None,
+) -> None:
     """Parse CLI args and execute experiment command.
 
     Args:
-        experiment_cls: Experiment class type to expose on CLI.
+        experiment_ref: Experiment class, or an instance whose bound field
+            values should seed the CLI defaults (each field still overridable).
         argv: Optional command tokens; defaults to ``sys.argv[1:]`` when ``None``.
 
     Notes:
@@ -941,6 +961,13 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
     """
     from misen.executor import Executor
     from misen.workspace import Workspace
+
+    if isinstance(experiment_ref, type):
+        experiment_cls: type[Experiment] = cast("type[Experiment]", experiment_ref)
+        experiment_default: Experiment | None = None
+    else:
+        experiment_cls = type(experiment_ref)
+        experiment_default = experiment_ref
 
     args_list = list(sys.argv[1:] if argv is None else argv)
     bootstrap_args, unknown_args = tyro.cli(
@@ -992,9 +1019,10 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
         )
     else:
         cli_fields.append(("executor", Executor.resolve_type(bootstrap_args.executor)))
+    experiment_spec = field(default=experiment_default) if experiment_default is not None else field()
     cli_fields.extend(
         [
-            ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls]),  # ty:ignore[invalid-type-form]
+            ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls], experiment_spec),  # ty:ignore[invalid-type-form]
             ("command", ExperimentCommandArgs, field(default_factory=command_default_factories[resolved_command])),
         ]
     )
@@ -1002,3 +1030,19 @@ def experiment_cli(experiment_cls: type[Any], argv: list[str] | tuple[str, ...] 
     console = Console()
     parsed = tyro.cli(make_dataclass("", cli_fields, kw_only=True), args=unknown_args)
     _execute_command(args=cast("Any", parsed), console=console)
+
+
+class _ClassOrInstanceMethod:
+    """Descriptor: passes the class on class access and the instance on instance access.
+
+    Lets a single method serve both ``Experiment.cli()`` (class → field defaults)
+    and ``config.cli()`` (instance → bound field values seed CLI defaults).
+    """
+
+    def __init__(self, func: Callable[[Any], None]) -> None:
+        self._func = func
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Callable[[], None]:
+        bound = functools.partial(self._func, instance if instance is not None else owner)
+        functools.update_wrapper(bound, self._func)
+        return bound

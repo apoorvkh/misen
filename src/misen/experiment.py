@@ -24,7 +24,7 @@ from typing_extensions import TypeVar
 
 from misen.executor import Executor
 from misen.tasks import Task
-from misen.utils.cli.experiment import experiment_cli
+from misen.utils.cli.experiment import _ClassOrInstanceMethod, experiment_cli
 from misen.workspace import Workspace
 
 __all__ = ["Experiment"]
@@ -110,7 +110,14 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
         )
         executor.submit(tasks=experiment_tasks, workspace=workspace)
 
-    @classmethod
-    def cli(cls) -> None:
-        """Run the generated command-line interface for this experiment class."""
-        experiment_cli(cls)
+    @_ClassOrInstanceMethod
+    def cli(self: Any) -> None:
+        """Run the generated command-line interface for this experiment.
+
+        Class access (``TrainingExperiment.cli()``) exposes field defaults.
+        Instance access (``TrainingExperiment(lr=0.1).cli()``) seeds CLI defaults
+        from the instance's bound field values while still allowing command-line
+        overrides. (``self`` here is the class on class access, the instance on
+        instance access — see :class:`_ClassOrInstanceMethod`.)
+        """
+        experiment_cli(self)
