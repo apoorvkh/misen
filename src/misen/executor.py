@@ -111,6 +111,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             num_dispatch,
         )
 
+        snapshot: SnapshotT | None = None
         if pending_work_units:
             logger.info("%s creating snapshot for %d pending work unit(s).", executor_name, num_dispatch)
             started_at = time.perf_counter()
