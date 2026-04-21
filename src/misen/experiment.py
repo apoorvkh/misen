@@ -16,15 +16,16 @@ from __future__ import annotations
 import logging
 from abc import abstractmethod
 from collections.abc import Mapping
-from functools import cache
-from typing import Any, Generic, Literal
+from functools import wraps
+from typing import Any, Generic, Literal, Self
 
-from msgspec import Struct
+from msgspec import Struct, StructMeta
 from typing_extensions import TypeVar
 
 from misen.executor import Executor
 from misen.tasks import Task
 from misen.utils.cli.experiment import _ClassOrInstanceMethod, experiment_cli
+from misen.utils.hashing import stable_hash
 from misen.workspace import Workspace
 
 __all__ = ["Experiment"]
@@ -34,7 +35,19 @@ TasksT = TypeVar("TasksT", bound=Mapping[str, Task], default=Mapping[str, Task[A
 logger = logging.getLogger(__name__)
 
 
-class Experiment(Struct, Generic[TasksT], frozen=True):
+class _FrozenStructMeta(StructMeta):
+    def __new__(
+        mcls: type[_FrozenStructMeta],
+        name: str,
+        bases: tuple[type, ...],
+        namespace: dict[str, Any],
+        **struct_config: Any,
+    ) -> _FrozenStructMeta:
+        struct_config.setdefault("frozen", True)
+        return super().__new__(mcls, name, bases, namespace, **struct_config)
+
+
+class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
     """Base class for defining a named task collection.
 
     Subclasses implement :meth:`tasks` and return a stable mapping from user
@@ -51,15 +64,19 @@ class Experiment(Struct, Generic[TasksT], frozen=True):
         """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Wrap subclass ``tasks()`` in a per-instance cache.
-
-        Args:
-            **kwargs: Standard subclass construction kwargs.
-        """
+        """Cache the :meth:`tasks` method to avoid recomputing for the same (frozen) instance."""
         super().__init_subclass__(**kwargs)
-        # Memoize tasks() per experiment instance so DAG construction is deterministic
-        # and repeated access (run/result/CLI) does not rebuild task objects.
-        setattr(cls, "tasks", cache(cls.tasks))  # noqa: B010
+        _tasks_fn = cls.tasks
+        cache: dict[int, TasksT] = {}
+
+        @wraps(_tasks_fn)
+        def cached_tasks_fn(self: Experiment) -> TasksT:
+            key = stable_hash(self)
+            if key not in cache:
+                cache[key] = _tasks_fn(self)
+            return cache[key]
+
+        type.__setattr__(cls, "tasks", cached_tasks_fn)
 
     def __getitem__(self, key: str) -> Task:
         """Return a task from the named task mapping.
