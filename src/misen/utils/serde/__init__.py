@@ -2,47 +2,61 @@
 
 Public API:
 
-- :func:`save` — serialize a value into a directory. Type-driven:
-  picks the right :class:`Serializer` for the value via the internal
-  type registry, or uses the caller-provided ``ser_cls``.
-- :func:`load` — deserialize whatever is in a directory. Content-driven:
-  reads ``serde_meta.json`` and dispatches to whichever serializer wrote
+- :func:`save` — serialize a value into a directory.  Type-driven:
+  picks the right :class:`Serializer` (or subclass) for the value via
+  the internal type registry, or uses the caller-provided ``ser_cls``.
+- :func:`load` — deserialize whatever is in a directory.  Content-driven:
+  reads ``manifest.json`` and dispatches to whichever serializer wrote
   the directory, so the caller never needs the original value's type.
   An explicit ``ser_cls`` may be passed to override the on-disk record.
-- :class:`Serializer` — base class for implementing new serializers by
-  overriding ``write`` / ``read`` (and optionally ``match`` for
-  participation in auto-dispatch).
-- :class:`UnserializableTypeError` — raised by individual serializers
-  when they cannot encode a given value.
+- :func:`save_zip` / :func:`load_zip` — single-file zip variants.
 
-Design notes:
+Subclassing for custom types:
 
-- Each :class:`Serializer` targets specific Python types and uses a
-  stable on-disk format. ``write`` and ``read`` are the only hooks a
-  subclass must implement; the module-level ``save`` / ``load`` handle
-  ``serde_meta.json`` uniformly so subclasses never touch it.
-- Version information is not a first-class concept. A serializer that
-  needs to discriminate between on-disk formats can record a
-  ``format_version`` (or similar) in the extras dict returned by
-  :meth:`Serializer.write` and branch on ``meta.get("format_version")``
-  in :meth:`Serializer.read`.
-- Unknown types raise :class:`misen.exceptions.SerializationError` from
-  :func:`save` rather than falling back to an unstable format like
-  ``dill``. To serialize a value of an unregistered type, pass an
-  explicit ``ser_cls`` or convert the value first.
+- :class:`Serializer` — **start here**.  Override :meth:`~BaseSerializer.write`
+  and :meth:`~BaseSerializer.read` to persist an object into a directory.
+- :class:`LeafSerializer` — advanced, for batching many instances of
+  one kind (tensors, ndarrays) into a single file.
+- :class:`BaseSerializer` — internal.  Subclass directly only when
+  writing a recursion-aware container serializer.
 """
 
+from misen.exceptions import SerializationError
 from misen.utils.serde.base import (
+    BaseSerializer,
+    Container,
+    DecodeCtx,
+    DirectoryLeaf,
+    EncodeCtx,
+    Leaf,
+    LeafSerializer,
+    Node,
     Serializer,
-    SerializerTypeRegistry,
-    UnserializableTypeError,
 )
-from misen.utils.serde.registry import load, save
+from misen.utils.serde.registry import (
+    MANIFEST_FILENAME,
+    Registry,
+    load,
+    load_zip,
+    save,
+    save_zip,
+)
 
 __all__ = [
+    "MANIFEST_FILENAME",
+    "BaseSerializer",
+    "Container",
+    "DecodeCtx",
+    "DirectoryLeaf",
+    "EncodeCtx",
+    "Leaf",
+    "LeafSerializer",
+    "Node",
+    "Registry",
+    "SerializationError",
     "Serializer",
-    "SerializerTypeRegistry",
-    "UnserializableTypeError",
     "load",
+    "load_zip",
     "save",
+    "save_zip",
 ]

@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["sympy_serializers", "sympy_serializers_by_type"]
 
 sympy_serializers: list[type[Serializer]] = []
-sympy_serializers_by_type: SerializerTypeRegistry = {}
+sympy_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("sympy") is not None:
-    from pathlib import Path
 
     class SympyExprSerializer(Serializer[Any]):
         """Serialize sympy expressions via ``srepr`` (canonical string representation)."""

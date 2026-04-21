@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["onnx_serializers", "onnx_serializers_by_type"]
 
 onnx_serializers: list[type[Serializer]] = []
-onnx_serializers_by_type: SerializerTypeRegistry = {}
+onnx_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("onnx") is not None:
-    from pathlib import Path
 
     class ONNXModelSerializer(Serializer[Any]):
         """Serialize ``onnx.ModelProto`` via protobuf binary format."""

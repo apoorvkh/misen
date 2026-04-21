@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["geopandas_serializers", "geopandas_serializers_by_type"]
 
 geopandas_serializers: list[type[Serializer]] = []
-geopandas_serializers_by_type: SerializerTypeRegistry = {}
+geopandas_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("geopandas") is not None:
-    from pathlib import Path
 
     class GeopandasDataFrameSerializer(Serializer[Any]):
         """Serialize ``geopandas.GeoDataFrame`` via GeoParquet."""

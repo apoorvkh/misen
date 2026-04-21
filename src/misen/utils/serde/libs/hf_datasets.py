@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["hf_datasets_serializers", "hf_datasets_serializers_by_type"]
 
 hf_datasets_serializers: list[type[Serializer]] = []
-hf_datasets_serializers_by_type: SerializerTypeRegistry = {}
+hf_datasets_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("datasets") is not None:
-    from pathlib import Path
 
     class HFDatasetSerializer(Serializer[Any]):
         """Serialize HuggingFace ``Dataset`` via Arrow-based ``save_to_disk``."""

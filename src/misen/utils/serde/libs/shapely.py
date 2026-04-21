@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["shapely_serializers", "shapely_serializers_by_type"]
 
 shapely_serializers: list[type[Serializer]] = []
-shapely_serializers_by_type: SerializerTypeRegistry = {}
+shapely_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("shapely") is not None:
-    from pathlib import Path
 
     class ShapelyGeometrySerializer(Serializer[Any]):
         """Serialize shapely geometries via WKB (OGC standard, compact, lossless)."""

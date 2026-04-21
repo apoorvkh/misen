@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["faiss_serializers", "faiss_serializers_by_type"]
 
 faiss_serializers: list[type[Serializer]] = []
-faiss_serializers_by_type: SerializerTypeRegistry = {}
+faiss_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("faiss") is not None:
-    from pathlib import Path
 
     class FaissIndexSerializer(Serializer[Any]):
         """Serialize FAISS ``Index`` via ``write_index``/``read_index``."""

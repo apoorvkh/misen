@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["scipy_serializers", "scipy_serializers_by_type"]
 
 scipy_serializers: list[type[Serializer]] = []
-scipy_serializers_by_type: SerializerTypeRegistry = {}
+scipy_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("scipy") is not None:
-    from pathlib import Path
 
     class ScipySparseSerializer(Serializer[Any]):
         """Serialize scipy sparse matrices via ``save_npz``/``load_npz``."""

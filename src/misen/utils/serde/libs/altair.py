@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["altair_serializers", "altair_serializers_by_type"]
 
 altair_serializers: list[type[Serializer]] = []
-altair_serializers_by_type: SerializerTypeRegistry = {}
+altair_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("altair") is not None:
-    from pathlib import Path
 
     class AltairChartSerializer(Serializer[Any]):
         """Serialize Altair charts via Vega-Lite JSON (full round-trip)."""

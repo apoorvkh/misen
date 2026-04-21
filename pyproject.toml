@@ -1,6 +1,6 @@
 [project]
 name = "misen"
-version = "0.0.4"
+version = "0.0.5"
 description = "DAG execution engine"
 readme = "README.md"
 requires-python = ">=3.11"

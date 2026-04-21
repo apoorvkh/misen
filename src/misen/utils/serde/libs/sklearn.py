@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["sklearn_serializers", "sklearn_serializers_by_type"]
 
 sklearn_serializers: list[type[Serializer]] = []
-sklearn_serializers_by_type: SerializerTypeRegistry = {}
+sklearn_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("sklearn") is not None and importlib.util.find_spec("joblib") is not None:
-    from pathlib import Path
 
     class SklearnEstimatorSerializer(Serializer[Any]):
         """Serialize scikit-learn estimators via ``joblib``.

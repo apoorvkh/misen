@@ -2,17 +2,15 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["xarray_serializers", "xarray_serializers_by_type"]
 
 xarray_serializers: list[type[Serializer]] = []
-xarray_serializers_by_type: SerializerTypeRegistry = {}
+xarray_serializers_by_type: dict[str, type[Serializer]] = {}
 
 # Require xarray and at least one NetCDF engine.
 if importlib.util.find_spec("xarray") is not None and (
@@ -20,7 +18,6 @@ if importlib.util.find_spec("xarray") is not None and (
     or importlib.util.find_spec("h5netcdf") is not None
     or importlib.util.find_spec("scipy") is not None
 ):
-    from pathlib import Path
 
     class XarrayDatasetSerializer(Serializer[Any]):
         """Serialize ``xarray.Dataset`` via NetCDF4."""

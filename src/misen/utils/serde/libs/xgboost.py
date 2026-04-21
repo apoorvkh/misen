@@ -2,19 +2,19 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import Serializer, SerializerTypeRegistry
+from misen.utils.serde.base import Serializer
 from misen.utils.type_registry import qualified_type_name
 
 __all__ = ["xgboost_serializers", "xgboost_serializers_by_type"]
 
 xgboost_serializers: list[type[Serializer]] = []
-xgboost_serializers_by_type: SerializerTypeRegistry = {}
+xgboost_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("xgboost") is not None:
     import importlib
-    from pathlib import Path
 
     class XGBoostModelSerializer(Serializer[Any]):
         """Serialize XGBoost models via the native UBJSON/JSON format."""

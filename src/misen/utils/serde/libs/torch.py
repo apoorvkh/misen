@@ -1,30 +1,39 @@
-"""Serializers for PyTorch tensors, tensor dicts, and ``nn.Module`` models."""
+"""Torch serializers for v2.
+
+- :class:`TorchTensorSerializer` — a :class:`LeafSerializer` that
+  batches all tensors in a save into a single ``tensors.pt``.  This
+  is the demonstration of the design's main win: a deeply nested dict
+  of tensors (e.g. state_dict of state_dicts) packs into one
+  ``torch.save`` call, matching the v1 flat case and extending it.
+- :class:`TorchModuleSerializer` — a :class:`Serializer` that
+  owns its own subdirectory (escape hatch for anything that doesn't
+  fit the batching model).
+"""
 
 import importlib.util
-from collections import OrderedDict
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import LeafSerializer, Serializer
 
 __all__ = ["torch_serializers", "torch_serializers_by_type"]
 
 torch_serializers: list[type[Serializer]] = []
-torch_serializers_by_type: SerializerTypeRegistry = {}
+torch_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("torch") is not None:
-    from pathlib import Path
 
-    class TorchTensorSerializer(Serializer[Any]):
-        """Serialize a single ``torch.Tensor`` via ``torch.save``.
+    class TorchTensorSerializer(LeafSerializer[Any]):
+        """Leaf serializer for ``torch.Tensor``.
 
-        Loaded with ``torch.load(weights_only=True)`` which restricts pickle
-        execution to a tensor-safe allowlist of globals.  ``.detach().cpu()``
-        on write makes the save portable to CPU-only machines.
+        ``to_payload`` returns a CPU-detached copy so saves are
+        portable.  ``write_batch`` packs all leaves of this kind into a
+        single ``tensors.pt`` file keyed by ``leaf_id``; ``read_batch``
+        opens the file once and returns a ``leaf_id → Tensor`` reader.
         """
+
+        leaf_kind = "torch_tensor"
 
         @staticmethod
         def match(obj: Any) -> bool:
@@ -32,78 +41,39 @@ if importlib.util.find_spec("torch") is not None:
 
             return isinstance(obj, torch.Tensor)
 
-        @staticmethod
-        def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            import torch
-
-            torch.save(obj.detach().cpu(), directory / "data.pt")
-            return {
-                "torch_version": torch.__version__,
-                "dtype": str(obj.dtype),
-                "shape": list(obj.shape),
-            }
+        @classmethod
+        def to_payload(cls, obj: Any) -> Any:
+            return obj.detach().cpu()
 
         @staticmethod
-        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
+        def write_batch(
+            entries: list[tuple[str, Any, Mapping[str, Any]]],
+            directory: Path,
+        ) -> Mapping[str, Any]:
             import torch
 
-            return torch.load(directory / "data.pt", weights_only=True, map_location="cpu")
-
-    class DictOfTensorsSerializer(Serializer[Any]):
-        """Serialize ``dict[str, torch.Tensor]`` / ``OrderedDict[str, torch.Tensor]``.
-
-        Targets state_dicts and flat tensor collections.  Requires all keys
-        to be ``str`` and all values to be ``torch.Tensor`` — mixed dicts
-        fall through to :class:`MsgpackSerializer` (which will then raise
-        :class:`UnserializableTypeError` for the tensor values).
-
-        Uses ``torch.save`` on the whole dict and ``torch.load(weights_only=True)``
-        on load.  Pickle preserves the container type (``dict`` vs ``OrderedDict``)
-        and insertion order natively, so no extra metadata is needed beyond the
-        torch version.
-        """
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            # Strict type match — subclasses like ``defaultdict`` fall through.
-            if type(obj) is not dict and type(obj) is not OrderedDict:
-                return False
-            if not obj:
-                # Empty dict — let MsgpackSerializer handle it (cheaper, no
-                # binary file written for a trivial value).
-                return False
-            if not all(isinstance(k, str) for k in obj):
-                return False
-            import torch
-
-            return all(isinstance(v, torch.Tensor) for v in obj.values())
-
-        @staticmethod
-        def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            import torch
-
-            # Build a cpu-detached copy while preserving container type
-            # (``type(obj)(iterable_of_pairs)`` works for both dict and
-            # OrderedDict).  The container type then rides through pickle.
-            cpu_dict = type(obj)((k, v.detach().cpu()) for k, v in obj.items())
-            torch.save(cpu_dict, directory / "data.pt")
+            bundle = {leaf_id: payload for leaf_id, payload, _ in entries}
+            torch.save(bundle, directory / "tensors.pt")
             return {"torch_version": torch.__version__}
 
         @staticmethod
-        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
+        def read_batch(directory: Path, kind_meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import torch
 
-            return torch.load(directory / "data.pt", weights_only=True, map_location="cpu")
+            bundle = torch.load(directory / "tensors.pt", weights_only=True, map_location="cpu")
+
+            def reader(leaf_id: str) -> Any:
+                return bundle[leaf_id]
+
+            return reader
 
     class TorchModuleSerializer(Serializer[Any]):
-        """Serialize ``torch.nn.Module`` via ``torch.save``.
+        """Directory-owning serializer for ``torch.nn.Module``.
 
-        Uses ``torch.save(model, path)`` which saves the full model including
-        its class structure.  Requires ``weights_only=False`` on load.
-
-        Note: This uses pickle internally.  Serialized models may not load
-        across different PyTorch versions.  The torch version is recorded in
-        metadata for diagnostics.
+        Modules don't fit the leaf-batching model (each module has
+        bespoke structure), so this falls back to the escape hatch:
+        ``write`` writes ``model.pt`` in its own subdir and
+        ``read`` reads it back.
         """
 
         @staticmethod
@@ -125,16 +95,15 @@ if importlib.util.find_spec("torch") is not None:
 
             return torch.load(directory / "model.pt", weights_only=False, map_location="cpu")
 
-    # Order within this list does not affect correctness — the three match
-    # methods are mutually exclusive (Tensor vs. dict-of-Tensor vs. Module),
-    # and single-tensor / Module dispatch goes through the by-type fast
-    # path below anyway.  Order reflects reading convenience only.
-    torch_serializers = [TorchTensorSerializer, DictOfTensorsSerializer, TorchModuleSerializer]
+    # Tensor match must come before Module match? No — they're mutually
+    # exclusive (Tensor isn't an nn.Module and vice versa).  Order within
+    # this list only matters relative to containers (DictSerializer etc.)
+    # which must come before torch so e.g. a state_dict dispatches to
+    # DictSerializer not to a hypothetical dict-of-tensors serializer.
+    torch_serializers = [TorchTensorSerializer, TorchModuleSerializer]
     torch_serializers_by_type = {
         "torch.Tensor": TorchTensorSerializer,
+        # nn.Module and all subclasses dispatch here via the MRO walk in
+        # :class:`TypeDispatchRegistry`.
         "torch.nn.modules.module.Module": TorchModuleSerializer,
-        # NOTE: DictOfTensorsSerializer is intentionally NOT listed here
-        # because ``dict`` / ``OrderedDict`` are registered as volatile_types
-        # on the serde registry — dispatch happens via the linear-scan
-        # ``match`` path so the content check runs every call.
     }

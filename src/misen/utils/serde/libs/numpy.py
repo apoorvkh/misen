@@ -1,27 +1,36 @@
-"""Serializers for numpy arrays, scalars, masked arrays, and arrays-in-dicts."""
+"""Numpy v2 serializers.
+
+- :class:`NumpyArraySerializer` and :class:`NumpyScalarSerializer` are
+  :class:`LeafSerializer` subclasses: all arrays (resp. scalars) in a
+  single save get batched into one ``arrays.npz`` (resp. one shared
+  msgpack blob).  A dict-of-ndarrays — or a dict-of-dict-of-ndarrays —
+  thus packs into one npz regardless of nesting depth, subsuming v1's
+  special-case ``DictOfNdarraysSerializer``.
+
+- :class:`NumpyMaskedArraySerializer` is a :class:`Serializer`
+  because masked arrays carry a sibling mask array; the
+  leaf-batching model doesn't fit.
+"""
 
 import importlib.util
-from collections import OrderedDict
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import LeafSerializer, Serializer
 
 __all__ = ["numpy_serializers", "numpy_serializers_by_type"]
 
 numpy_serializers: list[type[Serializer]] = []
-numpy_serializers_by_type: SerializerTypeRegistry = {}
+numpy_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("numpy") is not None:
-    from pathlib import Path
-
     import msgspec.msgpack
 
-    class NumpyArraySerializer(Serializer[Any]):
-        """Serialize ``numpy.ndarray`` via the stable ``.npy`` format."""
+    class NumpyArraySerializer(LeafSerializer[Any]):
+        """Batched leaf for ``numpy.ndarray`` — one ``arrays.npz`` per save."""
+
+        leaf_kind = "ndarray"
 
         @staticmethod
         def match(obj: Any) -> bool:
@@ -29,23 +38,45 @@ if importlib.util.find_spec("numpy") is not None:
                 return False
             import numpy as np
 
-            return isinstance(obj, np.ndarray)
+            # Strict ``type(obj) is np.ndarray`` — MaskedArray (a subclass)
+            # has its own serializer because ``np.savez`` silently drops
+            # the mask.
+            return type(obj) is np.ndarray
 
         @staticmethod
-        def write(obj: Any, directory: Path) -> Mapping[str, Any]:
+        def write_batch(
+            entries: list[tuple[str, Any, Mapping[str, Any]]],
+            directory: Path,
+        ) -> Mapping[str, Any]:
             import numpy as np
 
-            np.save(directory / "data.npy", obj, allow_pickle=False)
+            bundle = {leaf_id: payload for leaf_id, payload, _ in entries}
+            np.savez(str(directory / "arrays.npz"), **bundle)
             return {"numpy_version": np.__version__}
 
         @staticmethod
-        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
+        def read_batch(directory: Path, kind_meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import numpy as np
 
-            return np.load(directory / "data.npy", allow_pickle=False)
+            npz = np.load(directory / "arrays.npz", allow_pickle=False)
 
-    class NumpyScalarSerializer(Serializer[Any]):
-        """Serialize numpy scalar values (e.g. ``np.float32(1.5)``)."""
+            def reader(leaf_id: str) -> Any:
+                # ``npz[leaf_id]`` returns a view backed by the mmap'd
+                # archive; materialize with ``np.array`` so the reader
+                # caller can close the archive without breaking readers.
+                return np.array(npz[leaf_id])
+
+            return reader
+
+    class NumpyScalarSerializer(LeafSerializer[Any]):
+        """Batched leaf for numpy scalar values (e.g. ``np.float32(1.5)``).
+
+        Stores dtype + python value for each scalar in a shared msgpack
+        blob; dtype is reconstructed on read so the original numpy type
+        round-trips.
+        """
+
+        leaf_kind = "numpy_scalar"
 
         @staticmethod
         def match(obj: Any) -> bool:
@@ -55,24 +86,40 @@ if importlib.util.find_spec("numpy") is not None:
 
             return isinstance(obj, np.generic)
 
+        @classmethod
+        def to_payload(cls, obj: Any) -> Any:
+            return {"dtype": obj.dtype.str, "value": obj.item()}
+
         @staticmethod
-        def write(obj: Any, directory: Path) -> Mapping[str, Any]:
+        def write_batch(
+            entries: list[tuple[str, Any, Mapping[str, Any]]],
+            directory: Path,
+        ) -> Mapping[str, Any]:
             import numpy as np
 
-            data = {"dtype": obj.dtype.str, "value": obj.item()}
-            (directory / "data.msgpack").write_bytes(msgspec.msgpack.encode(data))
+            blob = {leaf_id: payload for leaf_id, payload, _ in entries}
+            (directory / "scalars.msgpack").write_bytes(msgspec.msgpack.encode(blob))
             return {"numpy_version": np.__version__}
 
         @staticmethod
-        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
+        def read_batch(directory: Path, kind_meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import numpy as np
 
-            raw = msgspec.msgpack.decode((directory / "data.msgpack").read_bytes())
-            dtype = np.dtype(raw["dtype"])
-            return dtype.type(raw["value"])
+            blob = msgspec.msgpack.decode((directory / "scalars.msgpack").read_bytes())
+
+            def reader(leaf_id: str) -> Any:
+                entry = blob[leaf_id]
+                return np.dtype(entry["dtype"]).type(entry["value"])
+
+            return reader
 
     class NumpyMaskedArraySerializer(Serializer[Any]):
-        """Serialize ``numpy.ma.MaskedArray`` via separate data and mask ``.npy`` files."""
+        """Directory serializer for ``numpy.ma.MaskedArray``.
+
+        Writes ``data.npy``, ``mask.npy``, and a ``fill_value`` in the
+        subdir meta.  MaskedArray subclasses ndarray but ``np.savez``
+        drops the mask, so the leaf-batching path isn't safe here.
+        """
 
         @staticmethod
         def match(obj: Any) -> bool:
@@ -98,77 +145,33 @@ if importlib.util.find_spec("numpy") is not None:
 
             data = np.load(directory / "data.npy", allow_pickle=False)
             mask = np.load(directory / "mask.npy", allow_pickle=False)
-            fill_value = meta.get("fill_value")
-            return np.ma.MaskedArray(data, mask=mask, fill_value=fill_value)
+            return np.ma.MaskedArray(data, mask=mask, fill_value=meta.get("fill_value"))
 
-    class DictOfNdarraysSerializer(Serializer[Any]):
-        """Serialize ``dict[str, np.ndarray]`` / ``OrderedDict[str, np.ndarray]``.
-
-        Writes all arrays into a single ``.npz`` archive via ``np.savez``.
-        ``np.savez`` requires string keys (they become filenames inside the
-        archive), which matches the constraint of this serializer.  No extra
-        dependency — ``.npz`` is numpy-native.
-
-        Mixed dicts, non-str keys, empty dicts, and dict subclasses fall
-        through to the next serializer (typically :class:`MsgpackSerializer`).
-        """
-
-        @staticmethod
-        def match(obj: Any) -> bool:
-            if type(obj) is not dict and type(obj) is not OrderedDict:
-                return False
-            if not obj:
-                return False
-            if not all(isinstance(k, str) for k in obj):
-                return False
-            import numpy as np
-
-            # Plain ndarrays only — MaskedArray is a subclass but ``np.savez``
-            # silently drops the mask, so refuse to match and let the caller
-            # hit ``UnserializableTypeError`` from the msgpack fallback.
-            return all(type(v) is np.ndarray for v in obj.values())
-
-        @staticmethod
-        def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            import numpy as np
-
-            # ``np.savez`` appends ``.npz`` if missing; writing to
-            # ``data.npz`` already ends in ``.npz`` so no double suffix.
-            np.savez(str(directory / "data.npz"), **obj)
-            return {
-                "numpy_version": np.__version__,
-                "container": "OrderedDict" if isinstance(obj, OrderedDict) else "dict",
-            }
-
-        @staticmethod
-        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:
-            import numpy as np
-
-            with np.load(directory / "data.npz", allow_pickle=False) as npz:
-                # ``npz.files`` preserves the order arrays were saved in,
-                # which matches the insertion order of the original dict.
-                loaded = {k: npz[k] for k in npz.files}
-            if meta.get("container") == "OrderedDict":
-                return OrderedDict(loaded)
-            return loaded
-
-    # ``NumpyMaskedArraySerializer`` must precede ``NumpyArraySerializer`` —
-    # MaskedArray is a subclass of ndarray, so the linear-scan fallback
-    # picks whichever matches first.  ``DictOfNdarraysSerializer`` order
-    # doesn't matter (its match is disjoint from the other three), and it
-    # must precede ``MsgpackSerializer`` — enforced by ``numpy_serializers``
-    # appearing before ``stdlib_serializers`` in ``libs/__init__.py``.
+    # ``NumpyMaskedArraySerializer`` must come before ``NumpyArraySerializer``
+    # — MaskedArray is an ndarray subclass, so linear-scan dispatch picks
+    # whichever matches first.  (Strict ``type(obj) is np.ndarray`` on the
+    # array serializer's match makes this ordering defensive rather than
+    # required, but the convention is preserved.)
     numpy_serializers = [
         NumpyMaskedArraySerializer,
         NumpyArraySerializer,
         NumpyScalarSerializer,
-        DictOfNdarraysSerializer,
     ]
+
+    # Build the by-type fast path from the *actual* qualified names of
+    # the numpy classes.  Historically v1 hard-coded
+    # ``"numpy.ma.core.MaskedArray"`` but modern numpy reports
+    # ``"numpy.ma.MaskedArray"`` for ``__module__.__qualname__`` — a
+    # mismatch there silently routes MaskedArray to
+    # :class:`NumpyArraySerializer` via the MRO walk (``np.ndarray``
+    # is the next base) and drops the mask.  Importing the classes
+    # here and letting :func:`qualified_type_name` compute the names
+    # keeps this robust across numpy versions.
+    import numpy as _np
+    from misen.utils.type_registry import qualified_type_name as _qname
+
     numpy_serializers_by_type = {
-        "numpy.ma.core.MaskedArray": NumpyMaskedArraySerializer,
-        "numpy.ndarray": NumpyArraySerializer,
-        "numpy.generic": NumpyScalarSerializer,
-        # NOTE: DictOfNdarraysSerializer is intentionally NOT listed here —
-        # dicts/OrderedDicts are ``volatile_types`` on the serde registry
-        # and dispatch through the linear-scan ``match`` path.
+        _qname(_np.ma.MaskedArray): NumpyMaskedArraySerializer,
+        _qname(_np.ndarray): NumpyArraySerializer,
+        _qname(_np.generic): NumpyScalarSerializer,
     }

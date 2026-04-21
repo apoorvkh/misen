@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["pandas_serializers", "pandas_serializers_by_type"]
 
 pandas_serializers: list[type[Serializer]] = []
-pandas_serializers_by_type: SerializerTypeRegistry = {}
+pandas_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("pandas") is not None:
-    from pathlib import Path
 
     class PandasDataFrameSerializer(Serializer[Any]):
         """Serialize ``pandas.DataFrame`` via Parquet."""

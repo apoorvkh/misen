@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["transformers_serializers", "transformers_serializers_by_type"]
 
 transformers_serializers: list[type[Serializer]] = []
-transformers_serializers_by_type: SerializerTypeRegistry = {}
+transformers_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("transformers") is not None:
-    from pathlib import Path
 
     class TransformersModelSerializer(Serializer[Any]):
         """Serialize HuggingFace ``PreTrainedModel`` via ``save_pretrained``.

@@ -1,45 +1,58 @@
-"""Serializer for msgspec Struct instances."""
+"""Recursive serializer for ``msgspec.Struct`` instances.
 
+Walks ``__struct_fields__`` and dispatches each field value via
+``ctx.encode``, so struct fields holding types outside msgspec's
+native set (tensors, ndarrays, nested Structs with such fields)
+round-trip through their own serializers — v1's
+``msgspec.msgpack.encode`` path raises on anything msgspec itself
+can't encode.
+
+Limitation: tagged unions and custom ``encode_hook``/``dec_hook`` are
+not exercised through this path.  Structs that rely on those should
+keep using v1 semantics (or the user can register a more specific
+serializer with higher priority).
+"""
+
+import importlib
 import importlib.util
-from collections.abc import Mapping
 from typing import Any
 
-from misen.utils.serde import Serializer, SerializerTypeRegistry
+from misen.utils.serde.base import BaseSerializer, Container, DecodeCtx, EncodeCtx, Node
 from misen.utils.type_registry import qualified_type_name
 
 __all__ = ["msgspec_struct_serializers", "msgspec_struct_serializers_by_type"]
 
-msgspec_struct_serializers: list[type[Serializer]] = []
-msgspec_struct_serializers_by_type: SerializerTypeRegistry = {}
+msgspec_struct_serializers: list[type[BaseSerializer]] = []
+msgspec_struct_serializers_by_type: dict[str, type[BaseSerializer]] = {}
+
 
 if importlib.util.find_spec("msgspec") is not None:
-    import importlib
-    from pathlib import Path
-
     import msgspec
-    import msgspec.msgpack
 
-    class MsgspecStructSerializer(Serializer[Any]):
-        """Serialize ``msgspec.Struct`` via msgspec's own msgpack codec."""
+    class MsgspecStructSerializer(BaseSerializer[Any]):
+        """Recursive serializer for msgspec Structs — walks declared fields."""
 
         @staticmethod
         def match(obj: Any) -> bool:
             return isinstance(obj, msgspec.Struct)
 
-        @staticmethod
-        def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            data = msgspec.msgpack.encode(obj)
-            (directory / "data.msgpack").write_bytes(data)
-            return {"struct_type": qualified_type_name(type(obj))}
+        @classmethod
+        def encode(cls, obj: Any, ctx: EncodeCtx) -> Node:
+            children = {name: ctx.encode(getattr(obj, name)) for name in type(obj).__struct_fields__}
+            return Container(
+                serializer=qualified_type_name(cls),
+                children=children,
+                meta={"struct_type": qualified_type_name(type(obj))},
+            )
 
-        @staticmethod
-        def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:
-            module_name, _, attr_name = meta["struct_type"].rpartition(".")
+        @classmethod
+        def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
+            assert isinstance(node, Container)
+            module_name, _, attr_name = node.meta["struct_type"].rpartition(".")
             module = importlib.import_module(module_name)
-            cls = getattr(module, attr_name)
-
-            data = (directory / "data.msgpack").read_bytes()
-            return msgspec.msgpack.decode(data, type=cls)
+            struct_cls = getattr(module, attr_name)
+            field_values = {k: ctx.decode(v) for k, v in node.children.items()}
+            return struct_cls(**field_values)
 
     msgspec_struct_serializers = [MsgspecStructSerializer]
     msgspec_struct_serializers_by_type = {"msgspec.Struct": MsgspecStructSerializer}

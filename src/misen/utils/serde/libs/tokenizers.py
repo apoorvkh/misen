@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["tokenizers_serializers", "tokenizers_serializers_by_type"]
 
 tokenizers_serializers: list[type[Serializer]] = []
-tokenizers_serializers_by_type: SerializerTypeRegistry = {}
+tokenizers_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("tokenizers") is not None:
-    from pathlib import Path
 
     class TokenizersSerializer(Serializer[Any]):
         """Serialize ``tokenizers.Tokenizer`` via JSON string (full round-trip)."""

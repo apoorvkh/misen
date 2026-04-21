@@ -1,89 +1,384 @@
-"""Base :class:`Serializer` class and associated type aliases.
+"""Node types, serializer base classes, and encode/decode contexts.
 
-Kept free of registry and ``libs/`` dependencies so individual
-serializer modules under ``libs/`` can subclass :class:`Serializer`
-without triggering imports of every serializer in the project.
+The design splits a serializer's job into two phases:
 
-The class itself exposes only the ``write`` / ``read`` / ``match``
-hooks for subclasses to implement. The public ``save`` / ``load``
-entry points — which handle ``serde_meta.json`` and auto-dispatch —
-live in :mod:`misen.utils.serde.registry` and are re-exported from
-:mod:`misen.utils.serde`.
+1. **Encode** — walks the object and returns a :class:`Node` tree.
+   Leaves hold their payloads in the :class:`EncodeCtx`; containers
+   recurse on their children.
+2. **Commit** — after the walk, :func:`~misen.utils.serde.save` groups
+   leaves by ``leaf_kind`` and asks each owning serializer to write
+   the whole group in a single batched call (e.g. one ``torch.save``
+   of all tensors in the tree).  A single ``manifest.json`` records
+   the tree.
+
+Serializer shapes, by user audience:
+
+- :class:`Serializer` — **most users want this**.  Subclass and
+  implement :meth:`~Serializer.write` / :meth:`~Serializer.read` to
+  persist an object into a directory.  This matches the classic "save
+  files here, read them back" mental model.
+- :class:`LeafSerializer` — advanced.  For types where saving many
+  instances together in one file is a real win (tensors, ndarrays).
+- :class:`BaseSerializer` — internal.  Subclass directly only when
+  writing a recursion-aware container serializer (e.g. a custom
+  mapping type whose children should dispatch independently).  The
+  framework's ``DictSerializer`` and ``ListSerializer`` in
+  ``libs/stdlib.py`` are examples.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
-__all__ = ["Serializer", "SerializerTypeRegistry", "UnserializableTypeError"]
+from misen.exceptions import SerializationError
+from misen.utils.type_registry import qualified_type_name
+
+__all__ = [
+    "BaseSerializer",
+    "Container",
+    "DecodeCtx",
+    "DirectoryLeaf",
+    "EncodeCtx",
+    "Leaf",
+    "LeafSerializer",
+    "Node",
+    "Serializer",
+]
 
 T = TypeVar("T")
 
 
-class UnserializableTypeError(TypeError):
-    """Raised when a serializer is asked to encode a value it cannot represent.
+# ---------------------------------------------------------------------------
+# Node types
+# ---------------------------------------------------------------------------
 
-    This wraps the underlying encoder error (typically ``TypeError`` or
-    ``OverflowError`` from ``msgspec``) with a clear, domain-specific message
-    that names the offending value's type.
+
+@dataclass(frozen=True)
+class Leaf:
+    """A terminal node.  Its payload is batched with other leaves of the same kind.
+
+    The payload itself lives in :class:`EncodeCtx` — the :class:`Leaf`
+    only carries the ``leaf_id`` needed to retrieve it from the batched
+    on-disk blob.  ``kind`` selects which serializer's
+    ``write_batch``/``read_batch`` pair owns that blob.
     """
 
+    serializer: str  # qualified name of the producing serializer class
+    kind: str  # leaf kind, used to group/batch (e.g. "torch_tensor", "msgpack")
+    leaf_id: str  # unique id within this save
+    meta: Mapping[str, Any] = field(default_factory=dict)
 
-class Serializer(ABC, Generic[T]):
-    """Serialize/deserialize an object to/from a directory.
 
-    Subclasses implement three hooks:
+@dataclass(frozen=True)
+class Container:
+    """A structural node whose children are themselves :class:`Node` objects.
 
-    - :meth:`write` — write data files into ``directory``. May return a
-      mapping of extra fields to record in ``serde_meta.json`` alongside
-      the serializer name (e.g. a ``format_version`` to branch on when
-      loading), or ``None`` if no extras are needed.
-    - :meth:`read` — read data files from ``directory`` and reconstruct
-      the object, given the full ``serde_meta.json`` contents.
-    - :meth:`match` (optional) — return ``True`` if this serializer can
-      handle a given object, used by :func:`misen.utils.serde.save` to
-      pick a serializer when no explicit class is provided.
-
-    Subclasses never call :func:`misen.utils.serde.save` or read/write
-    ``serde_meta.json`` themselves — that is the module-level save/load's
-    job. The class does not expose ``save``/``load`` directly.
+    ``children`` is either a :class:`Mapping` (for keyed containers like
+    ``dict``) or a :class:`Sequence` (for indexed containers like
+    ``list``).  The owning serializer decides the shape and reconstructs
+    the correct Python type on decode.
     """
+
+    serializer: str
+    children: Any  # Mapping[str, Node] or Sequence[Node]
+    meta: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DirectoryLeaf:
+    """A serializer owns its own subdirectory.
+
+    Produced by :class:`Serializer` (and any subclass that overrides
+    :meth:`~Serializer.write` / :meth:`~Serializer.read`).
+    """
+
+    serializer: str
+    subdir: str  # subdirectory name under ``dirs/`` in the root
+    meta: Mapping[str, Any] = field(default_factory=dict)
+
+
+Node = Leaf | Container | DirectoryLeaf
+
+
+# ---------------------------------------------------------------------------
+# Serializer base classes
+# ---------------------------------------------------------------------------
+
+
+class BaseSerializer(ABC, Generic[T]):
+    """Internal abstract base for all serializers.
+
+    External users almost always want :class:`Serializer` (the
+    user-facing ``write``/``read`` subclass) or :class:`LeafSerializer`
+    (advanced batching).  Subclass :class:`BaseSerializer` directly
+    only when writing a recursion-aware container — implement
+    :meth:`encode` (producing a :class:`Container`) and :meth:`decode`.
+    """
+
+    # Leaf-kind owners set this to the kind their ``write_batch`` handles.
+    leaf_kind: ClassVar[str | None] = None
 
     @staticmethod
     def match(obj: Any) -> bool:  # noqa: ARG004
-        """Return whether this serializer can handle *obj*.
-
-        Consulted by :func:`misen.utils.serde.save` when no explicit
-        ``ser_cls`` is provided and the type-name lookup does not find
-        a match. The default returns ``False``, so user-defined
-        serializers that only implement :meth:`write`/:meth:`read` are
-        never selected by auto-dispatch — callers must opt in by
-        passing ``ser_cls=...`` or by overriding :meth:`match`.
-        """
+        """Return ``True`` if this serializer can handle *obj*."""
         return False
 
-    @staticmethod
+    @classmethod
     @abstractmethod
-    def write(obj: T, directory: Path) -> Mapping[str, Any] | None:
-        """Write data files for *obj* into *directory*.
+    def encode(cls, obj: T, ctx: "EncodeCtx") -> Node:
+        """Walk *obj* and return a :class:`Node` describing it."""
 
-        Return a mapping of extra fields to record in ``serde_meta.json``
-        alongside the serializer name, or ``None`` if no extras are
-        needed. Do not write ``serde_meta.json`` here —
-        :func:`misen.utils.serde.save` handles that after this returns.
-        """
+    @classmethod
+    @abstractmethod
+    def decode(cls, node: Node, ctx: "DecodeCtx") -> T:
+        """Reconstruct the object described by *node*."""
+
+    # ----- Leaf-kind owners override these -----
 
     @staticmethod
-    @abstractmethod
-    def read(directory: Path, *, meta: Mapping[str, Any]) -> T:
-        """Read data files from *directory* and reconstruct the object.
+    def write_batch(
+        entries: list[tuple[str, Any, Mapping[str, Any]]],
+        directory: Path,
+    ) -> Mapping[str, Any]:
+        """Write all leaves of this kind to *directory* as one blob.
 
-        *meta* is the full ``serde_meta.json`` contents, including the
-        ``serializer`` name and any extras returned by :meth:`write`.
-        Subclasses that discriminate between on-disk formats should
-        record a version key from :meth:`write` and branch on it here.
+        ``entries`` is a list of ``(leaf_id, payload, per_leaf_meta)``.
+        Return a mapping of kind-scoped metadata to record in the
+        manifest (passed back to :meth:`read_batch`).
         """
+        raise NotImplementedError
+
+    @staticmethod
+    def read_batch(
+        directory: Path,
+        kind_meta: Mapping[str, Any],
+    ) -> Callable[[str], Any]:
+        """Open the batched blob and return a ``leaf_id → payload`` reader."""
+        raise NotImplementedError
+
+    # ----- Directory-owning serializers override these -----
+
+    @staticmethod
+    def write(obj: Any, directory: Path) -> Mapping[str, Any] | None:
+        """Write *obj*'s files into *directory*.
+
+        Return a mapping of metadata to record alongside this
+        directory in the manifest (passed back to :meth:`read` as
+        ``meta``), or ``None`` if no extras are needed.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:
+        """Reconstruct the object from files in *directory*.
+
+        ``meta`` is whatever :meth:`write` returned for this directory.
+        """
+        raise NotImplementedError
 
 
-SerializerTypeRegistry: TypeAlias = dict[str, type[Serializer]]
+class LeafSerializer(BaseSerializer[T]):
+    """Advanced: batch many instances of one kind into a single blob.
+
+    Subclasses set :attr:`leaf_kind` and implement
+    :meth:`~BaseSerializer.write_batch` / :meth:`~BaseSerializer.read_batch`.
+    Optionally override :meth:`to_payload` (to transform the object
+    before batching — e.g. ``.detach().cpu()`` for tensors) or
+    :meth:`to_meta` (for per-leaf structural metadata).
+
+    Use only when batching is a real win (arrays/tensors).  For custom
+    types, start with :class:`Serializer`.
+    """
+
+    # Subclasses MUST set this — the empty string acts as a sentinel
+    # so a missing override fails loudly at dispatch time.
+    leaf_kind: ClassVar[str] = ""
+
+    @classmethod
+    def to_payload(cls, obj: T) -> Any:
+        """Return the value to batch — default is the object itself."""
+        return obj
+
+    @classmethod
+    def to_meta(cls, obj: T) -> Mapping[str, Any]:  # noqa: ARG003
+        """Return per-leaf metadata to record alongside the leaf id."""
+        return {}
+
+    @classmethod
+    def encode(cls, obj: T, ctx: "EncodeCtx") -> Node:
+        return ctx.add_leaf(cls, cls.leaf_kind, cls.to_payload(obj), cls.to_meta(obj))
+
+    @classmethod
+    def decode(cls, node: Node, ctx: "DecodeCtx") -> T:
+        assert isinstance(node, Leaf)
+        return ctx.load_leaf(cls.leaf_kind, node.leaf_id)
+
+
+class Serializer(BaseSerializer[T]):
+    """User-facing default: save an object to a directory, read it back.
+
+    Subclass and implement :meth:`~BaseSerializer.write` and
+    :meth:`~BaseSerializer.read`.  The framework hands each call a
+    fresh subdirectory and records whatever ``write`` returns in the
+    manifest, passing it back to ``read`` as ``meta``.
+
+    Example::
+
+        class PickleSerializer(Serializer[Any]):
+            @staticmethod
+            def match(obj):
+                return True  # catch-all for this demo
+
+            @staticmethod
+            def write(obj, directory):
+                import pickle
+                (directory / "data.pkl").write_bytes(pickle.dumps(obj))
+                return None
+
+            @staticmethod
+            def read(directory, *, meta):
+                import pickle
+                return pickle.loads((directory / "data.pkl").read_bytes())
+    """
+
+    @classmethod
+    def encode(cls, obj: T, ctx: "EncodeCtx") -> Node:
+        return ctx.add_directory_leaf(cls, obj)
+
+    @classmethod
+    def decode(cls, node: Node, ctx: "DecodeCtx") -> T:
+        assert isinstance(node, DirectoryLeaf)
+        return ctx.read_directory_leaf(cls, node)
+
+
+# ---------------------------------------------------------------------------
+# Encode/decode contexts
+# ---------------------------------------------------------------------------
+
+
+class EncodeCtx:
+    """State for one encode walk.
+
+    Collects leaves and directory-leaves as the recursion proceeds.
+    Memoizes by ``id(obj)`` so shared objects get a single leaf id (and
+    thus are written once + decoded as the same Python object).
+    """
+
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
+        # Memo keyed on ``id(obj)`` — the user's reference to the root
+        # object keeps every child alive for the whole walk, so no need
+        # to retain a separate strong-ref list against id recycling.
+        self._memo: dict[int, Node] = {}
+        self._leaves: dict[str, list[tuple[str, Any, Mapping[str, Any]]]] = {}
+        self._leaf_owner: dict[str, type[BaseSerializer]] = {}
+        self._dir_leaves: list[tuple[type[BaseSerializer], str, Any]] = []
+        self._counter = 0
+
+    def _next_id(self, prefix: str) -> str:
+        self._counter += 1
+        return f"{prefix}{self._counter}"
+
+    def encode(self, obj: Any) -> Node:
+        """Dispatch *obj* through the registry and return its :class:`Node`."""
+        oid = id(obj)
+        if oid in self._memo:
+            return self._memo[oid]
+        ser = self._registry.lookup(obj)
+        if ser is None:
+            msg = f"No serializer registered for type {qualified_type_name(type(obj))!r}."
+            raise SerializationError(msg)
+        node = ser.encode(obj, self)
+        self._memo[oid] = node
+        return node
+
+    def add_leaf(
+        self,
+        owner: type[BaseSerializer],
+        kind: str,
+        payload: Any,
+        meta: Mapping[str, Any] | None = None,
+    ) -> Leaf:
+        """Register a leaf and return its :class:`Leaf` node."""
+        leaf_id = self._next_id("L")
+        meta_dict = dict(meta or {})
+        self._leaves.setdefault(kind, []).append((leaf_id, payload, meta_dict))
+        self._leaf_owner[kind] = owner
+        return Leaf(serializer=qualified_type_name(owner), kind=kind, leaf_id=leaf_id, meta=meta_dict)
+
+    def add_directory_leaf(
+        self,
+        owner: type[BaseSerializer],
+        payload: Any,
+        meta: Mapping[str, Any] | None = None,
+    ) -> DirectoryLeaf:
+        """Register a directory-owning leaf and return its :class:`DirectoryLeaf`."""
+        subdir = self._next_id("D")
+        self._dir_leaves.append((owner, subdir, payload))
+        return DirectoryLeaf(serializer=qualified_type_name(owner), subdir=subdir, meta=dict(meta or {}))
+
+    # Accessors used by registry.save during the commit phase.
+
+    @property
+    def leaves_by_kind(self) -> Mapping[str, list[tuple[str, Any, Mapping[str, Any]]]]:
+        return self._leaves
+
+    @property
+    def leaf_owners(self) -> Mapping[str, type[BaseSerializer]]:
+        return self._leaf_owner
+
+    @property
+    def directory_leaves(self) -> list[tuple[type[BaseSerializer], str, Any]]:
+        return self._dir_leaves
+
+
+class DecodeCtx:
+    """State for one decode walk.
+
+    Caches leaf payloads by ``leaf_id`` so a shared leaf referenced
+    twice in the tree decodes to the same Python object.
+    """
+
+    def __init__(self, registry: Any, root_directory: Path, manifest: Mapping[str, Any]) -> None:
+        self._registry = registry
+        self._root = root_directory
+        self._manifest = manifest
+        self._leaf_readers: dict[str, Callable[[str], Any]] = {}
+        self._leaf_cache: dict[str, Any] = {}
+
+    def decode(self, node: Node) -> Any:
+        """Reconstruct the object described by *node*."""
+        ser = self._registry.by_name(node.serializer)
+        return ser.decode(node, self)
+
+    def load_leaf(self, kind: str, leaf_id: str) -> Any:
+        """Fetch a leaf payload, opening the batched blob lazily + caching."""
+        if leaf_id in self._leaf_cache:
+            return self._leaf_cache[leaf_id]
+        reader = self._leaf_readers.get(kind)
+        if reader is None:
+            owner_name = self._manifest["leaves"][kind]["serializer"]
+            owner = self._registry.by_name(owner_name)
+            kind_meta = self._manifest["leaves"][kind].get("meta", {})
+            blob_dir = self._root / "leaves" / kind
+            reader = owner.read_batch(blob_dir, kind_meta)
+            self._leaf_readers[kind] = reader
+        value = reader(leaf_id)
+        self._leaf_cache[leaf_id] = value
+        return value
+
+    def read_directory_leaf(self, owner: type[BaseSerializer], node: DirectoryLeaf) -> Any:
+        """Invoke a directory-owning serializer on its subdir.
+
+        Meta seen by :meth:`~BaseSerializer.read` merges (a) the
+        :class:`DirectoryLeaf`'s node-level meta set at encode time with
+        (b) the subdir-scoped meta returned by
+        :meth:`~BaseSerializer.write` and recorded in the manifest's
+        ``dirs`` section.  Subdir meta wins on key collisions because it
+        represents what was actually written to disk.
+        """
+        dirs_entry = self._manifest.get("dirs", {}).get(node.subdir, {})
+        merged_meta = {**node.meta, **dirs_entry.get("meta", {})}
+        return owner.read(self._root / "dirs" / node.subdir, meta=merged_meta)

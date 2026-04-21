@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["plotly_serializers", "plotly_serializers_by_type"]
 
 plotly_serializers: list[type[Serializer]] = []
-plotly_serializers_by_type: SerializerTypeRegistry = {}
+plotly_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("plotly") is not None:
-    from pathlib import Path
 
     class PlotlyFigureSerializer(Serializer[Any]):
         """Serialize ``plotly.graph_objects.Figure`` via JSON (full round-trip)."""

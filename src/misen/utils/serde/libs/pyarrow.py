@@ -2,20 +2,17 @@
 
 import importlib.util
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from misen.utils.serde import (
-    Serializer,
-    SerializerTypeRegistry,
-)
+from misen.utils.serde.base import Serializer
 
 __all__ = ["pyarrow_serializers", "pyarrow_serializers_by_type"]
 
 pyarrow_serializers: list[type[Serializer]] = []
-pyarrow_serializers_by_type: SerializerTypeRegistry = {}
+pyarrow_serializers_by_type: dict[str, type[Serializer]] = {}
 
 if importlib.util.find_spec("pyarrow") is not None:
-    from pathlib import Path
 
     class PyArrowTableSerializer(Serializer[Any]):
         """Serialize ``pyarrow.Table`` via Parquet."""
