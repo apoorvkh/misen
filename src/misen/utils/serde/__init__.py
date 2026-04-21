@@ -9,7 +9,6 @@ Public API:
   reads ``manifest.json`` and dispatches to whichever serializer wrote
   the directory, so the caller never needs the original value's type.
   An explicit ``ser_cls`` may be passed to override the on-disk record.
-- :func:`save_zip` / :func:`load_zip` — single-file zip variants.
 
 Subclassing for custom types:
 
@@ -33,14 +32,7 @@ from misen.utils.serde.base import (
     Node,
     Serializer,
 )
-from misen.utils.serde.registry import (
-    MANIFEST_FILENAME,
-    Registry,
-    load,
-    load_zip,
-    save,
-    save_zip,
-)
+from misen.utils.serde.registry import MANIFEST_FILENAME, Registry, load, save
 
 __all__ = [
     "MANIFEST_FILENAME",
@@ -56,7 +48,5 @@ __all__ = [
     "SerializationError",
     "Serializer",
     "load",
-    "load_zip",
     "save",
-    "save_zip",
 ]

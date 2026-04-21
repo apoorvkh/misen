@@ -15,8 +15,6 @@ The whole tree and the per-kind metadata are recorded in a single
 """
 
 import json
-import tempfile
-import zipfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -33,7 +31,7 @@ from misen.utils.serde.base import (
 )
 from misen.utils.type_registry import TypeDispatchRegistry, qualified_type_name
 
-__all__ = ["MANIFEST_FILENAME", "Registry", "load", "load_zip", "save", "save_zip"]
+__all__ = ["MANIFEST_FILENAME", "Registry", "load", "save"]
 
 MANIFEST_FILENAME = "manifest.json"
 _MANIFEST_VERSION = 1
@@ -267,58 +265,3 @@ def load(
     if ser_cls is not None:
         return ser_cls.decode(root_node, ctx)
     return ctx.decode(root_node)
-
-
-# ---------------------------------------------------------------------------
-# Single-file (zip) wrappers
-# ---------------------------------------------------------------------------
-
-
-def save_zip(
-    obj: Any,
-    zip_path: Path,
-    *,
-    registry: Registry | None = None,
-    compression: int = zipfile.ZIP_STORED,
-) -> None:
-    """Serialize *obj* into a single zip file at *zip_path*.
-
-    Writes the usual directory layout to a temporary directory, then
-    packs it into a zip.  The zip mirrors the directory structure —
-    ``manifest.json`` at the root, ``leaves/<kind>/...`` and
-    ``dirs/<id>/...`` subpaths — so an archive can be inspected by any
-    unzip tool.
-
-    Args:
-        obj: Value to serialize.
-        zip_path: Destination ``.zip`` file path (overwrites if present).
-        registry: Optional custom serializer registry.
-        compression: :mod:`zipfile` compression constant.  Defaults to
-            :data:`zipfile.ZIP_STORED` — tensor/array blobs are already
-            dense binary and barely compress, so the default skips the
-            overhead.  Pass :data:`zipfile.ZIP_DEFLATED` to squeeze the
-            manifest + msgpack bits.
-    """
-    zip_path = Path(zip_path)
-    with tempfile.TemporaryDirectory() as staging_str:
-        staging = Path(staging_str)
-        save(obj, staging, registry=registry)
-        with zipfile.ZipFile(zip_path, "w", compression=compression) as zf:
-            for p in staging.rglob("*"):
-                if p.is_file():
-                    zf.write(p, arcname=p.relative_to(staging).as_posix())
-
-
-def load_zip(zip_path: Path, *, registry: Registry | None = None) -> Any:
-    """Deserialize whatever was stored in the zip at *zip_path* by :func:`save_zip`.
-
-    Extracts to a temp directory and reads as if via :func:`load`.  Any
-    zip written by :func:`save_zip` (or produced by zipping a
-    :func:`save` directory) works.
-    """
-    zip_path = Path(zip_path)
-    with tempfile.TemporaryDirectory() as staging_str:
-        staging = Path(staging_str)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(staging)
-        return load(staging, registry=registry)
