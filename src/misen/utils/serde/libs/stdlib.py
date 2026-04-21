@@ -281,7 +281,14 @@ _MSGPACK_NATIVE_KEY_TYPES: frozenset[type] = frozenset({
 
 
 def _is_msgpack_native_key(key: Any) -> bool:
-    return type(key) in _MSGPACK_NATIVE_KEY_TYPES
+    t = type(key)
+    if t in _MSGPACK_NATIVE_KEY_TYPES:
+        return True
+    # Tuples-as-keys are supported by msgspec as long as each element
+    # is itself a native key type (recursively).
+    if t is tuple:
+        return all(_is_msgpack_native_key(e) for e in key)
+    return False
 
 
 def _is_msgpack_native(obj: Any, _seen: set[int] | None = None) -> bool:
@@ -447,8 +454,19 @@ class MsgpackLeafSerializer(LeafSerializer[Any]):
         entries: list[tuple[str, Any, Mapping[str, Any]]],
         directory: Path,
     ) -> Mapping[str, Any]:
-        blob = {leaf_id: _encode_tagged(payload) for leaf_id, payload, _ in entries}
-        data = msgspec.msgpack.encode(blob)
+        # Wrap msgspec's raw ``TypeError``/``OverflowError`` in the
+        # package-level :class:`SerializationError` so callers can catch
+        # one thing.  Common triggers: integers outside msgspec's
+        # ``[-2**63, 2**64-1]`` range, builtin subclasses the predicate
+        # let through via ``isinstance``, unpicklable objects.
+        from misen.exceptions import SerializationError
+
+        try:
+            blob = {leaf_id: _encode_tagged(payload) for leaf_id, payload, _ in entries}
+            data = msgspec.msgpack.encode(blob)
+        except (TypeError, OverflowError) as exc:
+            msg = f"Cannot encode value for msgpack batch: {exc}"
+            raise SerializationError(msg) from exc
         (directory / "data.msgpack").write_bytes(data)
         return {}
 

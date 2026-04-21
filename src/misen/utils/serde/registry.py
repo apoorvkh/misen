@@ -260,6 +260,14 @@ def load(
         msg = f"No {MANIFEST_FILENAME} found in {directory}"
         raise SerializationError(msg) from None
 
+    version = manifest.get("version")
+    if version != _MANIFEST_VERSION:
+        msg = (
+            f"Unsupported {MANIFEST_FILENAME} version {version!r} in {directory} "
+            f"(this build supports version {_MANIFEST_VERSION})."
+        )
+        raise SerializationError(msg)
+
     ctx = DecodeCtx(registry, directory, manifest)
     root_node = _node_from_json(manifest["root"])
     if ser_cls is not None:
