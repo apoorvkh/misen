@@ -233,6 +233,18 @@ Project-wide variables go in `.env` (commit it); machine-local overrides and sec
 
 If your project needs native libraries (CUDA toolkit, compilers, MKL), drop a `pixi.lock` in the project root and `misen` will materialize a matching conda environment alongside your uv venv when taking execution snapshots. PyPI packages stay in `pyproject.toml`; only native/system dependencies belong in `pixi.toml`.
 
+## Static files
+
+Put non-Python files (configs, templates, data) *inside* the package — e.g. `src/my_project/assets/config.yaml` — not at the project root. Files under the package directory are bundled into the wheel, so they ship with `pip install` and are visible to editable, wheel, and zipped installs alike.
+
+Access them at runtime with [`importlib.resources`](https://docs.python.org/3/library/importlib.resources.html), not relative paths from `__file__`:
+
+```python
+from importlib.resources import files
+
+config = (files("my_project.assets") / "config.yaml").read_text()
+```
+
 ## Sharing your work
 
 Because your project is a Python package, anyone can install and reproduce it:
