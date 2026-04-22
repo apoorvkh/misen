@@ -35,6 +35,7 @@ from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object, task_function_signature
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.snapshot import token_base32
+from misen.utils.task_operators import TaskOperatorsMixin
 from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
 
 
-class Task(FrozenMixin, Generic[R]):
+class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
     """A Task is a lazy wrapper for a function and its arguments.
 
     Attributes:
