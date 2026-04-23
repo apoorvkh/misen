@@ -139,9 +139,9 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             str(resources["cpus"]),
             "--mem",
             f"{resources['memory']}G",
-            "--time",
-            str(resources["time"] or 1),
         ]
+        if resources["time"] is not None:
+            sbatch_cmd.extend(["--time", str(resources["time"])])
         sbatch_cmd.extend(
             _resolve_dynamic_sbatch_flags(
                 resources=resources,
