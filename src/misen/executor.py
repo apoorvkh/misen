@@ -225,7 +225,8 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             snapshot: Snapshot to remove, or ``None`` (no-op).
         """
         if snapshot is not None:
-            snapshot.cleanup()
+            with runtime_activity("Cleaning up snapshot of the project environment", style="yellow"):
+                snapshot.cleanup()
             logger.info("%s cleaned up snapshot.", self.__class__.__name__)
             runtime_event("Cleaned up snapshot of the project environment", style="green")
 
