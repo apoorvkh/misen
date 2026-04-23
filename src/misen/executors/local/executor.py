@@ -118,6 +118,23 @@ class LocalJob(Job):
             self._state = "failed"
             logger.error("Local job %s for %s marked failed.", self.job_id or "n/a", self.label)
 
+    def terminate(self) -> None:
+        """Send SIGTERM to the underlying subprocess if it is still running."""
+        with self._lock:
+            proc = self._process
+            if proc is None or proc.poll() is not None:
+                return
+            try:
+                proc.terminate()
+            except OSError:
+                return
+            logger.info(
+                "Local job %s for %s sent SIGTERM (pid=%d).",
+                self.job_id or "n/a",
+                self.label,
+                proc.pid,
+            )
+
     def _close_log_fp_locked(self) -> None:
         fp = self._log_fp
         if fp is None:

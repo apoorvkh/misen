@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import signal
 import subprocess
+import sys
 import threading
 from bisect import insort
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import msgspec
 
@@ -15,9 +18,77 @@ from misen.utils.assigned_resources import AssignedResources
 from misen.utils.runtime_events import runtime_job_done, runtime_job_failed, runtime_job_running
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from types import FrameType
+
     from misen.executors.local.budget import ResourceBudget
     from misen.executors.local.executor import JobState, LocalJob
     from misen.task_metadata import GpuRuntime, Resources
+
+
+def _build_preexec_fn() -> Callable[[], None] | None:
+    """Return a preexec_fn that asks the kernel to SIGTERM children when the parent dies.
+
+    Linux-only via ``prctl(PR_SET_PDEATHSIG)``. Returns ``None`` on other platforms
+    or if libc/prctl are not available, so :func:`subprocess.Popen` skips preexec.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        libc = ctypes.CDLL(libc_name, use_errno=True)
+    except (OSError, AttributeError):
+        return None
+
+    pr_set_pdeathsig = 1
+
+    def _set_pdeathsig() -> None:
+        libc.prctl(pr_set_pdeathsig, signal.SIGTERM, 0, 0, 0)
+
+    return _set_pdeathsig
+
+
+_PREEXEC_FN = _build_preexec_fn()
+
+
+def _install_sigterm_handler(cleanup: Callable[[], None]) -> None:
+    """Run ``cleanup`` on SIGTERM, then defer to the previously-installed handler.
+
+    If the previous handler was a callable, it's invoked with the same signum/frame.
+    If it was ``SIG_IGN``, SIGTERM is ignored after cleanup. Otherwise (``SIG_DFL``
+    or a C-level handler opaque to Python), the default disposition is restored and
+    SIGTERM is re-raised so the process dies with the expected signal exit status.
+
+    No-op if SIGTERM is unavailable or we're not on the main thread (``signal.signal``
+    can only be called from the main thread).
+    """
+    sigterm = getattr(signal, "SIGTERM", None)
+    if sigterm is None:
+        return
+    try:
+        previous = signal.getsignal(sigterm)
+    except ValueError:
+        return
+
+    def handler(signum: int, frame: FrameType | None) -> None:
+        try:
+            cleanup()
+        finally:
+            if callable(previous):
+                cast("Callable[[int, FrameType | None], Any]", previous)(signum, frame)
+            elif previous == signal.SIG_IGN:
+                return
+            else:
+                signal.signal(signum, signal.SIG_DFL)
+                os.kill(os.getpid(), signum)
+
+    try:
+        signal.signal(sigterm, handler)
+    except ValueError:
+        return
 
 
 class LocalScheduler(msgspec.Struct, dict=True):
@@ -47,7 +118,28 @@ class LocalScheduler(msgspec.Struct, dict=True):
         self._condition = threading.Condition()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        atexit.register(self._terminate_running_jobs)
+        _install_sigterm_handler(self._terminate_running_jobs)
         self._logger.info("Started LocalScheduler background thread.")
+
+    def _terminate_running_jobs(self) -> None:
+        """Send SIGTERM to every currently running job.
+
+        Registered via :mod:`atexit` so local subprocesses do not outlive the
+        parent Python process on normal shutdown / KeyboardInterrupt. For hard
+        parent death (SIGKILL, segfault), Linux children are also covered by
+        ``prctl(PR_SET_PDEATHSIG)`` installed in ``preexec_fn`` at launch.
+        """
+        with self._condition:
+            jobs = list(self._running)
+        if not jobs:
+            return
+        self._logger.info("LocalScheduler terminating %d running job(s) at shutdown.", len(jobs))
+        for job in jobs:
+            try:
+                job.terminate()
+            except Exception:
+                self._logger.exception("Error terminating job %s during shutdown.", job.work_unit)
 
     def submit(self, job: LocalJob) -> None:
         """Queue a job for scheduling."""
@@ -188,6 +280,7 @@ class LocalScheduler(msgspec.Struct, dict=True):
                 env=os.environ | {"FORCE_COLOR": "1", "MISEN_RUNTIME_EVENTS": "1"} | env_overrides,
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
+                preexec_fn=_PREEXEC_FN,  # noqa: PLW1509
             )
         except Exception:
             # Don't leak a file descriptor if Popen fails.
