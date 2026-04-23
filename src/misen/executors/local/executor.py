@@ -11,7 +11,7 @@ from misen.executor import Executor, Job
 from misen.executors.local.budget import ResourceBudget
 from misen.executors.local.scheduler import LocalScheduler
 from misen.utils.runtime_events import runtime_job_pending, task_label, work_unit_label
-from misen.utils.snapshot import LocalSnapshot
+from misen.utils.snapshot import LocalSnapshot, NullSnapshot
 
 if TYPE_CHECKING:
     import subprocess
@@ -45,7 +45,7 @@ class LocalJob(Job):
         self,
         work_unit: WorkUnit,
         dependencies: set[LocalJob],
-        snapshot: LocalSnapshot,
+        snapshot: LocalSnapshot | NullSnapshot,
         workspace: Workspace,
     ) -> None:
         """Initialize a local job."""
@@ -145,8 +145,15 @@ class LocalJob(Job):
             self._log_fp = None
 
 
-class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
-    """Executor that runs work units as local subprocesses."""
+class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
+    """Executor that runs work units as local subprocesses.
+
+    When ``snapshot=False``, jobs are dispatched via the current Python
+    interpreter (no uv venv, no pixi activation, no env-file copying), which
+    avoids the snapshot-creation cost at the expense of reproducibility:
+    editing code, dependencies, or ``.env`` files while a job runs will
+    affect it.
+    """
 
     max_memory: int | Literal["all"] = "all"
     num_cpus: int | Literal["all"] = "all"
@@ -157,6 +164,7 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
     rocm_gpu_indices: list[int] | None = None
     num_xpu_gpus: int = 0
     xpu_gpu_indices: list[int] | None = None
+    snapshot: bool = True
 
     def __post_init__(self) -> None:
         """Infer resource limits and initialize scheduler."""
@@ -206,8 +214,14 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
             available_xpu_gpu_indices=xpu_gpu_indices,
         )
 
-    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Return cached ``LocalSnapshot`` rooted at workspace snapshots dir."""
+    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot | NullSnapshot:
+        """Return a snapshot appropriate to the current ``snapshot`` setting.
+
+        Returns a cached :class:`LocalSnapshot` by default, or a
+        :class:`NullSnapshot` when ``snapshot=False``.
+        """
+        if not self.snapshot:
+            return NullSnapshot()
         return self._make_local_snapshot(workspace=workspace)
 
     def _dispatch(
@@ -215,7 +229,7 @@ class LocalExecutor(Executor[LocalJob, LocalSnapshot]):
         work_unit: WorkUnit,
         dependencies: set[LocalJob],
         workspace: Workspace,
-        snapshot: LocalSnapshot,
+        snapshot: LocalSnapshot | NullSnapshot,
     ) -> LocalJob:
         """Queue a work unit in the local scheduler."""
         resources = work_unit.resources

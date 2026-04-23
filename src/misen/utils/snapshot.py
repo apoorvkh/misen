@@ -20,6 +20,7 @@ import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from functools import cache
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -71,12 +72,38 @@ class Snapshot(ABC):
 
 
 class NullSnapshot(Snapshot):
-    """Snapshot placeholder for executors that never dispatch subprocess jobs."""
+    """Snapshot that dispatches via ``uv run --no-project`` in the current env.
 
-    __slots__ = ()
+    Used by :class:`~misen.executors.in_process.InProcessExecutor` (in-process)
+    and by ``LocalExecutor(snapshot=False)`` (subprocess dispatch). Skips uv
+    venv materialization and env-file copying, so jobs start instantly — but
+    they run against whatever interpreter and environment the parent process
+    has, and are therefore sensitive to code or dependency edits made while
+    the job runs. ``.env`` / ``.env.local`` are read live from CWD by
+    ``uv run --env-file`` (no staged copy).
+
+    When a ``pixi.toml`` sits in CWD and the ``pixi`` CLI is on PATH,
+    subprocess dispatch wraps argv in ``pixi run --frozen -x -- ...``
+    against the in-tree manifest, so conda activation still runs against
+    the locked env without any install work on the dispatch path.
+    """
+
+    __slots__ = ("payload_dir",)
+
+    def __init__(self) -> None:
+        """Initialize with a lazily-allocated payload directory.
+
+        Eagerly invokes :func:`_detect_pixi_wrap` so a misconfigured
+        ``pixi.lock`` fails at snapshot creation rather than dispatch.
+        """
+        self.payload_dir: Path | None = None
+        _detect_pixi_wrap()
 
     def cleanup(self) -> None:
-        """No-op for null snapshots."""
+        """Remove payload directory if one was created during dispatch."""
+        if self.payload_dir is not None:
+            shutil.rmtree(self.payload_dir, ignore_errors=True)
+            self.payload_dir = None
 
     def prepare_job(
         self,
@@ -85,10 +112,34 @@ class NullSnapshot(Snapshot):
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
     ) -> tuple[str, list[str], dict[str, str]]:
-        """Null snapshots don't prepare external commands."""
-        _ = work_unit, workspace, assigned_resources_getter, gpu_runtime
+        """Prepare argv to execute the payload via ``uv run --no-project``.
+
+        Args:
+            work_unit: Work unit to execute.
+            workspace: Workspace for payload/log paths.
+            assigned_resources_getter: Callable returning runtime resources for
+                task sentinel injection and worker binding.
+            gpu_runtime: Runtime environment for GPU resources.
+
+        Returns:
+            Tuple ``(job_id, argv, env_overrides)``.
+        """
         job_id = token_base32(6)
-        return job_id, [], {}
+
+        if self.payload_dir is None:
+            self.payload_dir = workspace.get_temp_dir() / "null_snapshot_payloads" / token_base32(6)
+            self.payload_dir.mkdir(parents=True, exist_ok=True)
+
+        payload_path = self.payload_dir / f"{token_base32(6)}.pkl"
+        payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
+        encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
+
+        argv = [
+            *_detect_pixi_wrap(),
+            *_uv_execute_argv(_active_env_files(), payload_path, encoded_getter, gpu_runtime),
+        ]
+
+        return job_id, argv, {}
 
 
 class LocalSnapshot(Snapshot):
@@ -112,7 +163,6 @@ class LocalSnapshot(Snapshot):
         "pixi_bin",
         "python_env_dir",
         "snapshot_dir",
-        "uv_bin",
     )
 
     def __init__(self, snapshots_dir: Path) -> None:
@@ -127,7 +177,6 @@ class LocalSnapshot(Snapshot):
         self.payload_dir = self.snapshot_dir / "payloads"
         self.payload_dir.mkdir(exist_ok=True)
 
-        self.uv_bin = uv.find_uv_bin()
         self.python_env_dir = self._snapshot_python_env(self.snapshot_dir / "python-env")
         self.pixi_bin = None
         self.conda_manifest_path = self._snapshot_conda(self.snapshot_dir)
@@ -158,43 +207,17 @@ class LocalSnapshot(Snapshot):
         """
         job_id = token_base32(6)
 
-        argv = []
+        argv: list[str] = []
 
-        # When a conda env is present, wrap argv so pixi activates it at job
-        # spawn. ``-x`` forces executable mode (no pixi-task lookup); ``--``
-        # stops pixi from parsing our command's flags.
+        # When a conda env is present, wrap argv so pixi activates it at job spawn.
         if self.conda_manifest_path is not None and self.pixi_bin is not None:
-            argv += [
-                self.pixi_bin,
-                "run",
-                "--no-progress",
-                "--color",
-                "never",
-                "--frozen",
-                "--manifest-path",
-                str(self.conda_manifest_path),
-                "-x",
-                "--",
-            ]
+            argv += _pixi_run_prefix(self.pixi_bin, self.conda_manifest_path)
 
         payload_path = self.payload_dir / f"{token_base32(6)}.pkl"
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
         encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
 
-        argv += [
-            self.uv_bin,
-            "run",
-            "--no-project",
-            *chain.from_iterable(("--env-file", str(path)) for path in self.env_files),
-            "-m",
-            "misen.utils.execute",
-            "--payload",
-            str(payload_path),
-            "--assigned-resources-getter",
-            encoded_getter,
-            "--gpu-runtime",
-            gpu_runtime,
-        ]
+        argv += _uv_execute_argv(self.env_files, payload_path, encoded_getter, gpu_runtime)
 
         env_overrides: dict[str, str] = {"VIRTUAL_ENV": str(self.python_env_dir)}
 
@@ -217,16 +240,17 @@ class LocalSnapshot(Snapshot):
         # Use a two-step sync to avoid stale cached editable installs:
         # 1) install non-workspace dependencies (cacheable)
         # 2) install workspace members non-editably without cache
+        uv_bin = _uv_bin()
         try:
             subprocess.run(  # noqa: S603
-                [self.uv_bin, "sync", "--no-install-workspace"],
+                [uv_bin, "sync", "--no-install-workspace"],
                 check=True,
                 capture_output=True,
                 text=True,
                 env=env,
             )
             subprocess.run(  # noqa: S603
-                [self.uv_bin, "sync", "--no-editable", "--no-cache"],
+                [uv_bin, "sync", "--no-editable", "--no-cache"],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -275,14 +299,7 @@ class LocalSnapshot(Snapshot):
             msg = f"Found {lock_path.name} but no pixi.toml next to it."
             raise RuntimeError(msg)
 
-        for line in lock_path.read_text().splitlines():
-            if line.lstrip().startswith("- pypi:"):
-                msg = (
-                    f"{lock_path} contains pypi dependencies. "
-                    "misen owns PyPI packages through pyproject.toml / uv.lock; "
-                    "remove them from the pixi manifest."
-                )
-                raise RuntimeError(msg)
+        _check_pixi_lock_for_pypi(lock_path)
 
         self.pixi_bin = shutil.which("pixi")
         if self.pixi_bin is None:
@@ -363,6 +380,12 @@ def apply_env_files_temporarily() -> Iterator[None]:
 _ENV_FILES = [Path.cwd() / name for name in (".env", ".env.local")]
 
 
+@cache
+def _active_env_files() -> tuple[Path, ...]:
+    """Return ``.env`` / ``.env.local`` paths that exist in CWD (cached)."""
+    return tuple(p for p in _ENV_FILES if p.exists())
+
+
 def token_base32(nbytes: int) -> str:
     """Return URL/file-safe random base32 token.
 
@@ -378,3 +401,108 @@ def token_base32(nbytes: int) -> str:
 def _encode_cli_blob(payload: bytes) -> str:
     """Encode binary payload for safe CLI transport."""
     return base64.urlsafe_b64encode(payload).decode("ascii")
+
+
+def _check_pixi_lock_for_pypi(lock_path: Path) -> None:
+    """Raise if ``pixi.lock`` contains PyPI entries.
+
+    misen owns PyPI packages through ``pyproject.toml`` / ``uv.lock``, so a
+    pixi lock that lists PyPI dependencies would double-install or conflict.
+
+    Raises:
+        RuntimeError: If any ``- pypi:`` entry is present in ``lock_path``.
+    """
+    for line in lock_path.read_text().splitlines():
+        if line.lstrip().startswith("- pypi:"):
+            msg = (
+                f"{lock_path} contains pypi dependencies. "
+                "misen owns PyPI packages through pyproject.toml / uv.lock; "
+                "remove them from the pixi manifest."
+            )
+            raise RuntimeError(msg)
+
+
+@cache
+def _uv_bin() -> str:
+    """Return the uv CLI path (cached — constant across the process)."""
+    return uv.find_uv_bin()
+
+
+def _uv_execute_argv(
+    env_files: list[Path] | tuple[Path, ...],
+    payload_path: Path,
+    encoded_getter: str,
+    gpu_runtime: GpuRuntime,
+) -> list[str]:
+    """Build the ``uv run --no-project -m misen.utils.execute ...`` argv.
+
+    Shared by both snapshot classes; the only per-class difference is the
+    ``env_files`` source (live CWD paths for :class:`NullSnapshot`, staged
+    copies for :class:`LocalSnapshot`).
+    """
+    return [
+        _uv_bin(),
+        "run",
+        "--no-project",
+        *chain.from_iterable(("--env-file", str(path)) for path in env_files),
+        "-m",
+        "misen.utils.execute",
+        "--payload",
+        str(payload_path),
+        "--assigned-resources-getter",
+        encoded_getter,
+        "--gpu-runtime",
+        gpu_runtime,
+    ]
+
+
+def _pixi_run_prefix(pixi_bin: str, manifest_path: Path) -> list[str]:
+    """Return ``pixi run --frozen -x -- …`` argv prefix for activation wrapping.
+
+    ``-x`` forces executable mode (no pixi-task lookup); ``--`` stops pixi
+    from parsing the wrapped command's flags.
+    """
+    return [
+        pixi_bin,
+        "run",
+        "--no-progress",
+        "--color",
+        "never",
+        "--frozen",
+        "--manifest-path",
+        str(manifest_path),
+        "-x",
+        "--",
+    ]
+
+
+@cache
+def _detect_pixi_wrap() -> list[str]:
+    """Return a ``pixi run`` argv prefix for in-tree activation, or ``[]``.
+
+    Cached on the process — CWD and ``pixi.toml`` are assumed stable for
+    misen's lifetime. Used by :class:`NullSnapshot` so subprocess dispatch
+    still gets conda activation when the caller's project declares a pixi
+    env. Unlike :class:`LocalSnapshot`, which copies ``pixi.toml`` /
+    ``pixi.lock`` into the snapshot dir and pre-installs the env, this wrap
+    runs pixi ``--frozen`` against the in-tree manifest — no install or
+    resolution work happens at dispatch.
+
+    Returns:
+        argv prefix ending in ``--``, or ``[]`` when pixi isn't applicable.
+
+    Raises:
+        RuntimeError: If ``pixi.lock`` contains PyPI dependencies.
+    """
+    manifest_path = Path.cwd() / "pixi.toml"
+    if not manifest_path.exists():
+        return []
+    pixi_bin = shutil.which("pixi")
+    if pixi_bin is None:
+        return []
+
+    lock_path = Path.cwd() / "pixi.lock"
+    if lock_path.exists():
+        _check_pixi_lock_for_pypi(lock_path)
+
+    return _pixi_run_prefix(pixi_bin, manifest_path)

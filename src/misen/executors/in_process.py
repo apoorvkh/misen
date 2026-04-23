@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from misen.executor import CompletedJob, Executor
 from misen.tasks import Task
 from misen.utils.graph import DependencyGraph
-from misen.utils.snapshot import NullSnapshot, apply_env_files_temporarily
+from misen.utils.snapshot import NullSnapshot, apply_env_files_temporarily, token_base32
 from misen.utils.task_utils import build_task_dependency_graph
 from misen.utils.work_unit import WorkUnit
 
@@ -46,11 +46,8 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         """
         _ = blocking
         logger.info("InProcessExecutor executing %d root task(s) synchronously.", len(tasks))
-        null_work_unit = WorkUnit(root=Task(lambda: None), dependencies=set())
         null_snapshot = self._make_snapshot(workspace=workspace)
-        job_id, _, _ = null_snapshot.prepare_job(
-            null_work_unit, workspace=workspace, assigned_resources_getter=lambda: None, gpu_runtime="cuda"
-        )
+        job_id = token_base32(6)
 
         union = Task((lambda *_: None), *tasks)
         task_graph = build_task_dependency_graph(task=union)
