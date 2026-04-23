@@ -11,6 +11,7 @@ Generic nested-structure traversal lives in :mod:`misen.utils.nested`.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import logging
 import tempfile
@@ -241,8 +242,10 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
             workspace.results[task] = result
         except Exception:
             logger.exception("Failed while persisting cached result payload for %s; rolling back hash metadata.", task)
-            del workspace.results[task]
-            workspace.clear_result_hash(task=task)
+            with contextlib.suppress(Exception):
+                del workspace.results[task]
+            with contextlib.suppress(Exception):
+                workspace.clear_result_hash(task=task)
             raise
 
 
