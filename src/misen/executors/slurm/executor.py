@@ -241,8 +241,11 @@ def _resolve_dynamic_sbatch_flags(
         if _rule_matches(resources, rule.when):
             resolved |= rule.set
 
-    if "gpu-type" in resolved and resources["gpus"] > 0:
-        resolved["gpus-per-node"] = f"{resolved['gpu-type']}:{resources['gpus']}"
+    gpu_type = resolved.pop("gpu-type", None)
+    if resources["gpus"] > 0:
+        resolved["gpus-per-node"] = (
+            f"{gpu_type}:{resources['gpus']}" if gpu_type else resources["gpus"]
+        )
 
     return _render_flags(resolved)
 
