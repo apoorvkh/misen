@@ -267,9 +267,6 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
             os.close(fd)
 
 
-# TODO: get clock time from NFS server
-
-
 class DiskWorkspace(Workspace):
     """Workspace implementation backed by local/NFS-accessible directories."""
 

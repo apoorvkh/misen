@@ -1,9 +1,13 @@
 """Lock abstractions used by workspace/task/result coordination."""
 
 import logging
+import os
+import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol, Self
 
@@ -14,6 +18,99 @@ from misen.exceptions import LockUnavailableError
 __all__ = ["LockLike", "LockUnavailableError", "NFSLock"]
 
 logger = logging.getLogger(__name__)
+
+_CLOCK_OFFSET_SAMPLES = 5
+_clock_offset_cache: dict[int, timedelta] = {}
+_clock_offset_cache_lock = threading.Lock()
+
+
+def _measure_clock_offset(directory: Path) -> timedelta:
+    """Measure ``(filesystem_time - local_time)`` for ``directory``'s mount.
+
+    Creates several short-lived probe files and compares each file's
+    server-assigned ``mtime`` against a local-clock midpoint bracketing
+    the probe's creation. Returns the median sample as a ``timedelta``.
+
+    On NFS the server stamps ``mtime`` at create-time using its own clock,
+    so reading the mtime back gives a snapshot of the server's view of
+    "now" -- modulo RPC round-trip, which we dampen by bracketing and
+    taking the median over several samples.
+    """
+    samples: list[int] = []
+    for _ in range(_CLOCK_OFFSET_SAMPLES):
+        t_before_ns = time.time_ns()
+        fd, probe = tempfile.mkstemp(prefix=".misen.clockprobe.", suffix=".tmp", dir=str(directory))
+        t_after_ns = time.time_ns()
+        try:
+            fs_mtime_ns = os.fstat(fd).st_mtime_ns
+        finally:
+            os.close(fd)
+            Path(probe).unlink()
+        local_mid_ns = (t_before_ns + t_after_ns) // 2
+        samples.append(fs_mtime_ns - local_mid_ns)
+
+    samples.sort()
+    median_ns = samples[len(samples) // 2]
+    return timedelta(microseconds=median_ns // 1000)
+
+
+def _get_clock_offset(lockfile: Path) -> timedelta:
+    """Return the cached filesystem-vs-local clock offset for ``lockfile``.
+
+    Keyed by the containing directory's device id (``st_dev``), so each
+    filesystem is probed at most once per process. Falls back to a zero
+    offset with a warning if the probe fails.
+    """
+    directory = lockfile.parent
+    try:
+        dev = directory.stat().st_dev
+    except OSError as e:
+        logger.warning("Cannot key clock offset for %s (%s); using zero offset.", directory, e)
+        return timedelta(0)
+
+    with _clock_offset_cache_lock:
+        cached = _clock_offset_cache.get(dev)
+    if cached is not None:
+        return cached
+
+    try:
+        offset = _measure_clock_offset(directory)
+    except OSError as e:
+        logger.warning("Cannot measure clock offset against %s (%s); using zero offset.", directory, e)
+        offset = timedelta(0)
+    else:
+        logger.debug("Measured clock offset for %s: %s.", directory, offset)
+
+    with _clock_offset_cache_lock:
+        return _clock_offset_cache.setdefault(dev, offset)
+
+
+class _ClockOffsetLock(flufl.Lock):
+    """``flufl.lock.Lock`` whose internal clock is shifted by a fixed offset.
+
+    Overrides the ``_now()`` hook (flufl.lock 9.1+) so all lock-expiration
+    arithmetic happens in the filesystem's time frame. Processes on
+    clock-skewed machines then agree on lock validity via shared NFS
+    lockfiles.
+
+    The offset is resolved *lazily* on first ``_now()`` call, not at
+    construction, so building an ``NFSLock`` on a slow or unreachable
+    mount doesn't block. Measurement cost is also amortized by the
+    per-filesystem cache in :func:`_get_clock_offset`.
+    """
+
+    _clock_offset: timedelta | None
+
+    def __init__(self, lockfile: str, lifetime: timedelta | int) -> None:
+        """Initialize lock; clock offset is measured on first use."""
+        self._clock_offset = None
+        super().__init__(lockfile=lockfile, lifetime=lifetime)
+
+    def _now(self) -> datetime:
+        """Return ``datetime.now()`` shifted by the filesystem clock offset."""
+        if self._clock_offset is None:
+            self._clock_offset = _get_clock_offset(Path(self.lockfile))
+        return datetime.now() + self._clock_offset  # noqa: DTZ005
 
 
 class LockLike(Protocol):
@@ -37,7 +134,7 @@ class NFSLock:
 
     __slots__ = ("_lock", "_refresh_interval", "_stop", "_thread")
 
-    _lock: flufl.Lock
+    _lock: _ClockOffsetLock
     _refresh_interval: int | None
     _stop: threading.Event
     _thread: threading.Thread | None
@@ -55,7 +152,7 @@ class NFSLock:
             lifetime: Lock lifetime in seconds for the underlying lock file.
             refresh_interval: Optional refresh interval in seconds.
         """
-        self._lock = flufl.Lock(lockfile=str(lockfile), lifetime=lifetime)
+        self._lock = _ClockOffsetLock(lockfile=str(lockfile), lifetime=lifetime)
 
         self._refresh_interval = refresh_interval
         if self._refresh_interval is not None:

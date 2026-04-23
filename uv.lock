@@ -66,15 +66,11 @@ wheels = [
 
 [[package]]
 name = "flufl-lock"
-version = "8.2.0"
-source = { registry = "https://pypi.org/simple" }
+version = "9.1.0"
+source = { git = "https://gitlab.com/warsaw/flufl.lock.git?rev=ca111345834da11524ac778a5d75c4b22c452890#ca111345834da11524ac778a5d75c4b22c452890" }
 dependencies = [
     { name = "atpublic" },
     { name = "psutil" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/90/78/80f98f67deb8ba9b67e00a91ceb1ded5a7b8eb2b7801b89625d3396fc9d4/flufl_lock-8.2.0.tar.gz", hash = "sha256:15b333c35fab1a36b223840057258aeb4cd79f0fbaf82c144f23cdf6cf14d5e3", size = 33514, upload-time = "2025-05-08T23:32:51.24Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8e/a1/15e07d6c8b33485c4eed49a170faea16d4c6c4fd9f2cb6242adfaed180e7/flufl_lock-8.2.0-py3-none-any.whl", hash = "sha256:59361e277a50efceff288b8e9d36dd43254ad11a88d42d7716195b848a3fce7c", size = 11251, upload-time = "2025-05-08T23:32:49.939Z" },
 ]
 
 [[package]]
@@ -399,7 +395,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "cloudpickle", specifier = ">=3.0" },
-    { name = "flufl-lock", specifier = ">=8.2.0" },
+    { name = "flufl-lock", git = "https://gitlab.com/warsaw/flufl.lock.git?rev=ca111345834da11524ac778a5d75c4b22c452890" },
     { name = "libcst", specifier = ">=1.8.2" },
     { name = "lmdb", specifier = ">=1.7.5" },
     { name = "msgspec", specifier = ">=0.20.0" },
