@@ -15,7 +15,7 @@ import msgspec
 from misen.executor import Executor, Job
 from misen.executors.slurm.parsing import get_assigned_resources_slurm, get_assigned_resources_slurm_per_node
 from misen.executors.slurm.rules import ResourceCondition, ResourceKey, ResourcePredicate, SetValue, SlurmRule
-from misen.utils.runtime_events import runtime_event, task_label, work_unit_label
+from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
@@ -201,10 +201,6 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             work_unit_label(work_unit),
             job_id,
             slurm_job_id,
-        )
-        runtime_event(
-            f"SLURM job submitted: {task_label(work_unit.root, include_hash=False, include_arguments=True)}",
-            style="green",
         )
         return SlurmJob(work_unit=work_unit, job_id=job_id, slurm_job_id=slurm_job_id, log_path=job_log_path)
 
