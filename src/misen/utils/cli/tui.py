@@ -54,7 +54,7 @@ _JOB_EMPHASIS_STYLE = "on grey35"
 
 def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> None:
     """Submit experiment tasks and monitor resulting jobs via the TUI."""
-    named_tasks = experiment.tasks()
+    named_tasks = experiment.normalized_tasks()
     tasks = set(named_tasks.values())
     with _runtime_job_board_suppressed():
         job_graph, snapshot = executor.submit(tasks=tasks, workspace=workspace, blocking=False)

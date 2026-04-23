@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from functools import wraps
-from typing import Any, Generic, Literal, Self
+from typing import Any, Generic, Literal, cast
 
 from msgspec import Struct, StructMeta
 from typing_extensions import TypeVar
@@ -48,35 +48,60 @@ class _FrozenStructMeta(StructMeta):
 
 
 class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
-    """Base class for defining a named task collection.
+    """Base class for defining an experiment's task collection.
 
-    Subclasses implement :meth:`tasks` and return a stable mapping from user
-    names (for example ``"train"`` or ``"eval"``) to :class:`misen.tasks.Task`
-    instances.
+    Subclasses implement :meth:`tasks` returning either:
+
+    - a ``Mapping[str, Task]`` of named tasks — keys are user-facing labels
+      usable via :meth:`__getitem__`, :meth:`result`, and the ``--task`` CLI
+      flag. Parameterize with ``Experiment[MyTasksDict]`` to preserve per-key
+      typing through ``.tasks()``.
+    - a ``Collection[Task]`` (set/list/tuple) of unkeyed tasks — no named
+      access; use hash-prefix lookup in the CLI if individual selection is
+      needed.
+
+    Internal code paths (``run``, CLI, TUI) read the normalized mapping view
+    via :meth:`_tasks`, so ``tasks()`` preserves the subclass's declared
+    return type verbatim for static analysis.
     """
 
     @abstractmethod
-    def tasks(self) -> TasksT:
-        """Return the experiment's named task mapping.
+    def tasks(self) -> TasksT | Collection[Task[Any]]:
+        """Return the experiment's tasks.
 
         Returns:
-            Mapping from logical task names to task objects.
+            Either a ``Mapping[str, Task]`` for named access (the typed shape
+            via ``TasksT`` when the experiment is parameterized), or a
+            ``Collection[Task]`` (set, list, tuple) for an unkeyed union.
         """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Cache the :meth:`tasks` method to avoid recomputing for the same (frozen) instance."""
+        """Cache :meth:`tasks` to avoid recomputing for the same (frozen) instance."""
         super().__init_subclass__(**kwargs)
         _tasks_fn = cls.tasks
-        cache: dict[int, TasksT] = {}
+        cache: dict[int, TasksT | Collection[Task[Any]]] = {}
 
         @wraps(_tasks_fn)
-        def cached_tasks_fn(self: Experiment) -> TasksT:
+        def cached_tasks_fn(self: Experiment) -> TasksT | Collection[Task[Any]]:
             key = stable_hash(self)
             if key not in cache:
                 cache[key] = _tasks_fn(self)
             return cache[key]
 
         type.__setattr__(cls, "tasks", cached_tasks_fn)
+
+    def normalized_tasks(self) -> Mapping[str, Task[Any]]:
+        """Return a normalized ``Mapping`` view of :meth:`tasks`.
+
+        Mapping returns pass through unchanged; ``Collection`` returns are
+        keyed by each task's ``task_hash().b32()`` so keys are stable and
+        unique by construction. Internal code (``run``, CLI, TUI) goes
+        through this view so it can always assume a mapping.
+        """
+        raw = self.tasks()
+        if not isinstance(raw, Mapping):
+            return {task.task_hash().b32(): task for task in raw}
+        return cast("Mapping[str, Task[Any]]", raw)
 
     def __getitem__(self, key: str) -> Task:
         """Return a task from the named task mapping.
@@ -87,7 +112,7 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
         Returns:
             The associated task object.
         """
-        return self.tasks()[key]
+        return self.normalized_tasks()[key]
 
     def result(self, key: str, workspace: Workspace | Literal["auto"] = "auto") -> object:
         """Compute or load the result for one named task.
@@ -100,7 +125,7 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
         Returns:
             Result object returned by the underlying task.
         """
-        return self.tasks()[key].result(workspace=workspace)
+        return self.normalized_tasks()[key].result(workspace=workspace)
 
     def run(
         self,
@@ -117,7 +142,7 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
         """
         workspace = Workspace.resolve_auto(workspace)
         executor = Executor.resolve_auto(executor)
-        experiment_tasks = set(self.tasks().values())
+        experiment_tasks = set(self.normalized_tasks().values())
         logger.info(
             "Running experiment %s with %d task(s) using executor=%s workspace=%s.",
             self.__class__.__name__,

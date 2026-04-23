@@ -875,6 +875,9 @@ def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tm
         def tasks(self) -> dict[str, Task[int]]:
             return {"task": Task(source, x=1)}
 
+        def normalized_tasks(self) -> dict[str, Task[int]]:
+            return self.tasks()
+
     first_args = SimpleNamespace(
         command="run",
         config=config_file,
@@ -1135,6 +1138,9 @@ def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> Non
         def tasks(self) -> dict[str, Task[int]]:
             return {"task": Task(source, x=1)}
 
+        def normalized_tasks(self) -> dict[str, Task[int]]:
+            return self.tasks()
+
     seen: dict[str, object] = {}
 
     def fake_watch(
@@ -1185,6 +1191,9 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
     class StubExperiment:
         def tasks(self) -> dict[str, Task[int]]:
             return {"task": Task(source, x=1)}
+
+        def normalized_tasks(self) -> dict[str, Task[int]]:
+            return self.tasks()
 
     def fake_watch(
         *,

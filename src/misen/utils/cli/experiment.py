@@ -660,7 +660,7 @@ def _resolve_task_or_hash(experiment: Any, query: str) -> Task[Any]:
         ValueError: If zero or multiple tasks match.
     """
     # Try exact name match first.
-    named_tasks = experiment.tasks()
+    named_tasks = experiment.normalized_tasks()
     if query in named_tasks:
         return named_tasks[query]
 
@@ -694,7 +694,7 @@ def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
     """
     from misen.utils.work_unit import build_work_graph
 
-    work_graph = build_work_graph(set(experiment.tasks().values()))
+    work_graph = build_work_graph(set(experiment.normalized_tasks().values()))
     for work_unit in work_graph.nodes():
         if task == work_unit.root or task in set(work_unit.graph.nodes()):
             return work_unit
@@ -779,7 +779,7 @@ def _cmd_run(command: RunCommandArgs, args: Any) -> None:
         if command.tui:
             tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
         else:
-            tasks = set(args.experiment.tasks().values())
+            tasks = set(args.experiment.normalized_tasks().values())
             executor.submit(tasks=tasks, workspace=workspace, blocking=True)
         return
     args.experiment[command.task].submit(executor=executor, workspace=workspace, blocking=True)
@@ -787,14 +787,14 @@ def _cmd_run(command: RunCommandArgs, args: Any) -> None:
 
 def _cmd_count(args: Any, console: Console) -> None:
     workspace = _resolve_workspace(args)
-    complete, total = _count_completion(args.experiment.tasks(), workspace)
+    complete, total = _count_completion(args.experiment.normalized_tasks(), workspace)
     word = "task" if total == 1 else "tasks"
     console.print(f"Completed {complete} of {total} {word}.")
 
 
 def _cmd_tree(command: TreeCommandArgs | IncompleteCommandArgs, args: Any, console: Console) -> None:
     workspace = _resolve_workspace(args)
-    all_named = args.experiment.tasks()
+    all_named = args.experiment.normalized_tasks()
 
     tree_task = command.task if isinstance(command, TreeCommandArgs) else None
     if tree_task is not None:
@@ -825,14 +825,15 @@ def _cmd_tree(command: TreeCommandArgs | IncompleteCommandArgs, args: Any, conso
 
 def _cmd_list(command: ListCommandArgs, args: Any, console: Console) -> None:
     workspace = _resolve_workspace(args)
-    complete, total = _count_completion(args.experiment.tasks(), workspace)
+    named_tasks = args.experiment.normalized_tasks()
+    complete, total = _count_completion(named_tasks, workspace)
     if command.incomplete and complete == total:
         console.print("[green]No incomplete tasks.[/green]")
         return
 
     title = "Incomplete Tasks" if command.incomplete else "Tasks"
     lines = _build_task_list_lines(
-        args.experiment.tasks(),
+        named_tasks,
         workspace,
         cacheable_only=command.cacheable_only,
         incomplete_only=command.incomplete,
@@ -867,7 +868,7 @@ def _cmd_logs_task_mode(command: LogsCommandArgs, args: Any, workspace: Any, con
         return
 
     printed_any = False
-    for task in _iter_task_closure(args.experiment.tasks().values()):
+    for task in _iter_task_closure(args.experiment.normalized_tasks().values()):
         if _show_task_log(task, workspace, console, job_id=command.job_id, list_mode=command.list, skip_missing=True):
             printed_any = True
     if not printed_any:
