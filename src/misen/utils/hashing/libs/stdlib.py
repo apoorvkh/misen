@@ -382,7 +382,7 @@ class TypeHandler(Handler):
 
     @staticmethod
     def match(obj: Any) -> bool:
-        return isinstance(obj, type)
+        return isinstance(obj, (type, types.GenericAlias))
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:

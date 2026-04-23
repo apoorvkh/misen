@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import dill
 import pytest
 
 from misen import HashError, Task, meta
@@ -21,12 +20,16 @@ class DillSerializer(Serializer[Any]):
     @staticmethod
     def write(obj: Any, directory: Path) -> Mapping[str, Any] | None:
         """Serialize via dill."""
+        import dill
+
         (directory / "data.dill").write_bytes(dill.dumps(obj))
         return None
 
     @staticmethod
     def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
         """Deserialize via dill."""
+        import dill
+
         return dill.loads((directory / "data.dill").read_bytes())  # noqa: S301
 
 
@@ -128,6 +131,7 @@ def test_hashable_results_are_indexed_by_result(tmp_path: Path) -> None:
 
 
 def test_unsupported_results_fall_back_to_resolved_task_identity(tmp_path: Path) -> None:
+    pytest.importorskip("dill")
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
 
     task_instance = Task(unsupported_result, seed=7)

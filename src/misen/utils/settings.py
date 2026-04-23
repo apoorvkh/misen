@@ -5,7 +5,7 @@ from layered TOML configuration and memoizes struct instances by constructor
 kwargs for lightweight singleton behavior.
 
 Config resolution order (lowest to highest priority):
-1. ``$XDG_CONFIG_HOME/misen/config.toml`` — user-level defaults
+1. ``$XDG_CONFIG_HOME/misen.toml`` — user-level defaults
 2. ``./.misen.toml`` — project-level overrides (merged on top)
 3. ``$MISEN_CONFIG`` env var or ``Settings(config_file=...)`` — explicit
    override that **replaces** the entire chain.

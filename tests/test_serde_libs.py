@@ -171,9 +171,10 @@ import dataclasses as _dataclasses  # noqa: E402 — module-level imports for te
 import enum  # noqa: E402
 from typing import NamedTuple  # noqa: E402
 
-import attrs as _attrs  # noqa: E402
 import msgspec as _msgspec_top_level  # noqa: E402
-import pydantic as _pydantic  # noqa: E402
+
+_attrs = pytest.importorskip("attrs")
+_pydantic = pytest.importorskip("pydantic")
 
 
 class _MsgspecConfig(_msgspec_top_level.Struct):

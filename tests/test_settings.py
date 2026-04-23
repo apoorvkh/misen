@@ -36,10 +36,10 @@ class TestSettingsExplicitOverride:
         override.write_text('[workspace]\ntype = "disk"\n', encoding="utf-8")
         monkeypatch.setenv("MISEN_CONFIG", str(override))
 
-        xdg = tmp_path / "xdg" / "misen"
+        xdg = tmp_path / "xdg"
         xdg.mkdir(parents=True)
-        (xdg / "config.toml").write_text('[workspace]\ntype = "should_be_ignored"\n', encoding="utf-8")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        (xdg / "misen.toml").write_text('[workspace]\ntype = "should_be_ignored"\n', encoding="utf-8")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
 
         settings = Settings()
         assert settings.toml_data == {"workspace": {"type": "disk"}}
@@ -48,10 +48,10 @@ class TestSettingsExplicitOverride:
 class TestSettingsLayering:
     def test_xdg_only(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MISEN_CONFIG", raising=False)
-        xdg = tmp_path / "xdg" / "misen"
+        xdg = tmp_path / "xdg"
         xdg.mkdir(parents=True)
-        (xdg / "config.toml").write_text('[executor]\ntype = "local"\nnum_cpus = 2\n', encoding="utf-8")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        (xdg / "misen.toml").write_text('[executor]\ntype = "local"\nnum_cpus = 2\n', encoding="utf-8")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
         monkeypatch.chdir(tmp_path)
 
         settings = Settings()
@@ -68,10 +68,10 @@ class TestSettingsLayering:
 
     def test_project_section_replaces_xdg_section(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MISEN_CONFIG", raising=False)
-        xdg = tmp_path / "xdg" / "misen"
+        xdg = tmp_path / "xdg"
         xdg.mkdir(parents=True)
-        (xdg / "config.toml").write_text('[executor]\ntype = "local"\nnum_cpus = 2\n', encoding="utf-8")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        (xdg / "misen.toml").write_text('[executor]\ntype = "local"\nnum_cpus = 2\n', encoding="utf-8")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
 
         project = tmp_path / "project"
         project.mkdir()
@@ -84,10 +84,10 @@ class TestSettingsLayering:
 
     def test_disjoint_sections_from_xdg_and_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MISEN_CONFIG", raising=False)
-        xdg = tmp_path / "xdg" / "misen"
+        xdg = tmp_path / "xdg"
         xdg.mkdir(parents=True)
-        (xdg / "config.toml").write_text('[executor]\ntype = "local"\n', encoding="utf-8")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        (xdg / "misen.toml").write_text('[executor]\ntype = "local"\n', encoding="utf-8")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
 
         project = tmp_path / "project"
         project.mkdir()
@@ -100,10 +100,10 @@ class TestSettingsLayering:
 
     def test_project_overrides_xdg(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MISEN_CONFIG", raising=False)
-        xdg = tmp_path / "xdg" / "misen"
+        xdg = tmp_path / "xdg"
         xdg.mkdir(parents=True)
-        (xdg / "config.toml").write_text('[executor]\ntype = "local"\n', encoding="utf-8")
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        (xdg / "misen.toml").write_text('[executor]\ntype = "local"\n', encoding="utf-8")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
 
         project = tmp_path / "project"
         project.mkdir()
