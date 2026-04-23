@@ -155,10 +155,10 @@ def test_sympy_expression_roundtrip(tmp_path: pathlib.Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Structured-data libs — recursive field walk (attrs / pydantic / msgspec)
+# Structured-data libs — recursive field walk (attrs / pydantic / msgspec / dataclass)
 # ---------------------------------------------------------------------------
 #
-# These three are now Container-style serializers: each field dispatches
+# These four are now Container-style serializers: each field dispatches
 # through :func:`ctx.encode`, so a field holding a tensor / ndarray /
 # DataFrame round-trips through its own specialized serializer.  Nested
 # struct-within-struct with array fields also works.
@@ -167,7 +167,11 @@ def test_sympy_expression_roundtrip(tmp_path: pathlib.Path) -> None:
 # (``*_type: "tests.test_serde_libs._MsgspecConfig"``) can re-import
 # them on decode.
 
-import attrs as _attrs  # noqa: E402 — module-level imports for test fixtures
+import dataclasses as _dataclasses  # noqa: E402 — module-level imports for test fixtures
+import enum  # noqa: E402
+from typing import NamedTuple  # noqa: E402
+
+import attrs as _attrs  # noqa: E402
 import msgspec as _msgspec_top_level  # noqa: E402
 import pydantic as _pydantic  # noqa: E402
 
@@ -208,6 +212,64 @@ class _PydanticNested(_pydantic.BaseModel):
     model_config = _pydantic.ConfigDict(arbitrary_types_allowed=True)
     label: str
     inner: _PydanticState
+
+
+@_dataclasses.dataclass
+class _DataclassConfig:
+    name: str
+    step: int
+    arr: Any  # ndarray
+
+
+@_dataclasses.dataclass
+class _DataclassInner:
+    label: str
+    weights: Any  # torch.Tensor
+
+
+@_dataclasses.dataclass
+class _DataclassOuter:
+    name: str
+    inner: _DataclassInner
+
+
+@_dataclasses.dataclass(frozen=True)
+class _DataclassFrozenPostInit:
+    x: int
+    doubled: int = _dataclasses.field(init=False, default=0)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "doubled", self.x * 2)
+
+
+class _NestingOuter:
+    """Holds nested classes for each structured-data serializer.
+
+    Nested classes have a ``__qualname__`` like ``_NestingOuter.Inner``
+    (containing a dot), which used to break decode because the naive
+    ``rpartition('.')`` split put the class name in the module path.
+    """
+
+    @_dataclasses.dataclass
+    class Dataclass:
+        label: str
+
+    @_attrs.define
+    class Attrs:
+        label: str
+
+    class Msgspec(_msgspec_top_level.Struct):
+        label: str
+
+    class Pydantic(_pydantic.BaseModel):
+        label: str
+
+    class Named(NamedTuple):
+        label: str
+        count: int
+
+    class Color(enum.Enum):
+        RED = 1
 
 
 def test_msgspec_struct_roundtrip(tmp_path: pathlib.Path) -> None:
@@ -309,6 +371,137 @@ def test_pydantic_nested_models_with_tensor(tmp_path: pathlib.Path) -> None:
     assert torch.equal(loaded.inner.weights, inner.weights)
 
 
+def test_dataclass_basic_roundtrip(tmp_path: pathlib.Path) -> None:
+    """Recursive field walk — each field dispatches independently."""
+    original = _DataclassConfig(name="adam", step=100, arr=numpy.array([1, 2, 3]))
+    serde.save(original, tmp_path)
+
+    root = _manifest(tmp_path)["root"]
+    assert root["_t"] == "container"
+    assert root["serializer"].endswith(".DataclassSerializer")
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _DataclassConfig
+    assert loaded.name == "adam"
+    assert loaded.step == 100
+    assert numpy.array_equal(loaded.arr, original.arr)
+
+
+def test_dataclass_with_ndarray_lands_in_numpy_batch(tmp_path: pathlib.Path) -> None:
+    """v1 gap closed: tagged msgpack can't encode ndarrays, but ctx.encode can."""
+    original = _DataclassConfig(name="test", step=7, arr=numpy.arange(20))
+    serde.save(original, tmp_path)
+
+    # The ndarray is in the numpy leaf batch, not inside the msgpack blob.
+    assert (tmp_path / "leaves" / "ndarray" / "arrays.npz").exists()
+    loaded = serde.load(tmp_path)
+    assert numpy.array_equal(loaded.arr, original.arr)
+
+
+def test_dataclass_nested_with_tensor(tmp_path: pathlib.Path) -> None:
+    """Nested dataclass-inside-dataclass with a tensor deep inside."""
+    torch = pytest.importorskip("torch")
+    inner = _DataclassInner(label="x", weights=torch.ones(3))
+    outer = _DataclassOuter(name="outer", inner=inner)
+    serde.save(outer, tmp_path)
+
+    # Tensor lands in the torch leaf batch, not in the msgpack blob.
+    assert (tmp_path / "leaves" / "torch_tensor" / "tensors.pt").exists()
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _DataclassOuter
+    assert type(loaded.inner) is _DataclassInner
+    assert loaded.name == "outer"
+    assert loaded.inner.label == "x"
+    assert torch.equal(loaded.inner.weights, inner.weights)
+
+
+def test_dataclass_frozen_with_init_false_field(tmp_path: pathlib.Path) -> None:
+    """``init=False`` fields restore via ``object.__setattr__`` (works for frozen too)."""
+    original = _DataclassFrozenPostInit(x=7)
+    assert original.doubled == 14
+    serde.save(original, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _DataclassFrozenPostInit
+    assert loaded.x == 7
+    assert loaded.doubled == 14
+
+
+def test_dataclass_dispatch_stable_across_mixed_instances(tmp_path: pathlib.Path) -> None:
+    """Same dataclass type with a native then a non-native instance both round-trip.
+
+    Guards the caching bug that would surface if the MsgpackLeafSerializer
+    claimed pure-native dataclasses: the first pure-native instance would
+    cache ``Config → MsgpackLeafSerializer`` and a later ndarray-bearing
+    instance of the same class would fail under the cached dispatch.
+    """
+    native = _DataclassConfig(name="native", step=1, arr=42)
+    serde.save(native, tmp_path / "a")
+    assert serde.load(tmp_path / "a") == native
+
+    mixed = _DataclassConfig(name="mixed", step=2, arr=numpy.arange(4))
+    serde.save(mixed, tmp_path / "b")
+    loaded = serde.load(tmp_path / "b")
+    assert loaded.name == "mixed"
+    assert numpy.array_equal(loaded.arr, mixed.arr)
+
+
+# ---------------------------------------------------------------------------
+# Nested classes — shared ``import_by_qualified_name`` helper handles qualnames
+# like ``Outer.Inner`` which used to break the naive ``rpartition('.')`` split.
+# ---------------------------------------------------------------------------
+
+
+def test_nested_dataclass_roundtrip(tmp_path: pathlib.Path) -> None:
+    obj = _NestingOuter.Dataclass(label="inner")
+    serde.save(obj, tmp_path)
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _NestingOuter.Dataclass
+    assert loaded.label == "inner"
+
+
+def test_nested_attrs_roundtrip(tmp_path: pathlib.Path) -> None:
+    obj = _NestingOuter.Attrs(label="inner")
+    serde.save(obj, tmp_path)
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _NestingOuter.Attrs
+    assert loaded.label == "inner"
+
+
+def test_nested_msgspec_roundtrip(tmp_path: pathlib.Path) -> None:
+    obj = _NestingOuter.Msgspec(label="inner")
+    serde.save(obj, tmp_path)
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _NestingOuter.Msgspec
+    assert loaded.label == "inner"
+
+
+def test_nested_pydantic_roundtrip(tmp_path: pathlib.Path) -> None:
+    obj = _NestingOuter.Pydantic(label="inner")
+    serde.save(obj, tmp_path)
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _NestingOuter.Pydantic
+    assert loaded.label == "inner"
+
+
+def test_nested_namedtuple_roundtrip(tmp_path: pathlib.Path) -> None:
+    """Msgpack-tagged namedtuple with a dotted qualname also resolves now."""
+    obj = _NestingOuter.Named(label="inner", count=3)
+    serde.save(obj, tmp_path)
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is _NestingOuter.Named
+    assert loaded == obj
+
+
+def test_nested_enum_roundtrip(tmp_path: pathlib.Path) -> None:
+    """Msgpack-tagged enum with a dotted qualname also resolves now."""
+    obj = _NestingOuter.Color.RED
+    serde.save(obj, tmp_path)
+    loaded = serde.load(tmp_path)
+    assert loaded is _NestingOuter.Color.RED
+
+
 # ---------------------------------------------------------------------------
 # Import hygiene: all lib modules import cleanly even when deps are missing
 # ---------------------------------------------------------------------------
@@ -320,6 +513,7 @@ def test_pydantic_nested_models_with_tensor(tmp_path: pathlib.Path) -> None:
         "altair",
         "attrs",
         "catboost",
+        "dataclass",
         "faiss",
         "geopandas",
         "hf_datasets",

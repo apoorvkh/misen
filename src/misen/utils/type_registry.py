@@ -12,10 +12,11 @@ registered class for an arbitrary Python object using the same algorithm:
 This module factors that pattern into a single generic class.
 """
 
+import importlib
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Generic, TypeVar
 
-__all__ = ["TypeDispatchRegistry", "qualified_type_name"]
+__all__ = ["TypeDispatchRegistry", "import_by_qualified_name", "qualified_type_name"]
 
 T = TypeVar("T")
 
@@ -23,6 +24,38 @@ T = TypeVar("T")
 def qualified_type_name(obj_type: type[Any]) -> str:
     """Return the fully-qualified ``module.qualname`` for ``obj_type``."""
     return f"{obj_type.__module__}.{obj_type.__qualname__}"
+
+
+def import_by_qualified_name(qualified: str) -> Any:
+    """Inverse of :func:`qualified_type_name` — resolve a ``module.qualname`` string.
+
+    Handles nested classes (``__qualname__`` containing dots, e.g.
+    ``Outer.Inner``) by scanning for the longest module prefix that
+    actually imports, then walking the remainder via :func:`getattr`.
+    A naive ``rpartition('.')`` split misplaces the boundary for nested
+    classes because the last dot may be inside the qualname, not between
+    module and qualname.
+    """
+    parts = qualified.split(".")
+    last_error: Exception | None = None
+    # Prefer the longest prefix — a real submodule should win over a
+    # same-named class attribute on a parent module.
+    for i in range(len(parts) - 1, 0, -1):
+        module_name = ".".join(parts[:i])
+        try:
+            obj: Any = importlib.import_module(module_name)
+        except ImportError as exc:
+            last_error = exc
+            continue
+        try:
+            for attr in parts[i:]:
+                obj = getattr(obj, attr)
+        except AttributeError as exc:
+            last_error = exc
+            continue
+        return obj
+    msg = f"Cannot resolve qualified name {qualified!r}"
+    raise ImportError(msg) from last_error
 
 
 class TypeDispatchRegistry(Generic[T]):

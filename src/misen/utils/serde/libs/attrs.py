@@ -13,12 +13,11 @@ whose leaves are whatever specialized serializer handles the terminal
 values.
 """
 
-import importlib
 import importlib.util
 from typing import Any
 
 from misen.utils.serde.base import BaseSerializer, Container, DecodeCtx, EncodeCtx, Node
-from misen.utils.type_registry import qualified_type_name
+from misen.utils.type_registry import import_by_qualified_name, qualified_type_name
 
 __all__ = ["attrs_serializers", "attrs_serializers_by_type"]
 
@@ -47,9 +46,7 @@ if importlib.util.find_spec("attrs") is not None:
         @classmethod
         def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
             assert isinstance(node, Container)
-            module_name, _, attr_name = node.meta["attrs_type"].rpartition(".")
-            module = importlib.import_module(module_name)
-            attrs_cls = getattr(module, attr_name)
+            attrs_cls = import_by_qualified_name(node.meta["attrs_type"])
             field_values = {k: ctx.decode(v) for k, v in node.children.items()}
             return attrs_cls(**field_values)
 

@@ -23,6 +23,7 @@ from misen.utils.serde.base import BaseSerializer
 from misen.utils.serde.libs.altair import altair_serializers, altair_serializers_by_type
 from misen.utils.serde.libs.attrs import attrs_serializers, attrs_serializers_by_type
 from misen.utils.serde.libs.catboost import catboost_serializers, catboost_serializers_by_type
+from misen.utils.serde.libs.dataclass import dataclass_serializers, dataclass_serializers_by_type
 from misen.utils.serde.libs.faiss import faiss_serializers, faiss_serializers_by_type
 from misen.utils.serde.libs.geopandas import geopandas_serializers, geopandas_serializers_by_type
 from misen.utils.serde.libs.hf_datasets import hf_datasets_serializers, hf_datasets_serializers_by_type
@@ -81,6 +82,7 @@ all_serializers: list[type[BaseSerializer]] = [
     *msgspec_struct_serializers,
     *pydantic_serializers,
     *attrs_serializers,
+    *dataclass_serializers,
     # Scientific / multidimensional.
     *xarray_serializers,
     *sympy_serializers,
@@ -123,6 +125,7 @@ all_serializers_by_type: dict[str, type[BaseSerializer]] = {
     **msgspec_struct_serializers_by_type,
     **pydantic_serializers_by_type,
     **attrs_serializers_by_type,
+    **dataclass_serializers_by_type,
     **xarray_serializers_by_type,
     **sympy_serializers_by_type,
     **jax_serializers_by_type,

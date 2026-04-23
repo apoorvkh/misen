@@ -15,12 +15,10 @@ Since the predicate runs at every recursion step, msgpack-native
 one msgpack leaf and ``weights`` as a tensor leaf.
 """
 
-import dataclasses
 import datetime
 import decimal
 import enum
 import fractions
-import importlib
 import ipaddress
 import pathlib
 import re
@@ -35,7 +33,7 @@ from typing import Any
 import msgspec.msgpack
 
 from misen.utils.serde.base import BaseSerializer, Container, DecodeCtx, EncodeCtx, LeafSerializer, Node, Serializer
-from misen.utils.type_registry import qualified_type_name
+from misen.utils.type_registry import import_by_qualified_name, qualified_type_name
 
 __all__ = [
     "DictSerializer",
@@ -53,9 +51,11 @@ __all__ = [
 # ---------------------------------------------------------------------------
 #
 # ``msgspec.msgpack`` natively handles a subset of Python types; for the
-# rest (sets, frozensets, tuples, datetimes, UUIDs, dataclasses,
-# namedtuples, dict-subclasses, ...) we wrap values in a ``{_TAG: ...}``
-# envelope on encode and unwrap on decode so they round-trip cleanly.
+# rest (sets, frozensets, tuples, datetimes, UUIDs, namedtuples,
+# dict-subclasses, ...) we wrap values in a ``{_TAG: ...}`` envelope on
+# encode and unwrap on decode so they round-trip cleanly.  Dataclasses
+# are handled by :class:`DataclassSerializer` (recursive field walk),
+# not here.
 # :class:`MsgpackLeafSerializer` uses these; :func:`_is_msgpack_native`
 # below mirrors the type tree without actually encoding.
 
@@ -139,12 +139,6 @@ def _encode_tagged(obj: Any) -> Any:
         return {_TAG: "OrderedDict", _VAL: [[k, _encode_tagged(v)] for k, v in obj.items()]}
     if type(obj) is deque:
         return {_TAG: "deque", _VAL: [_encode_tagged(item) for item in obj], "maxlen": obj.maxlen}
-    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return {
-            _TAG: "dataclass",
-            _VAL: {f.name: _encode_tagged(getattr(obj, f.name)) for f in dataclasses.fields(obj)},
-            "cls": qualified_type_name(type(obj)),
-        }
     if type(obj) is dict:
         encoded = {k: _encode_tagged(v) for k, v in obj.items()}
         if _TAG in encoded:
@@ -161,13 +155,6 @@ def _encode_tagged(obj: Any) -> Any:
 
     msg = f"Cannot encode value of type {qualified_type_name(type(obj))!r} for msgpack serialization."
     raise TypeError(msg)
-
-
-def _import_type(qualified_name: str) -> type[Any]:
-    """Import a type by its ``module.qualname``."""
-    module_name, _, attr_name = qualified_name.rpartition(".")
-    module = importlib.import_module(module_name)
-    return getattr(module, attr_name)
 
 
 def _decode_tagged(obj: Any) -> Any:
@@ -201,9 +188,9 @@ def _decode_tagged(obj: Any) -> Any:
             if tag == "fraction":
                 return fractions.Fraction(val[0], val[1])
             if tag == "enum":
-                return _import_type(obj["cls"])(_decode_tagged(val))
+                return import_by_qualified_name(obj["cls"])(_decode_tagged(val))
             if tag == "path":
-                return _import_type(obj["cls"])(val)
+                return import_by_qualified_name(obj["cls"])(val)
             if tag == "range":
                 return range(val[0], val[1], val[2])
             if tag == "slice":
@@ -217,13 +204,11 @@ def _decode_tagged(obj: Any) -> Any:
             if tag == "namespace":
                 return types.SimpleNamespace(**{k: _decode_tagged(v) for k, v in val.items()})
             if tag == "namedtuple":
-                return _import_type(obj["cls"])(**{k: _decode_tagged(v) for k, v in val.items()})
+                return import_by_qualified_name(obj["cls"])(**{k: _decode_tagged(v) for k, v in val.items()})
             if tag == "OrderedDict":
                 return OrderedDict((k, _decode_tagged(v)) for k, v in val)
             if tag == "deque":
                 return deque((_decode_tagged(item) for item in val), maxlen=obj.get("maxlen"))
-            if tag == "dataclass":
-                return _import_type(obj["cls"])(**{k: _decode_tagged(v) for k, v in val.items()})
             if tag == "escaped_dict":
                 return {k: _decode_tagged(v) for k, v in val}
             msg = f"Unknown serde tag: {tag!r}"
@@ -344,9 +329,6 @@ def _is_msgpack_native(obj: Any, _seen: set[int] | None = None) -> bool:
 
         if t in (list, tuple, set, frozenset, deque):
             return all(_is_msgpack_native(item, _seen) for item in obj)
-
-        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-            return all(_is_msgpack_native(getattr(obj, f.name), _seen) for f in dataclasses.fields(obj))
 
         return False
     finally:
