@@ -26,6 +26,7 @@ from typing_extensions import TypeVar
 from misen.executor import Executor
 from misen.tasks import Task
 from misen.utils.cli.experiment import _ClassOrInstanceMethod, experiment_cli
+from misen.utils.hashing import stable_hash
 from misen.workspace import Workspace
 
 __all__ = ["Experiment"]
@@ -34,7 +35,8 @@ __all__ = ["Experiment"]
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task], default=Mapping[str, Task[Any]])
 _ExperimentTasks: TypeAlias = Mapping[str, Task[Any]] | Collection[Task[Any]]
 logger = logging.getLogger(__name__)
-_TASKS_CACHE: weakref.WeakKeyDictionary[Experiment[Any], _ExperimentTasks] = weakref.WeakKeyDictionary()
+_HASH_BY_ID: dict[int, int] = {}
+_TASKS_BY_HASH: dict[int, _ExperimentTasks] = {}
 
 
 class _FrozenStructMeta(StructMeta):
@@ -46,7 +48,7 @@ class _FrozenStructMeta(StructMeta):
         **struct_config: Any,
     ) -> _FrozenStructMeta:
         struct_config.setdefault("frozen", True)
-        # WeakKeyDictionary keys must support weak references.
+        # ``weakref.finalize`` in the tasks cache requires weakref support.
         struct_config.setdefault("weakref", True)
         return super().__new__(mcls, name, bases, namespace, **struct_config)
 
@@ -86,10 +88,16 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
 
         @wraps(_tasks_fn)
         def cached_tasks_fn(self: Experiment) -> _ExperimentTasks:
-            cached = _TASKS_CACHE.get(self)
+            obj_id = id(self)
+            hash_key = _HASH_BY_ID.get(obj_id)
+            if hash_key is None:
+                hash_key = stable_hash(self)
+                _HASH_BY_ID[obj_id] = hash_key
+                weakref.finalize(self, _HASH_BY_ID.pop, obj_id, None)
+            cached = _TASKS_BY_HASH.get(hash_key)
             if cached is None:
                 cached = _tasks_fn(self)
-                _TASKS_CACHE[self] = cached
+                _TASKS_BY_HASH[hash_key] = cached
             return cached
 
         type.__setattr__(cls, "tasks", cached_tasks_fn)
