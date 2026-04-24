@@ -24,6 +24,7 @@ from rich.console import Console as RichConsole
 
 from misen.exceptions import HashError
 from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
+from misen.task_metadata import Resources
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashing import ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
@@ -31,7 +32,7 @@ from misen.utils.nested import iter_nested_leaves, map_nested_leaves
 from misen.utils.runtime_events import runtime_event, task_label
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
     from inspect import Signature
 
     from misen.task_metadata import TaskMetadata
@@ -143,7 +144,51 @@ def collect_task_dependencies(args: tuple[Any, ...], kwargs: Mapping[str, Any]) 
 
     values = itertools.chain(args, kwargs.values())
     leaves = itertools.chain.from_iterable(map(iter_nested_leaves, values))
-    return frozenset(leaf for leaf in leaves if isinstance(leaf, Task))
+    return frozenset(_merge_equivalent_tasks(leaf for leaf in leaves if isinstance(leaf, Task)))
+
+
+def _merge_task_resources(left: Resources, right: Resources) -> Resources:
+    """Return one resource request large enough to satisfy either input."""
+    gpu_runtimes = {resources["gpu_runtime"] for resources in (left, right) if resources["gpus"] > 0}
+    match len(gpu_runtimes):
+        case 0:
+            gpu_runtime = left["gpu_runtime"]
+        case 1:
+            (gpu_runtime,) = gpu_runtimes
+        case _:
+            msg = f"Incompatible gpu_runtime requirements for equivalent tasks: {gpu_runtimes}"
+            raise ValueError(msg)
+
+    return Resources(
+        time=None if left["time"] is None or right["time"] is None else max(left["time"], right["time"]),
+        nodes=max(left["nodes"], right["nodes"]),
+        memory=max(left["memory"], right["memory"]),
+        cpus=max(left["cpus"], right["cpus"]),
+        gpus=max(left["gpus"], right["gpus"]),
+        gpu_memory=(
+            None
+            if left["gpu_memory"] is None and right["gpu_memory"] is None
+            else max(value for value in (left["gpu_memory"], right["gpu_memory"]) if value is not None)
+        ),
+        gpu_runtime=gpu_runtime,
+    )
+
+
+def _merge_equivalent_task(existing: Task[Any], candidate: Task[Any]) -> Task[Any]:
+    """Merge scheduler-facing resources for two task-equal handles."""
+    merged_resources = _merge_task_resources(existing.resources, candidate.resources)
+    if merged_resources == existing.resources:
+        return existing
+    return existing.with_resources(**merged_resources)
+
+
+def _merge_equivalent_tasks(tasks: Iterable[Task[Any]]) -> list[Task[Any]]:
+    """Deduplicate task-equal handles without losing resource overrides."""
+    merged: dict[Task[Any], Task[Any]] = {}
+    for task in tasks:
+        existing = merged.get(task)
+        merged[task] = task if existing is None else _merge_equivalent_task(existing, task)
+    return list(merged.values())
 
 
 def execute_task(
@@ -348,6 +393,8 @@ def build_task_dependency_graph(
         node_index = nodes.get(candidate)
         if node_index is None:
             node_index = nodes[candidate] = graph.add_node(candidate)
+        else:
+            graph[node_index] = _merge_equivalent_task(graph[node_index], candidate)
         return node_index
 
     stack: list[Task[Any]] = [task]

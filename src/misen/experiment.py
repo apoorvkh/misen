@@ -14,10 +14,11 @@ entry points (`run`, `result`, `cli`) for end users.
 from __future__ import annotations
 
 import logging
+import weakref
 from abc import abstractmethod
 from collections.abc import Collection, Mapping
 from functools import wraps
-from typing import Any, Generic, Literal, cast
+from typing import Any, Generic, Literal, TypeAlias, cast
 
 from msgspec import Struct, StructMeta
 from typing_extensions import TypeVar
@@ -25,14 +26,15 @@ from typing_extensions import TypeVar
 from misen.executor import Executor
 from misen.tasks import Task
 from misen.utils.cli.experiment import _ClassOrInstanceMethod, experiment_cli
-from misen.utils.hashing import stable_hash
 from misen.workspace import Workspace
 
 __all__ = ["Experiment"]
 
 
 TasksT = TypeVar("TasksT", bound=Mapping[str, Task], default=Mapping[str, Task[Any]])
+_ExperimentTasks: TypeAlias = Mapping[str, Task[Any]] | Collection[Task[Any]]
 logger = logging.getLogger(__name__)
+_TASKS_CACHE: weakref.WeakKeyDictionary[Experiment[Any], _ExperimentTasks] = weakref.WeakKeyDictionary()
 
 
 class _FrozenStructMeta(StructMeta):
@@ -44,6 +46,8 @@ class _FrozenStructMeta(StructMeta):
         **struct_config: Any,
     ) -> _FrozenStructMeta:
         struct_config.setdefault("frozen", True)
+        # WeakKeyDictionary keys must support weak references.
+        struct_config.setdefault("weakref", True)
         return super().__new__(mcls, name, bases, namespace, **struct_config)
 
 
@@ -79,14 +83,14 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
         """Cache :meth:`tasks` to avoid recomputing for the same (frozen) instance."""
         super().__init_subclass__(**kwargs)
         _tasks_fn = cls.tasks
-        cache: dict[int, TasksT | Collection[Task[Any]]] = {}
 
         @wraps(_tasks_fn)
-        def cached_tasks_fn(self: Experiment) -> TasksT | Collection[Task[Any]]:
-            key = stable_hash(self)
-            if key not in cache:
-                cache[key] = _tasks_fn(self)
-            return cache[key]
+        def cached_tasks_fn(self: Experiment) -> _ExperimentTasks:
+            cached = _TASKS_CACHE.get(self)
+            if cached is None:
+                cached = _tasks_fn(self)
+                _TASKS_CACHE[self] = cached
+            return cached
 
         type.__setattr__(cls, "tasks", cached_tasks_fn)
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
-from functools import cache
 from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar, cast
 
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, task_label, work_unit_label
@@ -205,16 +204,26 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
         if blocking:
             blocking_jobs = set(job_graph.nodes())
             logger.info("%s waiting for %d job(s) to reach terminal states.", executor_name, len(blocking_jobs))
-            for job in blocking_jobs:
-                logger.debug(
-                    "%s waiting on %s (job_id=%s).",
-                    executor_name,
-                    job.label,
-                    job.job_id or "n/a",
-                )
-                job.wait()
-            logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
-            self.cleanup_snapshot(snapshot)
+            try:
+                for job in blocking_jobs:
+                    logger.debug(
+                        "%s waiting on %s (job_id=%s).",
+                        executor_name,
+                        job.label,
+                        job.job_id or "n/a",
+                    )
+                    job.wait()
+                logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
+
+                failed_jobs = [job for job in blocking_jobs if job.state() == "failed"]
+                if failed_jobs:
+                    failed_labels = ", ".join(job.label for job in failed_jobs)
+                    msg = f"{executor_name} observed {len(failed_jobs)} failed job(s): {failed_labels}"
+                    logger.error(msg)
+                    runtime_event(msg, style="bold red")
+                    raise RuntimeError(msg)
+            finally:
+                self.cleanup_snapshot(snapshot)
 
         return job_graph, snapshot
 
@@ -258,14 +267,8 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
         """
 
     def _make_local_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Return cached :class:`LocalSnapshot` rooted at workspace temp dir."""
+        """Create a fresh :class:`LocalSnapshot` rooted at workspace temp dir."""
         snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
-        return self._cached_local_snapshot(snapshots_dir=snapshots_dir)
-
-    @classmethod
-    @cache
-    def _cached_local_snapshot(cls, snapshots_dir: Path) -> LocalSnapshot:
-        """Return cached local snapshot for one directory."""
         return LocalSnapshot(snapshots_dir=snapshots_dir)
 
 

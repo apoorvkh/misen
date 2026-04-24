@@ -3,6 +3,7 @@
 import pytest
 
 from misen import ASSIGNED_RESOURCES_PER_NODE, Resources, Task, meta
+from misen.utils.work_unit import build_work_graph
 
 
 @meta(id="noop_task", cache=False, resources=Resources(gpus=1, gpu_memory=16))
@@ -13,6 +14,26 @@ def noop_task(x: int) -> int:
 @meta(id="multinode_task", cache=False, exclude={"x"}, resources={"nodes": 2, "gpus": 1})
 def multinode_task(x: object) -> None:
     _ = x
+
+
+@meta(id="resource_override_dependency", cache=True, resources={"cpus": 1})
+def resource_override_dependency() -> int:
+    return 1
+
+
+@meta(id="resource_override_left", cache=False)
+def resource_override_left(x: int) -> int:
+    return x
+
+
+@meta(id="resource_override_right", cache=False)
+def resource_override_right(x: int) -> int:
+    return x
+
+
+@meta(id="resource_override_pair", cache=False)
+def resource_override_pair(values: tuple[int, int]) -> int:
+    return sum(values)
 
 
 def test_with_resources_overrides_only_named_fields() -> None:
@@ -55,3 +76,30 @@ def test_with_resources_rejects_per_node_sentinel_when_nodes_collapse_to_one() -
     task = Task(multinode_task, x=ASSIGNED_RESOURCES_PER_NODE)
     with pytest.raises(ValueError, match=r"ASSIGNED_RESOURCES_PER_NODE"):
         task.with_resources(nodes=1)
+
+
+def test_dependency_collection_merges_resource_overrides_for_equal_tasks() -> None:
+    base = Task(resource_override_dependency)
+    patched = base.with_resources(cpus=8)
+
+    task = Task(resource_override_pair, values=(base.T, patched.T))
+
+    assert len(task.dependencies) == 1
+    (dependency,) = task.dependencies
+    assert dependency.resources["cpus"] == 8
+
+
+def test_work_graph_merges_resource_overrides_for_equal_dependencies() -> None:
+    base = Task(resource_override_dependency)
+    patched = base.with_resources(cpus=8)
+
+    work_graph = build_work_graph(
+        {
+            Task(resource_override_left, x=base.T),
+            Task(resource_override_right, x=patched.T),
+        }
+    )
+
+    dependency_units = [work_unit for work_unit in work_graph.nodes() if work_unit.root == base]
+    assert len(dependency_units) == 1
+    assert dependency_units[0].resources["cpus"] == 8
