@@ -14,7 +14,7 @@ from misen import CacheError, Experiment, Task, meta
 from misen.executor import Executor, Job
 from misen.utils.cli.experiment import _resolve_command, experiment, experiment_cli
 from misen.utils.graph import DependencyGraph
-from misen.utils.runtime_events import RuntimeJobSummary, runtime_job_summary_lines, task_label, work_unit_label
+from misen.utils.runtime_events import task_label, work_unit_label
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
 
@@ -861,15 +861,11 @@ def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> Non
     assert submit_calls == [(executor, workspace, True)]
 
 
-def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tmp_path) -> None:
+def test_experiment_cli_run_command_without_tui_dispatches_to_run_without_tui(monkeypatch, tmp_path) -> None:
     config_file = tmp_path / ".misen.toml"
     workspace = object()
-    submit_calls: list[tuple[set[Task[int]], object, bool]] = []
-
-    class StubExecutor:
-        def submit(self, *, tasks: set[Task[int]], workspace: object, blocking: bool = False) -> tuple[None, None]:
-            submit_calls.append((tasks, workspace, blocking))
-            return None, None
+    executor = object()
+    seen: dict[str, object] = {}
 
     class StubExperiment:
         def tasks(self) -> dict[str, Task[int]]:
@@ -877,6 +873,8 @@ def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tm
 
         def normalized_tasks(self) -> dict[str, Task[int]]:
             return self.tasks()
+
+    experiment = StubExperiment()
 
     first_args = SimpleNamespace(
         command="run",
@@ -891,24 +889,27 @@ def test_experiment_cli_run_command_without_tui_submits_blocking(monkeypatch, tm
         config=config_file,
         executor="auto",
         workspace="auto",
-        experiment=StubExperiment(),
+        experiment=experiment,
     )
 
     def fail_tui(**_kwargs: object) -> None:
         msg = "TUI should be bypassed with --no-tui"
         raise AssertionError(msg)
 
+    def capture_run_without_tui(**kwargs: object) -> None:
+        seen.update(kwargs)
+
     _mock_cli(monkeypatch, first_args, second_args)
-    monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: StubExecutor()))
+    monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: executor))
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
     monkeypatch.setattr(tui_module, "submit_and_watch_jobs", fail_tui)
+    monkeypatch.setattr(tui_module, "run_without_tui", capture_run_without_tui)
 
     experiment_cli(CliExperiment)
 
-    assert len(submit_calls) == 1
-    assert len(submit_calls[0][0]) == 1
-    assert submit_calls[0][1] is workspace
-    assert submit_calls[0][2] is True
+    assert seen["experiment"] is experiment
+    assert seen["executor"] is executor
+    assert seen["workspace"] is workspace
 
 
 def test_experiment_cli_parses_positional_run_command(monkeypatch) -> None:
@@ -933,29 +934,25 @@ def test_experiment_cli_parses_positional_run_command(monkeypatch) -> None:
 
 
 def test_experiment_cli_parses_run_no_tui_flag(monkeypatch) -> None:
-    submit_calls: list[tuple[set[object], object, bool]] = []
     workspace = object()
-
-    class StubExecutor:
-        def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> tuple[None, None]:
-            submit_calls.append((tasks, workspace, blocking))
-            return None, None
+    seen: dict[str, object] = {}
 
     def fail_tui(**_kwargs: object) -> None:
         msg = "TUI should be bypassed with --no-tui"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: StubExecutor()))
+    def capture_run_without_tui(**kwargs: object) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(Executor, "auto", classmethod(lambda _cls, settings=None: object()))
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: workspace))
     monkeypatch.setattr(tui_module, "submit_and_watch_jobs", fail_tui)
+    monkeypatch.setattr(tui_module, "run_without_tui", capture_run_without_tui)
     monkeypatch.setattr(sys, "argv", ["prog", "run", "--no-tui"])
 
     experiment_cli(CliExperiment)
 
-    assert len(submit_calls) == 1
-    assert len(submit_calls[0][0]) == 1
-    assert submit_calls[0][1] is workspace
-    assert submit_calls[0][2] is True
+    assert seen["workspace"] is workspace
 
 
 def test_experiment_cli_tree_command_with_task_positional(monkeypatch, capsys) -> None:
@@ -1219,6 +1216,60 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
     assert os.environ.get("MISEN_RUNTIME_JOB_BOARD") is None
 
 
+def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None:
+    source_task = Task(source, x=1)
+    sink_task = Task(sink, x=2)
+    graph: DependencyGraph[Job] = DependencyGraph()
+    # FakeJob advances one state per ``state()`` call, so seed enough entries
+    # to reach a terminal state within a few polls without hanging.
+    graph.add_node(FakeJob(
+        work_unit=WorkUnit(root=source_task, dependencies=set()),
+        states=["pending", "running", "done"],
+    ))
+    graph.add_node(FakeJob(
+        work_unit=WorkUnit(root=sink_task, dependencies=set()),
+        states=["pending", "running", "failed"],
+    ))
+
+    class StubExecutor:
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        def submit(
+            self, *, tasks: set[Task[int]], workspace: object, blocking: bool = False,
+        ) -> tuple[DependencyGraph[Job], object]:
+            _ = tasks, workspace
+            assert blocking is False
+            return graph, "snapshot-sentinel"
+
+        def cleanup_snapshot(self, snapshot: object) -> None:
+            assert snapshot == "snapshot-sentinel"
+            self.cleanup_calls += 1
+
+    class StubExperiment:
+        def normalized_tasks(self) -> dict[str, Task[int]]:
+            return {"source": source_task, "sink": sink_task}
+
+    executor = StubExecutor()
+    # Force the non-TTY branch regardless of the real stderr so CI and local
+    # runs agree: ``is_terminal`` flips to False via ``no_color=True`` plus
+    # ``force_terminal=False`` on the console Rich constructs internally —
+    # we monkeypatch ``Console.is_terminal`` directly to be deterministic.
+    from rich.console import Console as _Console
+    monkeypatch.setattr(_Console, "is_terminal", property(lambda _self: False))
+    # Shrink the poll interval so the test finishes quickly.
+    monkeypatch.setattr(tui_module, "_watch_line_events", tui_module._watch_line_events)
+    tui_module.run_without_tui(experiment=StubExperiment(), executor=executor, workspace=object())
+
+    output = capsys.readouterr().err
+    assert "source(x=1)" in output
+    assert "sink(x=2)" in output
+    # Terminal states render without the trailing job graph bookkeeping.
+    assert "complete" in output
+    assert "failed" in output
+    assert executor.cleanup_calls == 1
+
+
 def test_job_state_index_maps_roots_and_jobs() -> None:
     dep_wu = WorkUnit(root=Task(source, x=1), dependencies=set())
     parent_wu = WorkUnit(root=Task(sink, x=2), dependencies={dep_wu})
@@ -1238,32 +1289,36 @@ def test_job_state_index_maps_roots_and_jobs() -> None:
     assert index.job_for_work_unit(None) is None
 
 
-def test_final_summary_lines_omit_hash_and_job_id(capsys) -> None:
+def test_final_tree_omits_hash_and_job_id(capsys) -> None:
+    source_task = Task(source, x=1)
+    sink_task = Task(sink, x=2)
     done_job = FakeJob(
-        work_unit=WorkUnit(root=Task(source, x=1), dependencies=set()),
+        work_unit=WorkUnit(root=source_task, dependencies=set()),
         states=["done"],
         job_id="DONE1",
     )
     failed_job = FakeJob(
-        work_unit=WorkUnit(root=Task(sink, x=2), dependencies=set()),
+        work_unit=WorkUnit(root=sink_task, dependencies=set()),
         states=["failed"],
         job_id="FAIL1",
     )
     done_job.pid = 12345
     failed_job.pid = 67890
+    graph: DependencyGraph[Job] = DependencyGraph()
+    graph.add_node(done_job)
+    graph.add_node(failed_job)
 
-    tui_module._print_final_summary([done_job, failed_job])
+    tui_module._print_final_tree(
+        named_tasks={"source": source_task, "sink": sink_task},
+        job_graph=graph,
+    )
 
     output = capsys.readouterr().err
-    lines = [line for line in output.splitlines() if line.strip()]
-    assert lines
-    assert lines[0].startswith("complete ")
-    assert "source(x=1)" in lines[0]
-    assert any(line.startswith("failed") and "sink(x=2)" in line for line in lines)
-    joined = "\n".join(lines)
-    assert "job_id" not in joined
-    assert "pid=" not in joined
-    assert "[" not in joined  # no hash bracket suffix
+    assert "source(x=1)" in output
+    assert "sink(x=2)" in output
+    # Task hashes render as ``[ABC...]``; a tree has no such suffix.
+    assert "DONE1" not in output and "FAIL1" not in output
+    assert "pid=" not in output
 
 
 def test_watch_tasks_uses_textual_runner(monkeypatch) -> None:

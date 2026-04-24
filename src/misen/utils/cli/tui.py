@@ -7,13 +7,14 @@ import os
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from rich.console import Console
 from rich.text import Text
+from rich.tree import Tree as RichTree
 
-from misen.utils.cli.display import format_task_line_text, iter_task_arg_children
-from misen.utils.runtime_events import RuntimeJobSummary, runtime_job_summary_lines, task_label
+from misen.utils.cli.display import format_task_line_markup, format_task_line_text, iter_task_arg_children
+from misen.utils.runtime_events import task_label
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
 __all__ = [
     "JobState",
     "Mode",
+    "run_without_tui",
     "submit_and_watch_jobs",
     "watch_tasks",
 ]
@@ -66,7 +68,35 @@ def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> 
     jobs = list(job_graph.nodes())
     if all(_safe_job_state(job) in _TERMINAL_STATES for job in jobs):
         executor.cleanup_snapshot(snapshot)
-    _print_final_summary(jobs)
+    _print_final_tree(named_tasks=named_tasks, job_graph=job_graph)
+
+
+def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
+    """Submit experiment tasks without the full TUI, rendering a dependency tree.
+
+    When stderr is a terminal the tree re-renders in place while jobs run. When
+    stderr is piped (CI/logs), one line is emitted per job state transition and
+    a final tree is printed at the end so the output still has structure.
+    """
+    named_tasks = experiment.normalized_tasks()
+    tasks = set(named_tasks.values())
+    console = Console(stderr=True, soft_wrap=True)
+    with _runtime_job_board_suppressed():
+        job_graph, snapshot = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
+        if not job_graph.nodes():
+            console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
+            return
+        try:
+            if console.is_terminal:
+                _watch_live_tree(named_tasks=named_tasks, job_graph=job_graph, console=console)
+            else:
+                _watch_line_events(job_graph=job_graph, console=console)
+        finally:
+            jobs = list(job_graph.nodes())
+            if all(_safe_job_state(job) in _TERMINAL_STATES for job in jobs):
+                executor.cleanup_snapshot(snapshot)
+    if not console.is_terminal:
+        _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, console=console)
 
 
 def watch_tasks(
@@ -182,8 +212,18 @@ def _run_textual_task_monitor(
     class _FilteredTree(Tree):
         """Tree whose arrow-key cursor snaps to an explicit list of stop lines."""
 
+        # Shadow the base Tree's hidden ``space`` binding with a visible one so
+        # the app footer advertises expand/collapse. Mouse-based toggling is
+        # disabled via ``_on_click`` — expand/collapse is keyboard-only.
+        BINDINGS: ClassVar[list[Any]] = [Binding("space", "toggle_node", "Expand/collapse")]
+
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
+            # ``auto_expand`` would re-toggle nodes inside
+            # ``on_tree_node_selected``; leaving it on would reintroduce
+            # click-based expand via the select path even though we suppress
+            # the chevron branch in ``_on_click``.
+            self.auto_expand = False
             self.scrollable_lines: list[int] = []
 
         def action_cursor_up(self) -> None:
@@ -203,6 +243,18 @@ def _run_textual_task_monitor(
                 earlier = [line for line in self.scrollable_lines if line < current]
                 target = max(earlier) if earlier else min(self.scrollable_lines)
             self.cursor_line = target
+
+        async def _on_click(self, event: Any) -> None:
+            # Textual dispatches ``_on_click`` along the entire MRO, so the
+            # stock ``Tree._on_click`` would still toggle nodes on chevron
+            # clicks unless we call ``prevent_default``. We handle cursor
+            # movement ourselves and suppress the base handler entirely;
+            # expand/collapse is keyboard-only.
+            event.prevent_default()
+            async with self.lock:
+                meta = event.style.meta
+                if "line" in meta and not meta.get("toggle", False):
+                    self.cursor_line = meta["line"]
 
     class _LogPane(RichLog):
         """RichLog with smart auto-scroll and click-drag text selection.
@@ -491,7 +543,15 @@ def _run_textual_task_monitor(
                     work_unit=node_wu,
                     is_backref=is_backref,
                 )
-                node = parent_node.add(_render_node_label(entry), data=entry, expand=True)
+                # Back-refs render as leaves; otherwise a node gets a chevron
+                # only when it actually has dependency children to reveal.
+                has_children = not is_backref and bool(iter_task_arg_children(task))
+                node = parent_node.add(
+                    _render_node_label(entry),
+                    data=entry,
+                    expand=has_children,
+                    allow_expand=has_children,
+                )
                 entry.tree_node = node
                 self._entries.append(entry)
                 self._entry_by_node_id[id(node)] = entry
@@ -777,18 +837,134 @@ def _runtime_job_board_suppressed() -> Any:
     return _env_var("MISEN_RUNTIME_JOB_BOARD", "0")
 
 
-def _print_final_summary(jobs: list[Job]) -> None:
-    rows = [
-        RuntimeJobSummary(
-            label=task_label(job.root, include_hash=False, include_arguments=True),
-            state=_safe_job_state(job),
-        )
-        for job in jobs
-    ]
-    lines = runtime_job_summary_lines(rows)
-    if not lines:
-        return
+def _build_session_rich_tree(
+    named_tasks: Mapping[str, Task[Any]],
+    job_graph: DependencyGraph[Job],
+) -> RichTree:
+    """Build a Rich dependency tree labelled with per-task job states.
 
-    console = Console(stderr=True, soft_wrap=True)
-    for line in lines:
-        console.print(line)
+    The hierarchy mirrors :meth:`_TaskMonitorApp._build_tree`: named tasks that
+    are dependencies of other named tasks are rendered under their parent only,
+    with back-references shown as ``↩`` leaves.
+    """
+    index = _JobStateIndex.build(job_graph)
+
+    def state_for(task: Task[Any], parent_wu: WorkUnit | None) -> tuple[JobState, WorkUnit | None]:
+        wu = index.work_unit_of_root(task) or parent_wu
+        job = index.job_for_work_unit(wu)
+        state: JobState = _safe_job_state(job) if job is not None else "unknown"
+        return state, wu
+
+    def render_label(task: Task[Any], state: JobState, arg_prefix: str | None, *, backref: bool) -> str:
+        style = _STATE_STYLES[state]
+        icon = _STATE_ICONS[state]
+        body = format_task_line_markup(task, prefix=arg_prefix)
+        line = f"[{style}]{icon}[/{style}] {body}"
+        if backref:
+            line += "  [dim italic]↩[/dim italic]"
+        return line
+
+    all_descendants: set[Task[Any]] = set()
+
+    def collect_descendants(task: Task[Any], seen: set[Task[Any]]) -> None:
+        if task in seen:
+            return
+        seen.add(task)
+        for _, child in iter_task_arg_children(task):
+            all_descendants.add(child)
+            collect_descendants(child, seen)
+
+    for named_task in named_tasks.values():
+        collect_descendants(named_task, set())
+
+    rendered: set[Task[Any]] = set()
+    root = RichTree("[bold cyan]Tasks[/bold cyan]")
+
+    def add_subtree(
+        parent_branch: RichTree,
+        task: Task[Any],
+        arg_prefix: str | None,
+        ancestry: set[Task[Any]],
+        parent_wu: WorkUnit | None,
+    ) -> None:
+        if task in ancestry:
+            return
+        state, wu = state_for(task, parent_wu)
+        is_backref = task in rendered
+        label = render_label(task, state, arg_prefix, backref=is_backref)
+        if is_backref:
+            parent_branch.add(label)
+            return
+        rendered.add(task)
+        branch = parent_branch.add(label)
+        next_ancestry = ancestry | {task}
+        for child_prefix, child_task in iter_task_arg_children(task):
+            add_subtree(branch, child_task, child_prefix, next_ancestry, wu)
+
+    for _alias, task in sorted(named_tasks.items()):
+        if task in all_descendants:
+            continue
+        add_subtree(root, task, None, set(), None)
+
+    return root
+
+
+def _print_final_tree(
+    *,
+    named_tasks: Mapping[str, Task[Any]],
+    job_graph: DependencyGraph[Job],
+    console: Console | None = None,
+) -> None:
+    """Print a dependency tree with final job states to stderr."""
+    if not named_tasks:
+        return
+    target = console if console is not None else Console(stderr=True, soft_wrap=True)
+    target.print(_build_session_rich_tree(named_tasks, job_graph))
+
+
+def _watch_live_tree(
+    *,
+    named_tasks: Mapping[str, Task[Any]],
+    job_graph: DependencyGraph[Job],
+    console: Console,
+    poll_interval_s: float = 0.25,
+) -> None:
+    """Re-render the dependency tree in place via Rich ``Live`` until all jobs terminate."""
+    from rich.live import Live
+
+    jobs = list(job_graph.nodes())
+    with Live(
+        _build_session_rich_tree(named_tasks, job_graph),
+        console=console,
+        refresh_per_second=4,
+        transient=False,
+    ) as live:
+        while not all(_safe_job_state(job) in _TERMINAL_STATES for job in jobs):
+            time.sleep(poll_interval_s)
+            live.update(_build_session_rich_tree(named_tasks, job_graph))
+        live.update(_build_session_rich_tree(named_tasks, job_graph))
+
+
+def _watch_line_events(
+    *,
+    job_graph: DependencyGraph[Job],
+    console: Console,
+    poll_interval_s: float = 0.5,
+) -> None:
+    """Poll job states and emit one line per transition for non-TTY consumers."""
+    jobs = list(job_graph.nodes())
+    last: dict[int, JobState] = {}
+    while True:
+        all_terminal = True
+        for job in jobs:
+            state = _safe_job_state(job)
+            if state not in _TERMINAL_STATES:
+                all_terminal = False
+            if last.get(id(job)) != state:
+                last[id(job)] = state
+                label = task_label(job.root, include_hash=False, include_arguments=True)
+                display = "complete" if state == "done" else state
+                console.print(f"{display:<8} {label}")
+        if all_terminal:
+            return
+        time.sleep(poll_interval_s)

@@ -779,8 +779,7 @@ def _cmd_run(command: RunCommandArgs, args: Any) -> None:
         if command.tui:
             tui.submit_and_watch_jobs(experiment=args.experiment, executor=executor, workspace=workspace)
         else:
-            tasks = set(args.experiment.normalized_tasks().values())
-            executor.submit(tasks=tasks, workspace=workspace, blocking=True)
+            tui.run_without_tui(experiment=args.experiment, executor=executor, workspace=workspace)
         return
     args.experiment[command.task].submit(executor=executor, workspace=workspace, blocking=True)
 
