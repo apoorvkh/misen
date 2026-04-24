@@ -35,8 +35,7 @@ from misen.utils.type_registry import TypeDispatchRegistry, qualified_type_name
 __all__ = ["MANIFEST_FILENAME", "Registry", "load", "save"]
 
 MANIFEST_FILENAME = "manifest.json"
-_MANIFEST_VERSION = 2
-_SUPPORTED_MANIFEST_VERSIONS = {1, _MANIFEST_VERSION}
+_MANIFEST_VERSION = 1
 
 
 class Registry:
@@ -128,6 +127,18 @@ def _node_to_json(node: Node) -> dict[str, Any]:
     return out
 
 
+def _required_node_id(obj: Mapping[str, Any]) -> str:
+    try:
+        node_id = obj["node_id"]
+    except KeyError:
+        msg = "Manifest node is missing required 'node_id'."
+        raise SerializationError(msg) from None
+    if not isinstance(node_id, str):
+        msg = f"Manifest node has invalid 'node_id' {node_id!r}."
+        raise SerializationError(msg)
+    return node_id
+
+
 def _node_from_json(obj: dict[str, Any]) -> Node:
     kind_tag = obj["_t"]
     if kind_tag == "leaf":
@@ -136,14 +147,14 @@ def _node_from_json(obj: dict[str, Any]) -> Node:
             kind=obj["kind"],
             leaf_id=obj["id"],
             meta=obj.get("meta", {}),
-            node_id=obj.get("node_id"),
+            node_id=_required_node_id(obj),
         )
     if kind_tag == "dir":
         return DirectoryLeaf(
             serializer=obj["serializer"],
             subdir=obj["subdir"],
             meta=obj.get("meta", {}),
-            node_id=obj.get("node_id"),
+            node_id=_required_node_id(obj),
         )
     if kind_tag == "container":
         raw_children = obj["children"]
@@ -155,7 +166,7 @@ def _node_from_json(obj: dict[str, Any]) -> Node:
             serializer=obj["serializer"],
             children=children,
             meta=obj.get("meta", {}),
-            node_id=obj.get("node_id"),
+            node_id=_required_node_id(obj),
         )
     if kind_tag == "ref":
         return Ref(ref_id=obj["target"])
@@ -268,10 +279,10 @@ def load(
         raise SerializationError(msg) from None
 
     version = manifest.get("version")
-    if version not in _SUPPORTED_MANIFEST_VERSIONS:
+    if version != _MANIFEST_VERSION:
         msg = (
             f"Unsupported {MANIFEST_FILENAME} version {version!r} in {directory} "
-            f"(this build supports versions {sorted(_SUPPORTED_MANIFEST_VERSIONS)})."
+            f"(this build supports version {_MANIFEST_VERSION})."
         )
         raise SerializationError(msg)
 

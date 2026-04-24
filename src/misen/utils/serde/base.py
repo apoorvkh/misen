@@ -119,6 +119,8 @@ class Ref:
     References let shared containers/directory leaves decode as shared
     Python objects.  They also let recursive mutable containers point
     back to placeholders registered during decode.
+    Constructor-based serializers (tuple/dataclass/pydantic/etc.) cannot
+    resolve self-cycles because their children must decode first.
     """
 
     ref_id: str

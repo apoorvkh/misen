@@ -126,17 +126,24 @@ def test_load_rejects_manifest_with_missing_version(tmp_path: Path) -> None:
         serde.load(tmp_path)
 
 
-def test_load_accepts_v1_manifest(tmp_path: Path) -> None:
-    """Version 1 manifests predate graph refs but remain readable."""
+def test_save_writes_manifest_version_1(tmp_path: Path) -> None:
     serde.save({"hi": 1}, tmp_path)
 
     manifest_path = tmp_path / serde.MANIFEST_FILENAME
     manifest = json.loads(manifest_path.read_text())
-    manifest["version"] = 1
-    manifest["root"].pop("node_id", None)
+    assert manifest["version"] == 1
+
+
+def test_load_rejects_manifest_node_missing_node_id(tmp_path: Path) -> None:
+    serde.save({"hi": 1}, tmp_path)
+
+    manifest_path = tmp_path / serde.MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["root"]["node_id"]
     manifest_path.write_text(json.dumps(manifest))
 
-    assert serde.load(tmp_path) == {"hi": 1}
+    with pytest.raises(SerializationError, match="node_id"):
+        serde.load(tmp_path)
 
 
 def test_load_rejects_missing_manifest_file(tmp_path: Path) -> None:
