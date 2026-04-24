@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.text import Text
 from rich.tree import Tree as RichTree
 
+from misen.executor import CompletedJob
 from misen.utils.cli.display import format_task_line_markup, format_task_line_text, iter_task_arg_children
 from misen.utils.runtime_events import task_label
 
@@ -772,8 +773,26 @@ def _run_textual_task_monitor(
             when there's nothing to stream (either resolution failed or the file is missing).
             """
             if self._mode == "task":
-                key: tuple[Any, ...] = ("task", id(entry.task))
-                return key, lambda: workspace.open_task_log(entry.task, mode="r"), "(no task log yet)"
+                job = index.job_for_work_unit(entry.work_unit)
+                if job is not None and not isinstance(job, CompletedJob):
+                    # Real current-session job runs this task — pin the task
+                    # log lookup to its job_id so we never fall back to an
+                    # archived log from a prior session.
+                    job_id = job.job_id
+                    if job_id is None:
+                        return ("task", id(entry.task), "pending"), None, "(no task log yet)"
+                    return (
+                        ("task", id(entry.task), job_id),
+                        lambda: workspace.open_task_log(entry.task, mode="r", job_id=job_id),
+                        "(no task log yet)",
+                    )
+                # No current-session job, or a cached CompletedJob — fall back
+                # to whichever task log was most recently written.
+                return (
+                    ("task", id(entry.task)),
+                    lambda: workspace.open_task_log(entry.task, mode="r"),
+                    "(no task log yet)",
+                )
             wu = entry.work_unit
             if wu is None:
                 return ("job", None), None, "(no job assigned)"
@@ -787,16 +806,21 @@ def _run_textual_task_monitor(
             )
 
         def _resolve_job_log_path(self, wu: WorkUnit) -> Path | None:
-            """Return the freshest job log path for a work unit, if one exists.
+            """Return the job log path to display for a work unit, if one exists.
 
-            Prefers the live ``Job.log_path`` when the file is present; otherwise
-            falls back to the most recently modified archived log discoverable via
-            ``workspace.job_log_iter(wu)``.
+            If a real (non-cached) job for this work unit is part of the current
+            session, only its live ``Job.log_path`` is returned — never an
+            archived log from a prior run, even if the live file has not been
+            written yet. For cached work units (``CompletedJob``) or work units
+            without a current-session job, falls back to the most recently
+            modified archived log from ``workspace.job_log_iter(wu)``.
             """
-            candidates: list[Path] = []
             job = index.job_for_work_unit(wu)
-            if job is not None and job.log_path is not None:
-                candidates.append(job.log_path)
+            if job is not None and not isinstance(job, CompletedJob):
+                if job.log_path is not None and job.log_path.exists():
+                    return job.log_path
+                return None
+            candidates: list[Path] = []
             with contextlib.suppress(AttributeError, OSError, FileNotFoundError):
                 candidates.extend(workspace.job_log_iter(wu))
             existing = [p for p in candidates if p.exists()]
