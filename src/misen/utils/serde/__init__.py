@@ -30,6 +30,7 @@ from misen.utils.serde.base import (
     Leaf,
     LeafSerializer,
     Node,
+    Ref,
     Serializer,
 )
 from misen.utils.serde.registry import MANIFEST_FILENAME, Registry, load, save
@@ -44,6 +45,7 @@ __all__ = [
     "Leaf",
     "LeafSerializer",
     "Node",
+    "Ref",
     "Registry",
     "SerializationError",
     "Serializer",

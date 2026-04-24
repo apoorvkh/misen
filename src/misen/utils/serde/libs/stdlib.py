@@ -32,6 +32,7 @@ from typing import Any
 
 import msgspec.msgpack
 
+from misen.exceptions import SerializationError
 from misen.utils.serde.base import BaseSerializer, Container, DecodeCtx, EncodeCtx, LeafSerializer, Node, Serializer
 from misen.utils.type_registry import import_by_qualified_name, qualified_type_name
 
@@ -276,12 +277,27 @@ def _is_msgpack_native_key(key: Any) -> bool:
     return False
 
 
-def _is_msgpack_native(obj: Any, _seen: set[int] | None = None) -> bool:
+# Container-ish types tracked in ``_graph_seen`` so a shared instance
+# appearing twice in the walk bails out of msgpack.  Immutable types
+# (tuple, frozenset) are included on purpose: inlining them into the
+# msgpack blob would duplicate their contents, whereas routing the
+# enclosing object through the ``Container`` path lets leaf-id memo
+# preserve shared identity on decode.
+_MSGPACK_GRAPH_TYPES: tuple[type, ...] = (dict, OrderedDict, list, tuple, set, frozenset, deque, types.SimpleNamespace)
+
+
+def _is_msgpack_native(
+    obj: Any,
+    _path: set[int] | None = None,
+    _graph_seen: set[int] | None = None,
+) -> bool:
     """Return ``True`` iff ``_encode_tagged`` + ``msgspec.msgpack`` can encode ``obj``.
 
     Walks the object's transitive structure.  Used by
     :class:`MsgpackLeafSerializer.match` to decide whether the value
     (and everything inside it) belongs in the msgpack batched blob.
+    Shared recursive containers return ``False`` so graph identity can
+    be represented by the higher-level ``Container``/``Ref`` manifest.
     """
     t = type(obj)
 
@@ -305,34 +321,40 @@ def _is_msgpack_native(obj: Any, _seen: set[int] | None = None) -> bool:
         return True
 
     # Recursive types — guard against cycles.
-    if _seen is None:
-        _seen = set()
+    if _path is None:
+        _path = set()
+    if _graph_seen is None:
+        _graph_seen = set()
     oid = id(obj)
-    if oid in _seen:
+    if oid in _path:
         return False
-    _seen.add(oid)
+    if isinstance(obj, _MSGPACK_GRAPH_TYPES):
+        if oid in _graph_seen:
+            return False
+        _graph_seen.add(oid)
+    _path.add(oid)
     try:
         if t is slice:
-            return all(_is_msgpack_native(x, _seen) for x in (obj.start, obj.stop, obj.step))
+            return all(_is_msgpack_native(x, _path, _graph_seen) for x in (obj.start, obj.stop, obj.step))
 
         if t is types.SimpleNamespace:
-            return all(_is_msgpack_native(v, _seen) for v in vars(obj).values())
+            return all(_is_msgpack_native(v, _path, _graph_seen) for v in vars(obj).values())
 
         # NamedTuple — must come before the plain ``tuple`` check.
         if isinstance(obj, tuple) and hasattr(t, "_fields"):
-            return all(_is_msgpack_native(getattr(obj, f), _seen) for f in t._fields)
+            return all(_is_msgpack_native(getattr(obj, f), _path, _graph_seen) for f in t._fields)
 
         if t is dict or t is OrderedDict:
             return all(
-                _is_msgpack_native_key(k) and _is_msgpack_native(v, _seen) for k, v in obj.items()
+                _is_msgpack_native_key(k) and _is_msgpack_native(v, _path, _graph_seen) for k, v in obj.items()
             )
 
         if t in (list, tuple, set, frozenset, deque):
-            return all(_is_msgpack_native(item, _seen) for item in obj)
+            return all(_is_msgpack_native(item, _path, _graph_seen) for item in obj)
 
         return False
     finally:
-        _seen.discard(oid)
+        _path.discard(oid)
 
 
 class DictSerializer(BaseSerializer[Any]):
@@ -361,11 +383,17 @@ class DictSerializer(BaseSerializer[Any]):
 
     @classmethod
     def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
-        assert isinstance(node, Container)
+        if not isinstance(node, Container):
+            msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
+            raise SerializationError(msg)
+        out: Any = OrderedDict() if node.meta.get("type") == "OrderedDict" else {}
+        ctx.remember_node(node, out)
         items = [(k, ctx.decode(v)) for k, v in node.children.items()]
         if node.meta.get("type") == "OrderedDict":
-            return OrderedDict(items)
-        return dict(items)
+            out.update(items)
+            return out
+        out.update(items)
+        return out
 
 
 class ListSerializer(BaseSerializer[Any]):
@@ -385,8 +413,13 @@ class ListSerializer(BaseSerializer[Any]):
 
     @classmethod
     def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
-        assert isinstance(node, Container)
-        return [ctx.decode(c) for c in node.children]
+        if not isinstance(node, Container):
+            msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
+            raise SerializationError(msg)
+        out: list[Any] = []
+        ctx.remember_node(node, out)
+        out.extend(ctx.decode(c) for c in node.children)
+        return out
 
 
 class TupleSerializer(BaseSerializer[Any]):
@@ -407,8 +440,12 @@ class TupleSerializer(BaseSerializer[Any]):
 
     @classmethod
     def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
-        assert isinstance(node, Container)
-        return tuple(ctx.decode(c) for c in node.children)
+        if not isinstance(node, Container):
+            msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
+            raise SerializationError(msg)
+        out = tuple(ctx.decode(c) for c in node.children)
+        ctx.remember_node(node, out)
+        return out
 
 
 class MsgpackLeafSerializer(LeafSerializer[Any]):
@@ -441,8 +478,6 @@ class MsgpackLeafSerializer(LeafSerializer[Any]):
         # one thing.  Common triggers: integers outside msgspec's
         # ``[-2**63, 2**64-1]`` range, builtin subclasses the predicate
         # let through via ``isinstance``, unpicklable objects.
-        from misen.exceptions import SerializationError
-
         try:
             blob = {leaf_id: _encode_tagged(payload) for leaf_id, payload, _ in entries}
             data = msgspec.msgpack.encode(blob)

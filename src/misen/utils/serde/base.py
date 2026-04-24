@@ -2,14 +2,23 @@
 
 The design splits a serializer's job into two phases:
 
-1. **Encode** — walks the object and returns a :class:`Node` tree.
+1. **Encode** — walks the object and returns a :class:`Node` graph.
    Leaves hold their payloads in the :class:`EncodeCtx`; containers
-   recurse on their children.
+   recurse on their children, with :class:`Ref` nodes for repeated
+   non-leaf objects.
 2. **Commit** — after the walk, :func:`~misen.utils.serde.save` groups
    leaves by ``leaf_kind`` and asks each owning serializer to write
    the whole group in a single batched call (e.g. one ``torch.save``
-   of all tensors in the tree).  A single ``manifest.json`` records
-   the tree.
+   of all tensors in the graph).  A single ``manifest.json`` records
+   the graph.
+
+Self-referential (cyclic) graphs only round-trip through mutable
+containers whose serializer publishes a placeholder via
+:meth:`DecodeCtx.remember_node` before decoding children (built-in
+``dict`` and ``list`` do this).  Serializers that must fully construct
+the object from decoded children — dataclasses, pydantic models,
+attrs, msgspec Structs, tuples — cannot resolve a cycle back to
+themselves because the constructor needs values that don't yet exist.
 
 Serializer shapes, by user audience:
 
@@ -28,7 +37,7 @@ Serializer shapes, by user audience:
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -44,6 +53,7 @@ __all__ = [
     "Leaf",
     "LeafSerializer",
     "Node",
+    "Ref",
     "Serializer",
 ]
 
@@ -69,6 +79,7 @@ class Leaf:
     kind: str  # leaf kind, used to group/batch (e.g. "torch_tensor", "msgpack")
     leaf_id: str  # unique id within this save
     meta: Mapping[str, Any] = field(default_factory=dict)
+    node_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +95,7 @@ class Container:
     serializer: str
     children: Any  # Mapping[str, Node] or Sequence[Node]
     meta: Mapping[str, Any] = field(default_factory=dict)
+    node_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,9 +109,22 @@ class DirectoryLeaf:
     serializer: str
     subdir: str  # subdirectory name under ``dirs/`` in the root
     meta: Mapping[str, Any] = field(default_factory=dict)
+    node_id: str | None = None
 
 
-Node = Leaf | Container | DirectoryLeaf
+@dataclass(frozen=True)
+class Ref:
+    """A reference to an earlier node in the manifest graph.
+
+    References let shared containers/directory leaves decode as shared
+    Python objects.  They also let recursive mutable containers point
+    back to placeholders registered during decode.
+    """
+
+    ref_id: str
+
+
+Node = Leaf | Container | DirectoryLeaf | Ref
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +237,9 @@ class LeafSerializer(BaseSerializer[T]):
 
     @classmethod
     def decode(cls, node: Node, ctx: "DecodeCtx") -> T:
-        assert isinstance(node, Leaf)
+        if not isinstance(node, Leaf):
+            msg = f"{qualified_type_name(cls)} expected a Leaf node, got {type(node).__name__}."
+            raise SerializationError(msg)
         return ctx.load_leaf(cls.leaf_kind, node.leaf_id)
 
 
@@ -249,7 +276,9 @@ class Serializer(BaseSerializer[T]):
 
     @classmethod
     def decode(cls, node: Node, ctx: "DecodeCtx") -> T:
-        assert isinstance(node, DirectoryLeaf)
+        if not isinstance(node, DirectoryLeaf):
+            msg = f"{qualified_type_name(cls)} expected a DirectoryLeaf node, got {type(node).__name__}."
+            raise SerializationError(msg)
         return ctx.read_directory_leaf(cls, node)
 
 
@@ -262,8 +291,9 @@ class EncodeCtx:
     """State for one encode walk.
 
     Collects leaves and directory-leaves as the recursion proceeds.
-    Memoizes by ``id(obj)`` so shared objects get a single leaf id (and
-    thus are written once + decoded as the same Python object).
+    Memoizes by ``id(obj)`` so shared leaves reuse one ``leaf_id`` and
+    shared non-leaf objects become :class:`Ref` nodes.  In-progress refs
+    let mutable containers point back to themselves.
     """
 
     def __init__(self, registry: Any) -> None:
@@ -272,25 +302,53 @@ class EncodeCtx:
         # object keeps every child alive for the whole walk, so no need
         # to retain a separate strong-ref list against id recycling.
         self._memo: dict[int, Node] = {}
+        self._node_ids: dict[int, str] = {}
+        self._in_progress: set[int] = set()
         self._leaves: dict[str, list[tuple[str, Any, Mapping[str, Any]]]] = {}
         self._leaf_owner: dict[str, type[BaseSerializer]] = {}
         self._dir_leaves: list[tuple[type[BaseSerializer], str, Any]] = []
         self._counter = 0
+        self._node_counter = 0
 
     def _next_id(self, prefix: str) -> str:
         self._counter += 1
         return f"{prefix}{self._counter}"
 
-    def encode(self, obj: Any) -> Node:
+    def _next_node_id(self) -> str:
+        self._node_counter += 1
+        return f"N{self._node_counter}"
+
+    def encode(self, obj: Any, *, ser_cls: type[BaseSerializer] | None = None) -> Node:
         """Dispatch *obj* through the registry and return its :class:`Node`."""
         oid = id(obj)
         if oid in self._memo:
-            return self._memo[oid]
-        ser = self._registry.lookup(obj)
+            node = self._memo[oid]
+            # Leaf payloads already have identity caching by leaf_id, and
+            # keeping repeated leaf nodes preserves the compact v1-style
+            # manifests tests rely on.  Non-leaf repeated objects need refs
+            # so decode can return the same Python object.
+            if isinstance(node, Leaf):
+                return node
+            node_id = _node_id(node)
+            if node_id is None:
+                msg = f"Cannot reference memoized node without node_id: {node!r}"
+                raise SerializationError(msg)
+            return Ref(node_id)
+        if oid in self._in_progress:
+            return Ref(self._node_ids[oid])
+
+        ser = ser_cls or self._registry.lookup(obj)
         if ser is None:
             msg = f"No serializer registered for type {qualified_type_name(type(obj))!r}."
             raise SerializationError(msg)
-        node = ser.encode(obj, self)
+        node_id = self._next_node_id()
+        self._node_ids[oid] = node_id
+        self._in_progress.add(oid)
+        try:
+            node = ser.encode(obj, self)
+        finally:
+            self._in_progress.discard(oid)
+        node = _with_node_id(node, node_id)
         self._memo[oid] = node
         return node
 
@@ -302,6 +360,16 @@ class EncodeCtx:
         meta: Mapping[str, Any] | None = None,
     ) -> Leaf:
         """Register a leaf and return its :class:`Leaf` node."""
+        if not kind:
+            msg = f"{qualified_type_name(owner)} must set a non-empty leaf_kind."
+            raise SerializationError(msg)
+        existing_owner = self._leaf_owner.get(kind)
+        if existing_owner is not None and existing_owner is not owner:
+            msg = (
+                f"Leaf kind {kind!r} is already owned by {qualified_type_name(existing_owner)}; "
+                f"{qualified_type_name(owner)} cannot also write it."
+            )
+            raise SerializationError(msg)
         leaf_id = self._next_id("L")
         meta_dict = dict(meta or {})
         self._leaves.setdefault(kind, []).append((leaf_id, payload, meta_dict))
@@ -338,7 +406,9 @@ class DecodeCtx:
     """State for one decode walk.
 
     Caches leaf payloads by ``leaf_id`` so a shared leaf referenced
-    twice in the tree decodes to the same Python object.
+    twice in the graph decodes to the same Python object.  Caches
+    concrete nodes by ``node_id`` so :class:`Ref` nodes can preserve
+    shared containers and resolve recursive mutable containers.
     """
 
     def __init__(self, registry: Any, root_directory: Path, manifest: Mapping[str, Any]) -> None:
@@ -347,11 +417,30 @@ class DecodeCtx:
         self._manifest = manifest
         self._leaf_readers: dict[str, Callable[[str], Any]] = {}
         self._leaf_cache: dict[str, Any] = {}
+        self._node_cache: dict[str, Any] = {}
 
     def decode(self, node: Node) -> Any:
         """Reconstruct the object described by *node*."""
+        if isinstance(node, Ref):
+            try:
+                return self._node_cache[node.ref_id]
+            except KeyError:
+                msg = f"Dangling or unsupported forward reference to node {node.ref_id!r}."
+                raise SerializationError(msg) from None
+        node_id = _node_id(node)
+        if node_id is not None and node_id in self._node_cache:
+            return self._node_cache[node_id]
         ser = self._registry.by_name(node.serializer)
-        return ser.decode(node, self)
+        value = ser.decode(node, self)
+        if node_id is not None:
+            self._node_cache.setdefault(node_id, value)
+        return value
+
+    def remember_node(self, node: Node, value: Any) -> None:
+        """Cache *value* for ``node.node_id`` before decoding its children."""
+        node_id = _node_id(node)
+        if node_id is not None:
+            self._node_cache[node_id] = value
 
     def load_leaf(self, kind: str, leaf_id: str) -> Any:
         """Fetch a leaf payload, opening the batched blob lazily + caching."""
@@ -359,9 +448,14 @@ class DecodeCtx:
             return self._leaf_cache[leaf_id]
         reader = self._leaf_readers.get(kind)
         if reader is None:
-            owner_name = self._manifest["leaves"][kind]["serializer"]
+            try:
+                leaf_entry = self._manifest["leaves"][kind]
+            except KeyError:
+                msg = f"Manifest is missing leaf batch {kind!r} for leaf {leaf_id!r}."
+                raise SerializationError(msg) from None
+            owner_name = leaf_entry["serializer"]
             owner = self._registry.by_name(owner_name)
-            kind_meta = self._manifest["leaves"][kind].get("meta", {})
+            kind_meta = leaf_entry.get("meta", {})
             blob_dir = self._root / "leaves" / kind
             reader = owner.read_batch(blob_dir, kind_meta)
             self._leaf_readers[kind] = reader
@@ -382,3 +476,16 @@ class DecodeCtx:
         dirs_entry = self._manifest.get("dirs", {}).get(node.subdir, {})
         merged_meta = {**node.meta, **dirs_entry.get("meta", {})}
         return owner.read(self._root / "dirs" / node.subdir, meta=merged_meta)
+
+
+def _node_id(node: Node) -> str | None:
+    if isinstance(node, Ref):
+        return node.ref_id
+    return node.node_id
+
+
+def _with_node_id(node: Node, node_id: str) -> Node:
+    if isinstance(node, Ref):
+        msg = "Serializers must return concrete nodes, not Ref nodes."
+        raise SerializationError(msg)
+    return replace(node, node_id=node_id)

@@ -14,6 +14,7 @@ a broken round-trip surface clearly rather than silently.
 import importlib.util
 from typing import Any
 
+from misen.exceptions import SerializationError
 from misen.utils.serde.base import BaseSerializer, Container, DecodeCtx, EncodeCtx, Node
 from misen.utils.type_registry import import_by_qualified_name, qualified_type_name
 
@@ -51,7 +52,9 @@ if importlib.util.find_spec("pydantic") is not None:
 
         @classmethod
         def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
-            assert isinstance(node, Container)
+            if not isinstance(node, Container):
+                msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
+                raise SerializationError(msg)
             model_cls = import_by_qualified_name(node.meta["model_type"])
             field_values = {k: ctx.decode(v) for k, v in node.children.items()}
             # ``cls(**fields)`` re-runs validators, which is the stricter

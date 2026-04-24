@@ -150,6 +150,64 @@ def test_shared_tensor_is_written_once_and_decodes_as_same_object(
     assert torch.equal(loaded["a"], shared)
 
 
+def test_shared_primitive_container_identity_is_preserved(tmp_path: pathlib.Path) -> None:
+    shared = [1, 2, 3]
+    original = {"a": shared, "b": shared}
+    serde.save(original, tmp_path)
+
+    root = _manifest(tmp_path)["root"]
+    assert root["_t"] == "container"
+    assert root["children"]["a"]["kind"] == "msgpack"
+    assert root["children"]["a"]["id"] == root["children"]["b"]["id"]
+
+    loaded = serde.load(tmp_path)
+    assert loaded["a"] is loaded["b"]
+    assert loaded["a"] == [1, 2, 3]
+
+
+def test_shared_recursive_container_uses_ref_and_preserves_identity(tmp_path: pathlib.Path) -> None:
+    shared = [torch.ones(2)]
+    original = {"a": shared, "b": shared}
+    serde.save(original, tmp_path)
+
+    root = _manifest(tmp_path)["root"]
+    first = root["children"]["a"]
+    second = root["children"]["b"]
+    assert first["_t"] == "container"
+    assert second == {"_t": "ref", "target": first["node_id"]}
+
+    loaded = serde.load(tmp_path)
+    assert loaded["a"] is loaded["b"]
+    assert loaded["a"][0] is loaded["b"][0]
+    assert torch.equal(loaded["a"][0], shared[0])
+
+
+def test_list_cycle_roundtrip(tmp_path: pathlib.Path) -> None:
+    original: list[object] = []
+    original.append(original)
+    serde.save(original, tmp_path)
+
+    root = _manifest(tmp_path)["root"]
+    assert root["_t"] == "container"
+    assert root["children"] == [{"_t": "ref", "target": root["node_id"]}]
+
+    loaded = serde.load(tmp_path)
+    assert loaded[0] is loaded
+
+
+def test_dict_cycle_roundtrip(tmp_path: pathlib.Path) -> None:
+    original: dict[str, object] = {}
+    original["self"] = original
+    serde.save(original, tmp_path)
+
+    root = _manifest(tmp_path)["root"]
+    assert root["_t"] == "container"
+    assert root["children"]["self"] == {"_t": "ref", "target": root["node_id"]}
+
+    loaded = serde.load(tmp_path)
+    assert loaded["self"] is loaded
+
+
 def test_nn_module_via_directory_serializer(tmp_path: pathlib.Path) -> None:
     """Directory escape hatch: serializers can own a subdir for heterogeneous layouts."""
     model = torch.nn.Linear(4, 2)

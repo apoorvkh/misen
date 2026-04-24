@@ -126,7 +126,57 @@ def test_load_rejects_manifest_with_missing_version(tmp_path: Path) -> None:
         serde.load(tmp_path)
 
 
+def test_load_accepts_v1_manifest(tmp_path: Path) -> None:
+    """Version 1 manifests predate graph refs but remain readable."""
+    serde.save({"hi": 1}, tmp_path)
+
+    manifest_path = tmp_path / serde.MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["version"] = 1
+    manifest["root"].pop("node_id", None)
+    manifest_path.write_text(json.dumps(manifest))
+
+    assert serde.load(tmp_path) == {"hi": 1}
+
+
 def test_load_rejects_missing_manifest_file(tmp_path: Path) -> None:
     """No manifest → clean :class:`SerializationError`, not bare FileNotFoundError."""
     with pytest.raises(SerializationError, match="No manifest.json"):
+        serde.load(tmp_path)
+
+
+def test_duplicate_leaf_kind_owners_raise_clean_error() -> None:
+    class OwnerA(serde.LeafSerializer[Any]):
+        leaf_kind = "duplicate"
+
+    class OwnerB(serde.LeafSerializer[Any]):
+        leaf_kind = "duplicate"
+
+    ctx = serde.EncodeCtx(registry=None)
+    ctx.add_leaf(OwnerA, "duplicate", "a")
+    with pytest.raises(SerializationError, match="already owned"):
+        ctx.add_leaf(OwnerB, "duplicate", "b")
+
+
+def test_load_rejects_wrong_node_shape_with_serialization_error(tmp_path: Path) -> None:
+    serde.save([1, 2, 3], tmp_path)
+
+    manifest_path = tmp_path / serde.MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["root"]["serializer"] = "misen.utils.serde.libs.stdlib.ListSerializer"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(SerializationError, match="expected a Container node"):
+        serde.load(tmp_path)
+
+
+def test_load_rejects_dangling_ref_with_serialization_error(tmp_path: Path) -> None:
+    serde.save([1, 2, 3], tmp_path)
+
+    manifest_path = tmp_path / serde.MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["root"] = {"_t": "ref", "target": "missing"}
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(SerializationError, match="forward reference"):
         serde.load(tmp_path)

@@ -3,14 +3,14 @@
 :func:`save` performs a two-phase write:
 
 1. **Encode walk** — recurses through the object with an
-   :class:`EncodeCtx`, building a :class:`Node` tree and collecting
+   :class:`EncodeCtx`, building a :class:`Node` graph and collecting
    leaf payloads grouped by ``leaf_kind``.
 2. **Commit** — for each kind, the owning serializer's
    :meth:`~Serializer.write_batch` writes *all* payloads of that kind
    into one blob.  Directory-owning serializers each get their own
    subdirectory.
 
-The whole tree and the per-kind metadata are recorded in a single
+The whole graph and the per-kind metadata are recorded in a single
 ``manifest.json`` — no per-node meta files.
 """
 
@@ -28,13 +28,15 @@ from misen.utils.serde.base import (
     EncodeCtx,
     Leaf,
     Node,
+    Ref,
 )
 from misen.utils.type_registry import TypeDispatchRegistry, qualified_type_name
 
 __all__ = ["MANIFEST_FILENAME", "Registry", "load", "save"]
 
 MANIFEST_FILENAME = "manifest.json"
-_MANIFEST_VERSION = 1
+_MANIFEST_VERSION = 2
+_SUPPORTED_MANIFEST_VERSIONS = {1, _MANIFEST_VERSION}
 
 
 class Registry:
@@ -89,35 +91,41 @@ class Registry:
 
 
 def _node_to_json(node: Node) -> dict[str, Any]:
+    if isinstance(node, Ref):
+        return {"_t": "ref", "target": node.ref_id}
     if isinstance(node, Leaf):
-        return {
+        out: dict[str, Any] = {
             "_t": "leaf",
             "serializer": node.serializer,
             "kind": node.kind,
             "id": node.leaf_id,
             "meta": dict(node.meta),
         }
-    if isinstance(node, DirectoryLeaf):
-        return {
+    elif isinstance(node, DirectoryLeaf):
+        out = {
             "_t": "dir",
             "serializer": node.serializer,
             "subdir": node.subdir,
             "meta": dict(node.meta),
         }
-    if isinstance(node, Container):
+    elif isinstance(node, Container):
         children = node.children
         if isinstance(children, Mapping):
             encoded_children: Any = {k: _node_to_json(v) for k, v in children.items()}
         else:
             encoded_children = [_node_to_json(v) for v in children]
-        return {
+        out = {
             "_t": "container",
             "serializer": node.serializer,
             "children": encoded_children,
             "meta": dict(node.meta),
         }
-    msg = f"Cannot serialize node of type {type(node).__name__!r}"
-    raise TypeError(msg)
+    else:
+        msg = f"Cannot serialize node of type {type(node).__name__!r}"
+        raise TypeError(msg)
+    if node.node_id is not None:
+        out["node_id"] = node.node_id
+    return out
 
 
 def _node_from_json(obj: dict[str, Any]) -> Node:
@@ -128,12 +136,14 @@ def _node_from_json(obj: dict[str, Any]) -> Node:
             kind=obj["kind"],
             leaf_id=obj["id"],
             meta=obj.get("meta", {}),
+            node_id=obj.get("node_id"),
         )
     if kind_tag == "dir":
         return DirectoryLeaf(
             serializer=obj["serializer"],
             subdir=obj["subdir"],
             meta=obj.get("meta", {}),
+            node_id=obj.get("node_id"),
         )
     if kind_tag == "container":
         raw_children = obj["children"]
@@ -145,7 +155,10 @@ def _node_from_json(obj: dict[str, Any]) -> Node:
             serializer=obj["serializer"],
             children=children,
             meta=obj.get("meta", {}),
+            node_id=obj.get("node_id"),
         )
+    if kind_tag == "ref":
+        return Ref(ref_id=obj["target"])
     msg = f"Unknown node tag {kind_tag!r} in manifest"
     raise ValueError(msg)
 
@@ -164,7 +177,7 @@ def save(
 ) -> None:
     """Serialize *obj* into *directory*.
 
-    Encodes the object into a :class:`Node` tree, writes a batched blob
+    Encodes the object into a :class:`Node` graph, writes a batched blob
     per leaf kind, and records everything in ``manifest.json``.
 
     Args:
@@ -185,13 +198,7 @@ def save(
     directory.mkdir(parents=True, exist_ok=True)
 
     ctx = EncodeCtx(registry)
-    if ser_cls is not None:
-        root_node = ser_cls.encode(obj, ctx)
-        # Keep the memo consistent so any internal re-encode of *obj*
-        # (if the custom serializer recurses via ctx.encode) reuses it.
-        ctx._memo[id(obj)] = root_node  # noqa: SLF001
-    else:
-        root_node = ctx.encode(obj)
+    root_node = ctx.encode(obj, ser_cls=ser_cls) if ser_cls is not None else ctx.encode(obj)
 
     # Commit batched leaves, one blob per kind.
     leaves_section: dict[str, dict[str, Any]] = {}
@@ -261,10 +268,10 @@ def load(
         raise SerializationError(msg) from None
 
     version = manifest.get("version")
-    if version != _MANIFEST_VERSION:
+    if version not in _SUPPORTED_MANIFEST_VERSIONS:
         msg = (
             f"Unsupported {MANIFEST_FILENAME} version {version!r} in {directory} "
-            f"(this build supports version {_MANIFEST_VERSION})."
+            f"(this build supports versions {sorted(_SUPPORTED_MANIFEST_VERSIONS)})."
         )
         raise SerializationError(msg)
 
