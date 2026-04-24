@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -17,6 +18,8 @@ from misen.utils.runtime_events import RuntimeJobSummary, runtime_job_summary_li
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
     from pathlib import Path
+
+    from textual import events
 
     from misen.executor import Job
     from misen.tasks import Task
@@ -96,6 +99,7 @@ class _TaskTreeNode:
     named_as: str | None
     work_unit: WorkUnit | None = None
     state: JobState = "unknown"
+    is_backref: bool = False
 
 
 @dataclass
@@ -135,6 +139,8 @@ def _render_node_label(entry: _TaskTreeNode, *, emphasis_style: str | None = Non
     text.append(_STATE_ICONS[entry.state], style=_STATE_STYLES[entry.state])
     text.append(" ")
     text.append_text(format_task_line_text(entry.task, prefix=entry.arg_prefix))
+    if entry.is_backref:
+        text.append("  \u21a9", style="dim italic")
     if emphasis_style is not None:
         text.stylize(emphasis_style)
     return text
@@ -198,13 +204,191 @@ def _run_textual_task_monitor(
                 target = max(earlier) if earlier else min(self.scrollable_lines)
             self.cursor_line = target
 
+    class _LogPane(RichLog):
+        """RichLog with smart auto-scroll and click-drag text selection.
+
+        Two behaviors added on top of stock RichLog:
+
+        1. Writes only auto-scroll to the end when the viewport is already
+           pinned there, so manual scrolling and active selections aren't
+           yanked around by streaming log updates.
+        2. Selection rendering and text extraction. Stock RichLog renders
+           via the line API and overrides ``render()`` to return a Panel,
+           which makes ``Widget.get_selection`` return ``None`` and leaves
+           the visual selection unshaded. We override both sides so
+           click-drag highlights and Ctrl+C / Cmd+C copy work on logs.
+        """
+
+        def write(  # type: ignore[override]
+            self,
+            content: Any,
+            width: int | None = None,
+            expand: bool = False,  # noqa: FBT001, FBT002
+            shrink: bool = True,  # noqa: FBT001, FBT002
+            scroll_end: bool | None = None,  # noqa: FBT001
+            animate: bool = False,  # noqa: FBT001, FBT002
+        ) -> Any:
+            if scroll_end is None:
+                scroll_end = self.is_vertical_scroll_end
+            return super().write(
+                content,
+                width=width,
+                expand=expand,
+                shrink=shrink,
+                scroll_end=scroll_end,
+                animate=animate,
+            )
+
+        def get_selection(self, selection: Any) -> tuple[str, str] | None:  # type: ignore[override]
+            if not self.lines:
+                return None
+            text = "\n".join(strip.text for strip in self.lines)
+            extracted = selection.extract(text)
+            if not extracted:
+                return None
+            return extracted, "\n"
+
+        def selection_updated(self, selection: Any) -> None:  # type: ignore[override]  # noqa: ARG002
+            # Invalidate the line cache so selection style changes repaint.
+            self._line_cache.clear()
+            self.refresh()
+
+        def render_line(self, y: int) -> Any:  # type: ignore[override]
+            from rich.segment import Segment
+            from textual.strip import Strip
+
+            strip = super().render_line(y)
+            scroll_x, scroll_y = self.scroll_offset
+            absolute_y = scroll_y + y
+            # Stock RichLog renders via the line API but never calls
+            # ``Strip.apply_offsets``, which is what attaches the ``offset``
+            # meta the compositor reads to resolve a click position into a
+            # character offset. Without that meta the Screen sees
+            # ``select_offset is None`` and refuses to start a selection —
+            # which is why click-drag in the log pane appeared dead.
+            strip = strip.apply_offsets(scroll_x, absolute_y)
+            selection = self.text_selection
+            if selection is None:
+                return strip
+            span = selection.get_span(absolute_y)
+            if span is None:
+                return strip
+            start_char, end_char = span
+            cell_length = strip.cell_length
+            # ``selection.get_span`` returns character offsets; ``Strip.divide``
+            # takes cell positions. For pure ASCII these are identical, but as
+            # soon as a rendered segment has ``len(text) != cell_length`` (Rich
+            # can group characters into wider segments — and any wide char,
+            # emoji, or combining char also breaks the equivalence) the cuts
+            # land in the wrong place and the highlight stops short of (or
+            # overshoots) the cursor.
+            if end_char == -1:
+                end_cell = cell_length
+            else:
+                end_cell = strip.index_to_cell_position(
+                    max(0, end_char - scroll_x)
+                )
+                end_cell = min(cell_length, end_cell)
+            start_cell = strip.index_to_cell_position(
+                max(0, start_char - scroll_x)
+            )
+            start_cell = min(cell_length, start_cell)
+            if end_cell <= start_cell:
+                return strip
+            selection_style = self.screen.get_component_rich_style(
+                "screen--selection"
+            )
+            cuts: list[int] = []
+            if start_cell > 0:
+                cuts.append(start_cell)
+            cuts.append(end_cell)
+            if end_cell < cell_length:
+                cuts.append(cell_length)
+            parts = list(strip.divide(cuts))
+            if start_cell > 0:
+                pre: Any = parts[0]
+                selected_part = parts[1]
+                rest = parts[2:]
+            else:
+                pre = None
+                selected_part = parts[0]
+                rest = parts[1:]
+            # Use post_style so the selection background overrides the
+            # segment's existing background (``Strip.apply_style`` prepends
+            # the style, which leaves the original bg color intact).
+            styled_segments = list(
+                Segment.apply_style(iter(selected_part), post_style=selection_style)
+            )
+            styled_selected = Strip(styled_segments, selected_part.cell_length)
+            return Strip.join([pre, styled_selected, *rest])
+
+    class _CopyButton(Static):
+        """Footer-style button that copies the current text selection.
+
+        A naive click handler doesn't work: Textual's Screen clears the active
+        selection when MouseDown and MouseUp land on the same widget (the
+        deselect-on-click affordance). By the time the Click event reaches the
+        button, the selection is gone. We work around this by snapshotting the
+        selections on MouseDown — before the Screen processes MouseUp — and
+        restoring them just before invoking ``screen.copy_text``.
+        """
+
+        DEFAULT_CSS = """
+        _CopyButton {
+            dock: right;
+            width: auto;
+            height: 1;
+            padding: 0 2;
+            background: $accent;
+            color: $background;
+            text-style: bold;
+        }
+        _CopyButton:hover {
+            background: $accent-lighten-1;
+        }
+        """
+
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__("Copy", **kwargs)
+            self._captured_selection: dict[Any, Any] | None = None
+
+        def on_mouse_down(self, event: events.MouseDown) -> None:  # noqa: ARG002
+            self._captured_selection = dict(self.screen.selections)
+
+        def on_click(self, event: events.Click) -> None:  # noqa: ARG002
+            captured = self._captured_selection
+            self._captured_selection = None
+            if not captured:
+                return
+            self.screen.selections = captured
+            with contextlib.suppress(Exception):
+                self.screen.action_copy_text()
+
     class _TaskMonitorApp(App[None]):
         TITLE = "misen run"
         ENABLE_COMMAND_PALETTE = False
+        # Quit bindings stay declared but are gated by ``check_action`` so they
+        # only light up after every job reaches a terminal state. During a run
+        # Ctrl+C is the only way out — it raises KeyboardInterrupt in the
+        # parent Python process so callers can decide how to handle it.
+        # Copy is hidden from the global footer (``show=False``); the log pane
+        # carries its own ``Copy`` label so the affordance lives where the
+        # selectable text does.
         BINDINGS = (
-            Binding("escape", "quit", "Quit"),
+            Binding("escape", "quit_when_done", "Quit"),
+            Binding("q", "quit_when_done", "Quit"),
             Binding("tab", "toggle_mode", "Toggle task/job log", priority=True),
+            # ``priority=True`` so this beats Textual's defaults
+            # (Screen's ``ctrl+c,super+c`` → screen.copy_text and App's
+            # ``ctrl+c`` → help_quit) and Ctrl+C always interrupts.
+            Binding("ctrl+c", "interrupt", "Interrupt", priority=True, show=False),
+            Binding("super+c,ctrl+shift+c", "screen.copy_text", "Copy", show=False),
+            # Suppress Textual's default Ctrl+Q quit binding — exiting mid-run
+            # would orphan the submitted Jobs. Ctrl+C remains as the deliberate
+            # interrupt path.
+            Binding("ctrl+q", "noop", show=False, priority=True),
         )
+        POST_RUN_IDLE_TIMEOUT_S = 60.0
         CSS = """
         Screen { layout: vertical; }
         #summary { height: 1; padding: 0 1; }
@@ -213,6 +397,8 @@ def _run_textual_task_monitor(
         #log-panel { width: 1fr; border-left: solid green; }
         #log-title { height: 1; padding: 0 1; color: $accent; text-style: bold; }
         #log-viewer { height: 1fr; padding: 0 1; }
+        #footer-bar { height: 1; }
+        #footer-bar Footer { width: 1fr; }
         """
 
         def __init__(self) -> None:
@@ -224,6 +410,14 @@ def _run_textual_task_monitor(
             self._cursor_entry: _TaskTreeNode | None = None
             self._log_offset: int = 0
             self._log_key: tuple[Any, ...] | None = None
+            self._all_done: bool = False
+            self._last_activity_at: float = time.monotonic()
+            self._last_scroll_offsets: tuple[float, float, float, float] | None = None
+            """Sampled per tick as a fallback for wheel activity (widgets stop
+            scroll events before they bubble to app-level handlers)."""
+            self._user_interrupted: bool = False
+            """Set by :meth:`action_interrupt` so the runner can re-raise
+            ``KeyboardInterrupt`` once the TUI has shut down cleanly."""
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
@@ -232,8 +426,10 @@ def _run_textual_task_monitor(
                 yield _FilteredTree("Experiment", id="task-tree")
                 with Vertical(id="log-panel"):
                     yield Static("Task log", id="log-title")
-                    yield RichLog(id="log-viewer", highlight=True, markup=False, wrap=True)
-            yield Footer()
+                    yield _LogPane(id="log-viewer", highlight=True, markup=False, wrap=True)
+            with Horizontal(id="footer-bar"):
+                yield Footer()
+                yield _CopyButton(id="copy-button")
 
         def on_mount(self) -> None:
             tree = self.query_one("#task-tree", _FilteredTree)
@@ -255,6 +451,24 @@ def _run_textual_task_monitor(
             self._snap_cursor_to_mode_stop()
 
         def _build_tree(self, tree: Any) -> None:
+            # Expand each named task's full arg-descendant set so we can
+            # identify which named tasks are strict subtrees of another. Those
+            # non-roots are rendered under their parents rather than at the top
+            # level — which is what makes the hierarchy readable when multiple
+            # named tasks share a DAG.
+            all_descendants: set[Task[Any]] = set()
+
+            def collect_descendants(task: Task[Any], seen: set[Task[Any]]) -> None:
+                if task in seen:
+                    return
+                seen.add(task)
+                for _, child in iter_task_arg_children(task):
+                    all_descendants.add(child)
+                    collect_descendants(child, seen)
+
+            for named_task in named_tasks.values():
+                collect_descendants(named_task, set())
+
             rendered: set[Task[Any]] = set()
 
             def add_subtree(
@@ -265,15 +479,17 @@ def _run_textual_task_monitor(
                 ancestry: set[Task[Any]],
                 parent_wu: WorkUnit | None,
             ) -> None:
-                if task in rendered or task in ancestry:
+                if task in ancestry:
                     return
                 node_wu = index.work_unit_of_root(task) or parent_wu
+                is_backref = task in rendered
                 entry = _TaskTreeNode(
                     task=task,
                     tree_node=None,
                     arg_prefix=arg_prefix,
                     named_as=named_as,
                     work_unit=node_wu,
+                    is_backref=is_backref,
                 )
                 node = parent_node.add(_render_node_label(entry), data=entry, expand=True)
                 entry.tree_node = node
@@ -282,12 +498,19 @@ def _run_textual_task_monitor(
                 if node_wu is not None and node_wu not in self._wu_canonical:
                     self._wu_canonical[node_wu] = entry
 
+                if is_backref:
+                    # Leave back-references as leaves — the full subtree lives
+                    # under the canonical occurrence.
+                    return
+
                 rendered.add(task)
                 next_ancestry = ancestry | {task}
                 for child_prefix, child_task in iter_task_arg_children(task):
                     add_subtree(node, child_task, child_prefix, None, next_ancestry, node_wu)
 
             for alias, task in sorted(named_tasks.items()):
+                if task in all_descendants:
+                    continue
                 add_subtree(tree.root, task, None, alias, set(), None)
 
             if self._entries and self._cursor_entry is None:
@@ -333,6 +556,73 @@ def _run_textual_task_monitor(
             self._repaint_tree()
             self._render_summary_widget()
             self._stream_log_chunk()
+            self._poll_scroll_activity()
+            self._update_completion_state()
+
+        def _poll_scroll_activity(self) -> None:
+            # Widget-level scroll handlers stop mouse-wheel events before they
+            # bubble to the app, so sample the scroll offsets each tick and
+            # treat any change as user activity for the idle timer.
+            try:
+                tree = self.query_one("#task-tree", _FilteredTree)
+                log_viewer = self.query_one("#log-viewer", _LogPane)
+            except Exception:  # noqa: BLE001 — widgets may not be mounted yet
+                return
+            offsets = (tree.scroll_y, tree.scroll_x, log_viewer.scroll_y, log_viewer.scroll_x)
+            if self._last_scroll_offsets is not None and offsets != self._last_scroll_offsets:
+                self._mark_activity()
+            self._last_scroll_offsets = offsets
+
+        def _all_jobs_terminal(self) -> bool:
+            return all(
+                _safe_job_state(job) in _TERMINAL_STATES for job in job_graph.nodes()
+            )
+
+        def _update_completion_state(self) -> None:
+            all_done = self._all_jobs_terminal()
+            if all_done and not self._all_done:
+                self._all_done = True
+                # Reset the activity clock at the moment of completion so the
+                # idle countdown starts fresh regardless of prior scrolling.
+                self._last_activity_at = time.monotonic()
+                # Re-evaluate bindings: the gated quit actions just turned on.
+                self.refresh_bindings()
+            if self._all_done and (
+                time.monotonic() - self._last_activity_at >= self.POST_RUN_IDLE_TIMEOUT_S
+            ):
+                self.exit()
+
+        def _mark_activity(self) -> None:
+            self._last_activity_at = time.monotonic()
+
+        def check_action(
+            self,
+            action: str,
+            parameters: tuple[object, ...],  # noqa: ARG002
+        ) -> bool | None:
+            if action == "quit_when_done":
+                # Hide the binding in the footer and block its action while
+                # jobs are still running.
+                return self._all_done
+            return True
+
+        def action_quit_when_done(self) -> None:
+            if self._all_done:
+                self.exit()
+
+        def action_interrupt(self) -> None:
+            """Tear down the TUI and signal a user interrupt to the caller."""
+            self._user_interrupted = True
+            self.exit()
+
+        def action_noop(self) -> None:
+            """No-op action used to swallow keys we want to disable."""
+
+        def on_key(self, event: events.Key) -> None:  # noqa: ARG002
+            self._mark_activity()
+
+        def on_mouse_down(self, event: events.MouseDown) -> None:  # noqa: ARG002
+            self._mark_activity()
 
         def action_toggle_mode(self) -> None:
             self._mode = "job" if self._mode == "task" else "task"
@@ -376,14 +666,14 @@ def _run_textual_task_monitor(
         def _reset_log(self) -> None:
             self._log_key = None
             self._log_offset = 0
-            log_viewer = self.query_one("#log-viewer", RichLog)
+            log_viewer = self.query_one("#log-viewer", _LogPane)
             log_viewer.clear()
 
         def _stream_log_chunk(self) -> None:
             entry = self._cursor_entry
             if entry is None:
                 return
-            log_viewer = self.query_one("#log-viewer", RichLog)
+            log_viewer = self.query_one("#log-viewer", _LogPane)
 
             key, opener, placeholder = self._resolve_log_source(entry)
             is_new_source = key != self._log_key
@@ -456,6 +746,11 @@ def _run_textual_task_monitor(
 
     app = _TaskMonitorApp()
     app.run()
+    # Propagate Ctrl+C as a real KeyboardInterrupt — Textual swallows the
+    # signal and turns it into a key event, so we re-raise here once the TUI
+    # has finished tearing itself down.
+    if app._user_interrupted:  # noqa: SLF001
+        raise KeyboardInterrupt
 
 
 @contextlib.contextmanager
