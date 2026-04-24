@@ -177,11 +177,16 @@ class NFSLock:
         Raises:
             LockUnavailableError: If acquisition fails within ``timeout``.
         """
-        timeout = timeout if blocking else 0
+        # flufl.lock's stale-break check runs only after its timeout check,
+        # so ``timeout=0`` never breaks expired lockfiles. Pass ``timeout=1``
+        # for non-blocking acquires so the break-check path fires at least
+        # once; on real contention this costs at most ~1s of waiting.
+        flufl_timeout = timeout if blocking else 1
         try:
-            self._lock.lock(timeout=timeout)
+            self._lock.lock(timeout=flufl_timeout)
         except flufl.TimeOutError as e:
-            msg = f"Could not acquire lock {self._lock.lockfile!r} within {timeout}s."
+            reported = timeout if blocking else 0
+            msg = f"Could not acquire lock {self._lock.lockfile!r} within {reported}s."
             raise LockUnavailableError(msg) from e
 
         if self._refresh_interval is not None:

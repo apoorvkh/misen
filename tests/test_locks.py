@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -96,3 +98,22 @@ def test_nfs_lock_timeout_surfaces_as_lock_unavailable(tmp_path: Path) -> None:
     with holder.context():
         with pytest.raises(LockUnavailableError):
             contender.acquire(timeout=0)
+
+
+def test_nfs_lock_non_blocking_breaks_stale_lock(tmp_path: Path) -> None:
+    # Regression: flufl.lock's stale-break check sits after its timeout
+    # check, so timeout=0 never breaks expired lockfiles. NFSLock must
+    # work around this so non-blocking acquires can still reclaim locks
+    # held by a holder that died without releasing (crash, OOM, SIGKILL).
+    path = tmp_path / "stale.lock"
+    holder = NFSLock(path, lifetime=1)
+    holder.acquire()
+    stale_mtime = time.time() - 3600
+    os.utime(holder._lock.lockfile, (stale_mtime, stale_mtime))
+
+    contender = NFSLock(path, lifetime=1)
+    contender.acquire(blocking=False)
+    try:
+        assert contender.is_locked()
+    finally:
+        contender.release()
