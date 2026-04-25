@@ -1,9 +1,8 @@
 import socket
 
-from misen.executors.local.scheduler import LocalScheduler
-from misen.executors.slurm.parsing import (
-    get_assigned_resources_slurm,
-    get_assigned_resources_slurm_per_node,
+from misen.executors.slurm import (
+    _assigned_resources_slurm,
+    _assigned_resources_slurm_per_node,
 )
 from misen.utils.assigned_resources import AssignedResources, select_local_assigned_resources
 
@@ -23,14 +22,14 @@ def _resources(
     )
 
 
-def test_get_assigned_resources_slurm_parses_cpu_gpu_and_memory() -> None:
+def test_assigned_resources_slurm_parses_cpu_gpu_and_memory() -> None:
     env = {
         "SLURM_CPUS_PER_TASK": "2",
         "SLURM_STEP_GPUS": "0,1",
         "SLURM_MEM_PER_NODE": "8192",
         "SLURM_MEM_PER_GPU": "2048",
     }
-    assert get_assigned_resources_slurm(env=env) == _resources(
+    assert _assigned_resources_slurm(env=env) == _resources(
         cpu_indices=[0, 1],
         gpu_indices=[0, 1],
         memory=8,
@@ -38,12 +37,12 @@ def test_get_assigned_resources_slurm_parses_cpu_gpu_and_memory() -> None:
     )
 
 
-def test_get_assigned_resources_slurm_uses_uuid_tokens_without_synthesizing_indices() -> None:
+def test_assigned_resources_slurm_uses_uuid_tokens_without_synthesizing_indices() -> None:
     env = {
         "SLURM_GPUS_ON_NODE": "2",
         "SLURM_STEP_GPUS": "GPU-abc,GPU-def",
     }
-    assert get_assigned_resources_slurm(env=env) == _resources(
+    assert _assigned_resources_slurm(env=env) == _resources(
         cpu_indices=[],
         gpu_indices=[],
         memory=None,
@@ -51,7 +50,7 @@ def test_get_assigned_resources_slurm_uses_uuid_tokens_without_synthesizing_indi
     )
 
 
-def test_get_assigned_resources_slurm_per_node_expands_nodelist() -> None:
+def test_assigned_resources_slurm_per_node_expands_nodelist() -> None:
     env = {
         "SLURM_JOB_NODELIST": "node[01-02],node05",
         "SLURM_CPUS_PER_TASK": "3",
@@ -64,7 +63,7 @@ def test_get_assigned_resources_slurm_per_node_expands_nodelist() -> None:
         memory=4,
         gpu_memory=None,
     )
-    assert get_assigned_resources_slurm_per_node(env=env) == {
+    assert _assigned_resources_slurm_per_node(env=env) == {
         "node01": expected,
         "node02": expected,
         "node05": expected,
@@ -127,16 +126,3 @@ def test_select_local_assigned_resources_no_host_match_multinode_returns_none(mo
         "node-b": _resources(cpu_indices=[1], gpu_indices=[0], memory=8, gpu_memory=16),
     }
     assert select_local_assigned_resources(resources_per_node) is None
-
-
-def test_local_scheduler_allocate_indices_consumes_pool() -> None:
-    pool = [0, 1, 2]
-    allocated = LocalScheduler._allocate_indices(pool, 2)
-    assert allocated == [0, 1]
-    assert pool == [2]
-
-
-def test_local_scheduler_allocate_indices_returns_none_when_insufficient() -> None:
-    pool = [0]
-    assert LocalScheduler._allocate_indices(pool, 2) is None
-    assert pool == [0]
