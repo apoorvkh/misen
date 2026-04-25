@@ -72,6 +72,29 @@ Sentinel arguments are resolved at execution time:
 The same task definition can run locally or on SLURM with backend-specific
 resource assignment.
 
+## Serialization
+
+`misen.utils.serde` persists task arguments and results into the workspace.
+A type gets a built-in serializer only if it satisfies both:
+
+1. **Faithful round-trip** — the loaded object behaves identically to the
+   original at its public API (same Python type, same data, same observable
+   methods and attributes). Internal storage detail that no public API
+   exposes (e.g. a dask task graph, zarr's on-disk codec) may differ.
+2. **Version-stable persistence** — preferred via library-provided save/load
+   (`torch.save`, `df.to_parquet`, `model.save_pretrained`); fallback to
+   stable formats we drive directly (JSON, GraphML, NPY) where no library
+   save exists. We do not call `pickle.dumps` ourselves on arbitrary types,
+   and we do not use library save/load paths the library itself documents
+   as not portable across versions.
+
+Types that fail either test (`matplotlib.figure.Figure`, `statsmodels.Results`,
+`sklearn` estimators, `memoryview`, ...) are intentionally excluded — users
+reshape their Task to return something serializable (e.g. `state_dict()`
+instead of an `nn.Module`, refit-inputs instead of a fitted sklearn
+estimator). The full policy and current exclusion list live in the
+`misen.utils.serde.libs` module docstring.
+
 ## Why This Design
 
 The model intentionally optimizes for:

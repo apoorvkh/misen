@@ -15,6 +15,7 @@ Since the predicate runs at every recursion step, msgpack-native
 one msgpack leaf and ``weights`` as a tensor leaf.
 """
 
+import array
 import datetime
 import decimal
 import enum
@@ -25,7 +26,7 @@ import re
 import types
 import uuid
 import zoneinfo
-from collections import OrderedDict, deque
+from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,9 @@ from misen.utils.serde.base import BaseSerializer, Container, DecodeCtx, EncodeC
 from misen.utils.type_registry import import_by_qualified_name, qualified_type_name
 
 __all__ = [
+    "ChainMapSerializer",
+    "CounterSerializer",
+    "DefaultDictSerializer",
     "DictSerializer",
     "ListSerializer",
     "MsgpackLeafSerializer",
@@ -62,6 +66,23 @@ __all__ = [
 
 _TAG = "__t"
 _VAL = "v"
+
+
+def _encode_callable_name(fn: Any) -> str | None:
+    """Return a round-trippable ``module.qualname`` for *fn*, or ``None``.
+
+    Used for ``defaultdict.default_factory`` — classes (``list``, ``dict``)
+    and module-level functions round-trip; lambdas and locally-defined
+    functions have ``<`` in their qualname and can't be re-imported, so
+    we drop the factory rather than produce a broken reference.
+    """
+    if fn is None:
+        return None
+    qname = getattr(fn, "__qualname__", None)
+    module = getattr(fn, "__module__", None)
+    if not qname or not module or "<" in qname:
+        return None
+    return f"{module}.{qname}"
 
 
 def _encode_tagged(obj: Any) -> Any:
@@ -129,6 +150,9 @@ def _encode_tagged(obj: Any) -> Any:
     if type(obj) is types.SimpleNamespace:
         return {_TAG: "namespace", _VAL: {k: _encode_tagged(v) for k, v in vars(obj).items()}}
 
+    if type(obj) is array.array:
+        return {_TAG: "array", _VAL: obj.tobytes(), "typecode": obj.typecode}
+
     # NamedTuple must be checked before plain tuple.
     if isinstance(obj, tuple) and hasattr(type(obj), "_fields"):
         return {
@@ -140,6 +164,19 @@ def _encode_tagged(obj: Any) -> Any:
         return {_TAG: "OrderedDict", _VAL: [[k, _encode_tagged(v)] for k, v in obj.items()]}
     if type(obj) is deque:
         return {_TAG: "deque", _VAL: [_encode_tagged(item) for item in obj], "maxlen": obj.maxlen}
+    # Counter / defaultdict / ChainMap come before plain dict — they're dict
+    # subclasses (and ChainMap presents dict-like items()) so the strict dict
+    # branch below would silently downcast and lose subclass identity.
+    if type(obj) is Counter:
+        return {_TAG: "Counter", _VAL: [[_encode_tagged(k), _encode_tagged(v)] for k, v in obj.items()]}
+    if type(obj) is defaultdict:
+        return {
+            _TAG: "defaultdict",
+            _VAL: [[_encode_tagged(k), _encode_tagged(v)] for k, v in obj.items()],
+            "factory": _encode_callable_name(obj.default_factory),
+        }
+    if type(obj) is ChainMap:
+        return {_TAG: "ChainMap", _VAL: [_encode_tagged(m) for m in obj.maps]}
     if type(obj) is dict:
         encoded = {k: _encode_tagged(v) for k, v in obj.items()}
         if _TAG in encoded:
@@ -210,6 +247,26 @@ def _decode_tagged(obj: Any) -> Any:
                 return OrderedDict((k, _decode_tagged(v)) for k, v in val)
             if tag == "deque":
                 return deque((_decode_tagged(item) for item in val), maxlen=obj.get("maxlen"))
+            if tag == "Counter":
+                return Counter({_decode_tagged(k): _decode_tagged(v) for k, v in val})
+            if tag == "defaultdict":
+                factory_name = obj.get("factory")
+                factory: Any = None
+                if factory_name:
+                    try:
+                        factory = import_by_qualified_name(factory_name)
+                    except ImportError:
+                        factory = None
+                dd: Any = defaultdict(factory)
+                for k, v in val:
+                    dd[_decode_tagged(k)] = _decode_tagged(v)
+                return dd
+            if tag == "ChainMap":
+                return ChainMap(*(_decode_tagged(m) for m in val))
+            if tag == "array":
+                out = array.array(obj["typecode"])
+                out.frombytes(val)
+                return out
             if tag == "escaped_dict":
                 return {k: _decode_tagged(v) for k, v in val}
             msg = f"Unknown serde tag: {tag!r}"
@@ -250,6 +307,9 @@ _MSGPACK_NATIVE_LEAF_TYPES: frozenset[type] = frozenset({
     fractions.Fraction,
     range,
     zoneinfo.ZoneInfo,
+    # ``array.array`` holds only primitive numbers under the hood — we
+    # encode it as tagged bytes + typecode, no sub-object walk.
+    array.array,
 })
 
 # Key types msgspec.msgpack accepts natively — keep conservative;
@@ -283,7 +343,19 @@ def _is_msgpack_native_key(key: Any) -> bool:
 # msgpack blob would duplicate their contents, whereas routing the
 # enclosing object through the ``Container`` path lets leaf-id memo
 # preserve shared identity on decode.
-_MSGPACK_GRAPH_TYPES: tuple[type, ...] = (dict, OrderedDict, list, tuple, set, frozenset, deque, types.SimpleNamespace)
+_MSGPACK_GRAPH_TYPES: tuple[type, ...] = (
+    dict,
+    OrderedDict,
+    list,
+    tuple,
+    set,
+    frozenset,
+    deque,
+    types.SimpleNamespace,
+    Counter,
+    defaultdict,
+    ChainMap,
+)
 
 
 def _is_msgpack_native(
@@ -349,6 +421,25 @@ def _is_msgpack_native(
                 _is_msgpack_native_key(k) and _is_msgpack_native(v, _path, _graph_seen) for k, v in obj.items()
             )
 
+        if t is Counter or t is defaultdict:
+            # Counter/defaultdict encode keys through ``_encode_tagged`` (not
+            # as msgspec dict keys), so any natively-encodable object is a
+            # valid key.  For defaultdict, a non-importable factory (lambda
+            # or local function) would silently drop the factory on decode,
+            # so we force such instances through the Container path where
+            # the encode error surfaces explicitly.
+            if t is defaultdict:
+                factory = obj.default_factory
+                if factory is not None and _encode_callable_name(factory) is None:
+                    return False
+            return all(
+                _is_msgpack_native(k, _path, _graph_seen) and _is_msgpack_native(v, _path, _graph_seen)
+                for k, v in obj.items()
+            )
+
+        if t is ChainMap:
+            return all(_is_msgpack_native(m, _path, _graph_seen) for m in obj.maps)
+
         if t in (list, tuple, set, frozenset, deque):
             return all(_is_msgpack_native(item, _path, _graph_seen) for item in obj)
 
@@ -393,6 +484,129 @@ class DictSerializer(BaseSerializer[Any]):
             out.update(items)
             return out
         out.update(items)
+        return out
+
+
+class CounterSerializer(BaseSerializer[Any]):
+    """Recursive serializer for ``collections.Counter`` with ``str`` keys.
+
+    Non-str-keyed Counters route through :class:`MsgpackLeafSerializer`
+    via the tagged encoder.  Each value dispatches independently so a
+    Counter holding e.g. an ndarray is handled correctly.
+    """
+
+    @staticmethod
+    def match(obj: Any) -> bool:
+        if type(obj) is not Counter:
+            return False
+        return all(isinstance(k, str) for k in obj)
+
+    @classmethod
+    def encode(cls, obj: Any, ctx: EncodeCtx) -> Node:
+        return Container(
+            serializer=qualified_type_name(cls),
+            children={k: ctx.encode(v) for k, v in obj.items()},
+            meta={},
+        )
+
+    @classmethod
+    def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
+        if not isinstance(node, Container):
+            msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
+            raise SerializationError(msg)
+        out: Counter[Any] = Counter()
+        ctx.remember_node(node, out)
+        for k, v in node.children.items():
+            out[k] = ctx.decode(v)
+        return out
+
+
+class DefaultDictSerializer(BaseSerializer[Any]):
+    """Recursive serializer for ``collections.defaultdict`` with ``str`` keys.
+
+    The ``default_factory`` must be importable by qualified name (a
+    class or module-level function); lambdas and local factories would
+    silently turn into ``None`` on decode, so they fall through here and
+    surface as an encode error instead.
+    """
+
+    @staticmethod
+    def match(obj: Any) -> bool:
+        if type(obj) is not defaultdict:
+            return False
+        if not all(isinstance(k, str) for k in obj):
+            return False
+        factory = obj.default_factory
+        return factory is None or _encode_callable_name(factory) is not None
+
+    @classmethod
+    def encode(cls, obj: Any, ctx: EncodeCtx) -> Node:
+        factory_name = _encode_callable_name(obj.default_factory)
+        meta: dict[str, Any] = {}
+        if factory_name is not None:
+            meta["factory"] = factory_name
+        return Container(
+            serializer=qualified_type_name(cls),
+            children={k: ctx.encode(v) for k, v in obj.items()},
+            meta=meta,
+        )
+
+    @classmethod
+    def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
+        if not isinstance(node, Container):
+            msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
+            raise SerializationError(msg)
+        factory: Any = None
+        factory_name = node.meta.get("factory")
+        if factory_name:
+            try:
+                factory = import_by_qualified_name(factory_name)
+            except ImportError:
+                factory = None
+        out: defaultdict[Any, Any] = defaultdict(factory)
+        ctx.remember_node(node, out)
+        for k, v in node.children.items():
+            out[k] = ctx.decode(v)
+        return out
+
+
+class ChainMapSerializer(BaseSerializer[Any]):
+    """Recursive serializer for ``collections.ChainMap``.
+
+    Each map in :attr:`ChainMap.maps` dispatches independently through
+    :func:`ctx.encode` — so a ChainMap whose maps contain tensors or
+    ndarrays still round-trips.  Requires each map to be a plain
+    ``dict`` with ``str`` keys (consistent with :class:`DictSerializer`).
+    """
+
+    @staticmethod
+    def match(obj: Any) -> bool:
+        if type(obj) is not ChainMap:
+            return False
+        for m in obj.maps:
+            if type(m) is not dict or not all(isinstance(k, str) for k in m):
+                return False
+        return True
+
+    @classmethod
+    def encode(cls, obj: Any, ctx: EncodeCtx) -> Node:
+        return Container(
+            serializer=qualified_type_name(cls),
+            children=[ctx.encode(m) for m in obj.maps],
+            meta={},
+        )
+
+    @classmethod
+    def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
+        if not isinstance(node, Container):
+            msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
+            raise SerializationError(msg)
+        # ChainMap's own object identity is published before decoding children
+        # via ``remember_node``.  Each child is a dict, so the dict serializer
+        # handles its own recursive decoding.
+        maps = [ctx.decode(c) for c in node.children]
+        out = ChainMap(*maps)
+        ctx.remember_node(node, out)
         return out
 
 
@@ -505,6 +719,9 @@ class MsgpackLeafSerializer(LeafSerializer[Any]):
 stdlib_serializers: list[type[BaseSerializer]] = [
     MsgpackLeafSerializer,  # predicate-gated — claims fully-native subtrees
     DictSerializer,
+    CounterSerializer,
+    DefaultDictSerializer,
+    ChainMapSerializer,
     ListSerializer,
     TupleSerializer,
 ]
@@ -550,6 +767,7 @@ _stdlib_fast_path_types: dict[type, type[Serializer]] = {
     ipaddress.IPv6Network: MsgpackLeafSerializer,
     ipaddress.IPv4Interface: MsgpackLeafSerializer,
     ipaddress.IPv6Interface: MsgpackLeafSerializer,
+    array.array: MsgpackLeafSerializer,
 }
 
 stdlib_serializers_by_type: dict[str, type[BaseSerializer]] = {
@@ -572,5 +790,8 @@ stdlib_volatile_types: frozenset[type] = frozenset(
         deque,
         slice,
         types.SimpleNamespace,
+        Counter,
+        defaultdict,
+        ChainMap,
     }
 )

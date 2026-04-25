@@ -155,6 +155,325 @@ def test_sympy_expression_roundtrip(tmp_path: pathlib.Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Added serializers: networkx / h5py / zarr / dask / pandas scalars+index /
+# scipy extensions / arviz.  Each test ``importorskip``s the backing library
+# so it runs only where installed.  All round-trips use version-stable
+# formats (GraphML, NetCDF, Parquet, ``.npy``, JSON of structured fields,
+# scipy ``construct_fast``); no path uses pickle.
+# ---------------------------------------------------------------------------
+
+
+def test_networkx_digraph_roundtrip(tmp_path: pathlib.Path) -> None:
+    """GraphML stores node IDs as strings by spec — use string IDs in the test."""
+    nx = pytest.importorskip("networkx")
+    g = nx.DiGraph()
+    g.add_node("start", label="entry")
+    g.add_node("mid", label="middle")
+    g.add_edge("start", "mid", weight=0.5)
+    serde.save(g, tmp_path)
+
+    root = _manifest(tmp_path)["root"]
+    assert root["_t"] == "dir"
+    assert root["serializer"].endswith(".NetworkXGraphSerializer")
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is nx.DiGraph
+    assert loaded.nodes["start"]["label"] == "entry"
+    assert loaded.edges["start", "mid"]["weight"] == 0.5
+
+
+def test_networkx_multigraph_roundtrip(tmp_path: pathlib.Path) -> None:
+    """MultiGraph with parallel edges — graph-type fidelity matters."""
+    nx = pytest.importorskip("networkx")
+    g = nx.MultiGraph()
+    g.add_edge("a", "b", weight=1)
+    g.add_edge("a", "b", weight=2)
+    serde.save(g, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is nx.MultiGraph
+    assert loaded.number_of_edges() == 2
+
+
+def test_networkx_rejects_non_primitive_attr(tmp_path: pathlib.Path) -> None:
+    """GraphML can only store primitive attribute values — surface a clean error."""
+    nx = pytest.importorskip("networkx")
+    from misen.exceptions import SerializationError
+
+    g = nx.Graph()
+    g.add_node("a", payload=numpy.arange(3))  # ndarray attr is not GraphML-safe
+    with pytest.raises(SerializationError):
+        serde.save(g, tmp_path)
+
+
+def test_networkx_int_node_ids_preserved(tmp_path: pathlib.Path) -> None:
+    """Int node IDs round-trip as int, not str — fidelity check for the node_type meta."""
+    nx = pytest.importorskip("networkx")
+    g = nx.DiGraph()
+    g.add_node(1, label="start")
+    g.add_node(2, label="mid")
+    g.add_edge(1, 2, weight=0.5)
+    serde.save(g, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert all(isinstance(n, int) for n in loaded.nodes)
+    assert loaded.nodes[1]["label"] == "start"
+    assert loaded.edges[1, 2]["weight"] == 0.5
+
+
+def test_networkx_rejects_mixed_node_id_types(tmp_path: pathlib.Path) -> None:
+    """Mixed int/str node IDs would degrade silently on read — fail at save."""
+    nx = pytest.importorskip("networkx")
+    from misen.exceptions import SerializationError
+
+    g = nx.Graph()
+    g.add_node(1)
+    g.add_node("a")
+    with pytest.raises(SerializationError, match="homogeneously-typed"):
+        serde.save(g, tmp_path)
+
+
+def test_h5py_file_roundtrip(tmp_path: pathlib.Path) -> None:
+    h5py = pytest.importorskip("h5py")
+    src = tmp_path / "src.h5"
+    with h5py.File(src, "w") as f:
+        f.create_dataset("x", data=numpy.arange(6).reshape(2, 3))
+        f.attrs["note"] = "demo"
+
+    save_dir = tmp_path / "save"
+    save_dir.mkdir()
+    with h5py.File(src, "r") as f:
+        serde.save(f, save_dir)
+
+    root = _manifest(save_dir)["root"]
+    assert root["_t"] == "dir"
+    assert root["serializer"].endswith(".H5pyFileSerializer")
+
+    loaded = serde.load(save_dir)
+    try:
+        assert numpy.array_equal(loaded["x"][...], numpy.arange(6).reshape(2, 3))
+        assert loaded.attrs["note"] == "demo"
+    finally:
+        loaded.close()
+
+
+def test_zarr_array_roundtrip(tmp_path: pathlib.Path) -> None:
+    zarr = pytest.importorskip("zarr")
+    data = numpy.arange(20, dtype=numpy.float32).reshape(4, 5)
+    src = zarr.open(str(tmp_path / "src.zarr"), mode="w", shape=data.shape, dtype=data.dtype, chunks=(2, 5))
+    src[...] = data
+    src.attrs["label"] = "demo"
+
+    save_dir = tmp_path / "save"
+    save_dir.mkdir()
+    serde.save(src, save_dir)
+
+    root = _manifest(save_dir)["root"]
+    assert root["_t"] == "dir"
+    assert root["serializer"].endswith(".ZarrArraySerializer")
+
+    loaded = serde.load(save_dir)
+    assert numpy.array_equal(numpy.asarray(loaded[...]), data)
+    assert loaded.attrs["label"] == "demo"
+
+
+def test_dask_array_roundtrip(tmp_path: pathlib.Path) -> None:
+    da = pytest.importorskip("dask.array")
+    arr = da.arange(12, chunks=4).reshape(3, 4)
+    serde.save(arr, tmp_path)
+
+    root = _manifest(tmp_path)["root"]
+    assert root["_t"] == "dir"
+    assert root["serializer"].endswith(".DaskArraySerializer")
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded).__name__ == "Array"
+    assert numpy.array_equal(loaded.compute(), arr.compute())
+
+
+def test_dask_dataframe_roundtrip(tmp_path: pathlib.Path) -> None:
+    dd = pytest.importorskip("dask.dataframe")
+    pd = pytest.importorskip("pandas")
+
+    df = pd.DataFrame({"a": [1, 2, 3, 4], "b": ["x", "y", "z", "w"]})
+    ddf = dd.from_pandas(df, npartitions=2)
+    serde.save(ddf, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded).__name__ == "DataFrame"
+    # Parquet round-trips silently promote ``object`` string columns to pyarrow
+    # string dtype, so compare values without requiring dtype parity.
+    pd.testing.assert_frame_equal(
+        loaded.compute().reset_index(drop=True),
+        df,
+        check_dtype=False,
+    )
+
+
+def test_dask_bag_roundtrip(tmp_path: pathlib.Path) -> None:
+    db = pytest.importorskip("dask.bag")
+    bag = db.from_sequence([1, 2, 3, 4, 5], npartitions=2)
+    serde.save(bag, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded).__name__ == "Bag"
+    assert sorted(loaded.compute()) == [1, 2, 3, 4, 5]
+
+
+def test_pandas_timestamp_roundtrip(tmp_path: pathlib.Path) -> None:
+    pd = pytest.importorskip("pandas")
+    ts = pd.Timestamp("2024-06-15 12:30:00", tz="UTC")
+    serde.save(ts, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is pd.Timestamp
+    assert loaded == ts
+
+
+def test_pandas_timedelta_roundtrip(tmp_path: pathlib.Path) -> None:
+    pd = pytest.importorskip("pandas")
+    td = pd.Timedelta("1 days 2 hours")
+    serde.save(td, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is pd.Timedelta
+    assert loaded == td
+
+
+def test_pandas_period_roundtrip(tmp_path: pathlib.Path) -> None:
+    pd = pytest.importorskip("pandas")
+    p = pd.Period("2024Q1", freq="Q")
+    serde.save(p, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is pd.Period
+    assert loaded == p
+
+
+def test_pandas_interval_roundtrip(tmp_path: pathlib.Path) -> None:
+    pd = pytest.importorskip("pandas")
+    iv = pd.Interval(0, 5, closed="left")
+    serde.save(iv, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is pd.Interval
+    assert loaded == iv
+
+
+def test_pandas_index_roundtrip(tmp_path: pathlib.Path) -> None:
+    pd = pytest.importorskip("pandas")
+    idx = pd.Index(["a", "b", "c"], name="letters")
+    serde.save(idx, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert isinstance(loaded, pd.Index)
+    assert list(loaded) == list(idx)
+    assert loaded.name == idx.name
+
+
+def test_pandas_multi_index_roundtrip(tmp_path: pathlib.Path) -> None:
+    pd = pytest.importorskip("pandas")
+    idx = pd.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1)], names=["k", "v"])
+    serde.save(idx, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert isinstance(loaded, pd.MultiIndex)
+    assert list(loaded) == list(idx)
+    assert loaded.names == idx.names
+
+
+def test_pandas_categorical_dtype_roundtrip(tmp_path: pathlib.Path) -> None:
+    pd = pytest.importorskip("pandas")
+    dtype = pd.CategoricalDtype(categories=["low", "med", "high"], ordered=True)
+    serde.save(dtype, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert isinstance(loaded, pd.CategoricalDtype)
+    assert list(loaded.categories) == ["low", "med", "high"]
+    assert loaded.ordered is True
+
+
+def test_scipy_sparse_roundtrip(tmp_path: pathlib.Path) -> None:
+    """Regression — the existing sparse path still works alongside new ones."""
+    sparse = pytest.importorskip("scipy.sparse")
+    m = sparse.csr_matrix(numpy.eye(4, dtype=numpy.float32))
+    serde.save(m, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert sparse.issparse(loaded)
+    assert numpy.array_equal(loaded.toarray(), m.toarray())
+
+
+def test_scipy_stats_frozen_roundtrip(tmp_path: pathlib.Path) -> None:
+    stats = pytest.importorskip("scipy.stats")
+    dist = stats.norm(loc=2.5, scale=1.7)
+    serde.save(dist, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    # Identity isn't preserved (fresh object), but sampled pdf agrees.
+    assert loaded.mean() == pytest.approx(dist.mean())
+    assert loaded.std() == pytest.approx(dist.std())
+    assert loaded.pdf(2.5) == pytest.approx(dist.pdf(2.5))
+
+
+def test_scipy_interpolate_spline_roundtrip(tmp_path: pathlib.Path) -> None:
+    interp = pytest.importorskip("scipy.interpolate")
+    xs = numpy.linspace(0, 10, 11)
+    ys = numpy.sin(xs)
+    spline = interp.CubicSpline(xs, ys)
+    serde.save(spline, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert type(loaded) is interp.CubicSpline
+    test_xs = numpy.linspace(0, 10, 50)
+    assert numpy.allclose(loaded(test_xs), spline(test_xs))
+
+
+def test_scipy_optimize_result_roundtrip(tmp_path: pathlib.Path) -> None:
+    opt = pytest.importorskip("scipy.optimize")
+    result = opt.minimize(lambda x: (x - 3.0) ** 2, x0=0.0)
+    serde.save(result, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert isinstance(loaded, opt.OptimizeResult)
+    assert loaded.x == pytest.approx(result.x)
+    assert loaded.fun == pytest.approx(result.fun)
+    assert loaded.success == result.success
+
+
+def test_sklearn_estimator_unsupported(tmp_path: pathlib.Path) -> None:
+    """Unsupported by design — see ``serde/libs/sklearn.py`` module docstring."""
+    pytest.importorskip("sklearn")
+    from sklearn.linear_model import LinearRegression
+
+    from misen.exceptions import SerializationError
+
+    rng = numpy.random.default_rng(0)
+    x = rng.normal(size=(20, 2)).astype(numpy.float32)
+    y = rng.normal(size=20).astype(numpy.float32)
+    model = LinearRegression().fit(x, y)
+    with pytest.raises(SerializationError, match="No serializer registered"):
+        serde.save(model, tmp_path)
+
+
+def test_arviz_inference_data_roundtrip(tmp_path: pathlib.Path) -> None:
+    az = pytest.importorskip("arviz")
+    import importlib.util
+
+    if not (importlib.util.find_spec("netCDF4") or importlib.util.find_spec("h5netcdf")):
+        pytest.skip("arviz needs a NetCDF engine (netCDF4 or h5netcdf)")
+
+    rng = numpy.random.default_rng(0)
+    posterior = {"mu": rng.normal(size=(2, 100))}  # 2 chains x 100 draws
+    idata = az.from_dict(posterior=posterior)
+    serde.save(idata, tmp_path)
+
+    loaded = serde.load(tmp_path)
+    assert isinstance(loaded, az.InferenceData)
+    assert numpy.allclose(loaded.posterior["mu"].values, idata.posterior["mu"].values)
+
+
+# ---------------------------------------------------------------------------
 # Structured-data libs — recursive field walk (attrs / pydantic / msgspec / dataclass)
 # ---------------------------------------------------------------------------
 #
@@ -512,16 +831,20 @@ def test_nested_enum_roundtrip(tmp_path: pathlib.Path) -> None:
     "module_name",
     [
         "altair",
+        "arviz",
         "attrs",
         "catboost",
+        "dask",
         "dataclass",
         "faiss",
         "geopandas",
+        "h5py",
         "hf_datasets",
         "jax",
         "keras",
         "lightgbm",
         "msgspec_struct",
+        "networkx",
         "numpy",
         "onnx",
         "pandas",
@@ -541,6 +864,7 @@ def test_nested_enum_roundtrip(tmp_path: pathlib.Path) -> None:
         "transformers",
         "xarray",
         "xgboost",
+        "zarr",
     ],
 )
 def test_lib_module_imports_cleanly(module_name: str) -> None:

@@ -10,22 +10,47 @@ fast paths):
    structures that contain at least one non-msgpack-native value by
    recursing so each child dispatches independently.
 3. Library-specific leaf / directory serializers (numpy, torch,
-   pandas, sklearn, ...) — each with a strict ``isinstance`` match.
+   pandas, ...) — each with a strict ``isinstance`` match.
 
 Every library module exports ``<name>_serializers`` and
 ``<name>_serializers_by_type``; the latter goes into the by-type fast
 path of :class:`TypeDispatchRegistry`.  Only stdlib contributes to
 ``all_volatile_types`` — library-specific types always dispatch the
 same way regardless of contents.
+
+Inclusion policy
+================
+
+A type is added here only if both hold:
+
+1. **Faithful round-trip** — the loaded object behaves identically to
+   the original at its public API.  Storage-level detail not exposed
+   by any public method (dask task graph, zarr on-disk codec, ...) may
+   differ.
+2. **Version-stable persistence** — prefer library-provided save/load;
+   fall back to stable formats (JSON, GraphML, NPY, ...) when none
+   exists.  We don't call ``pickle.dumps`` on arbitrary types ourselves,
+   and we don't use library save paths the library itself flags as
+   version-unstable.
+
+Excluded for failing one or both: ``matplotlib.figure.Figure``
+(pickle-only, mpl-version-unstable), ``statsmodels.Results``
+(pickle-protocol-unstable), ``sklearn`` estimators (joblib
+version-unstable / ONNX changes type), ``memoryview`` (readonly flips).
+Users reshape their Task to return something serializable instead
+(``state_dict()`` not ``nn.Module``, refit-inputs not a fitted estimator).
 """
 
 from misen.utils.serde.base import BaseSerializer
 from misen.utils.serde.libs.altair import altair_serializers, altair_serializers_by_type
+from misen.utils.serde.libs.arviz import arviz_serializers, arviz_serializers_by_type
 from misen.utils.serde.libs.attrs import attrs_serializers, attrs_serializers_by_type
 from misen.utils.serde.libs.catboost import catboost_serializers, catboost_serializers_by_type
+from misen.utils.serde.libs.dask import dask_serializers, dask_serializers_by_type
 from misen.utils.serde.libs.dataclass import dataclass_serializers, dataclass_serializers_by_type
 from misen.utils.serde.libs.faiss import faiss_serializers, faiss_serializers_by_type
 from misen.utils.serde.libs.geopandas import geopandas_serializers, geopandas_serializers_by_type
+from misen.utils.serde.libs.h5py import h5py_serializers, h5py_serializers_by_type
 from misen.utils.serde.libs.hf_datasets import hf_datasets_serializers, hf_datasets_serializers_by_type
 from misen.utils.serde.libs.jax import jax_serializers, jax_serializers_by_type
 from misen.utils.serde.libs.keras import keras_serializers, keras_serializers_by_type
@@ -34,6 +59,7 @@ from misen.utils.serde.libs.msgspec_struct import (
     msgspec_struct_serializers,
     msgspec_struct_serializers_by_type,
 )
+from misen.utils.serde.libs.networkx import networkx_serializers, networkx_serializers_by_type
 from misen.utils.serde.libs.numpy import numpy_serializers, numpy_serializers_by_type
 from misen.utils.serde.libs.onnx import onnx_serializers, onnx_serializers_by_type
 from misen.utils.serde.libs.pandas import pandas_serializers, pandas_serializers_by_type
@@ -60,6 +86,7 @@ from misen.utils.serde.libs.transformers import (
 )
 from misen.utils.serde.libs.xarray import xarray_serializers, xarray_serializers_by_type
 from misen.utils.serde.libs.xgboost import xgboost_serializers, xgboost_serializers_by_type
+from misen.utils.serde.libs.zarr import zarr_serializers, zarr_serializers_by_type
 from misen.utils.serde.registry import Registry
 
 __all__ = [
@@ -96,10 +123,17 @@ all_serializers: list[type[BaseSerializer]] = [
     *polars_serializers,
     *pyarrow_serializers,
     *geopandas_serializers,
-    # Sparse.
+    *dask_serializers,
+    # Scientific storage.
+    *h5py_serializers,
+    *zarr_serializers,
+    # Sparse / stats / optimization.
     *scipy_serializers,
+    *arviz_serializers,
     # Geospatial.
     *shapely_serializers,
+    # Graph.
+    *networkx_serializers,
     # ML models.
     *keras_serializers,
     *sklearn_serializers,
@@ -136,8 +170,13 @@ all_serializers_by_type: dict[str, type[BaseSerializer]] = {
     **polars_serializers_by_type,
     **pyarrow_serializers_by_type,
     **geopandas_serializers_by_type,
+    **dask_serializers_by_type,
+    **h5py_serializers_by_type,
+    **zarr_serializers_by_type,
     **scipy_serializers_by_type,
+    **arviz_serializers_by_type,
     **shapely_serializers_by_type,
+    **networkx_serializers_by_type,
     **keras_serializers_by_type,
     **sklearn_serializers_by_type,
     **xgboost_serializers_by_type,

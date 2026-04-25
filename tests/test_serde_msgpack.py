@@ -15,6 +15,7 @@ surface as :class:`SerializationError` rather than crashing with
 
 from __future__ import annotations
 
+import array
 import dataclasses
 import datetime
 import enum
@@ -23,7 +24,7 @@ import pathlib
 import re
 import types
 import zoneinfo
-from collections import OrderedDict, defaultdict, deque
+from collections import ChainMap, Counter, OrderedDict, defaultdict, deque
 from collections.abc import Callable
 from datetime import timezone
 from decimal import Decimal
@@ -296,6 +297,125 @@ def test_deque_no_maxlen(roundtrip: Roundtrip) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Counter / defaultdict / ChainMap — dict-family stdlib containers
+# ---------------------------------------------------------------------------
+
+
+def test_counter_str_keys_roundtrip(roundtrip: Roundtrip) -> None:
+    c = Counter(["a", "b", "a", "c", "a", "b"])
+    loaded = roundtrip(c)
+    assert type(loaded) is Counter
+    assert loaded == c
+
+
+def test_counter_tuple_keys_roundtrip(roundtrip: Roundtrip) -> None:
+    """Counter with non-str keys routes through tagged msgpack."""
+    c: Counter[tuple[int, int]] = Counter({(1, 2): 3, (3, 4): 5})
+    loaded = roundtrip(c)
+    assert type(loaded) is Counter
+    assert loaded == c
+    for key in loaded:
+        assert type(key) is tuple
+
+
+def test_counter_empty_roundtrip(roundtrip: Roundtrip) -> None:
+    c: Counter[str] = Counter()
+    loaded = roundtrip(c)
+    assert type(loaded) is Counter
+    assert loaded == c
+
+
+def test_defaultdict_with_list_factory(roundtrip: Roundtrip) -> None:
+    dd: defaultdict[str, list[int]] = defaultdict(list)
+    dd["a"].append(1)
+    dd["a"].append(2)
+    dd["b"].append(3)
+    loaded = roundtrip(dd)
+    assert type(loaded) is defaultdict
+    assert loaded.default_factory is list
+    assert dict(loaded) == dict(dd)
+
+
+def test_defaultdict_with_int_factory(roundtrip: Roundtrip) -> None:
+    dd: defaultdict[str, int] = defaultdict(int)
+    dd["a"] += 5
+    dd["b"] += 10
+    loaded = roundtrip(dd)
+    assert type(loaded) is defaultdict
+    assert loaded.default_factory is int
+    assert dict(loaded) == dict(dd)
+
+
+def test_defaultdict_without_factory(roundtrip: Roundtrip) -> None:
+    """A ``defaultdict(None)`` is a plain-acting dict with the defaultdict type."""
+    dd: defaultdict[str, int] = defaultdict()
+    dd["x"] = 1
+    loaded = roundtrip(dd)
+    assert type(loaded) is defaultdict
+    assert loaded.default_factory is None
+    assert dict(loaded) == dict(dd)
+
+
+def test_defaultdict_lambda_factory_raises(roundtrip: Roundtrip) -> None:
+    """Lambda factories aren't importable — encode must surface a clear error."""
+    dd: defaultdict[str, int] = defaultdict(lambda: 42)
+    dd["a"] = 1
+    with pytest.raises(SerializationError):
+        roundtrip(dd)
+
+
+def test_chainmap_roundtrip(roundtrip: Roundtrip) -> None:
+    cm: ChainMap[str, int] = ChainMap({"a": 1, "b": 2}, {"c": 3})
+    loaded = roundtrip(cm)
+    assert type(loaded) is ChainMap
+    assert loaded.maps == cm.maps
+
+
+def test_chainmap_empty_maps_roundtrip(roundtrip: Roundtrip) -> None:
+    cm: ChainMap[str, int] = ChainMap({}, {})
+    loaded = roundtrip(cm)
+    assert type(loaded) is ChainMap
+    assert loaded.maps == cm.maps
+
+
+# ---------------------------------------------------------------------------
+# array.array — byte-backed stdlib sequence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("typecode", "values"),
+    [
+        ("b", [-1, 0, 1]),
+        ("B", [0, 1, 255]),
+        ("h", [-10, 0, 10]),
+        ("i", [-100, 0, 100]),
+        ("l", [-1000, 0, 1000]),
+        ("q", [-(2**40), 0, 2**40]),
+        ("f", [1.5, 2.5, 3.5]),
+        ("d", [1.1, 2.2, 3.3]),
+        ("u", list("hello")),
+    ],
+)
+def test_array_roundtrip(roundtrip: Roundtrip, typecode: str, values: list[Any]) -> None:
+    a = array.array(typecode, values)
+    loaded = roundtrip(a)
+    assert type(loaded) is array.array
+    assert loaded.typecode == typecode
+    assert list(loaded) == list(a)
+
+
+def test_array_empty_roundtrip(roundtrip: Roundtrip) -> None:
+    a = array.array("i")
+    loaded = roundtrip(a)
+    assert type(loaded) is array.array
+    assert loaded.typecode == "i"
+    assert len(loaded) == 0
+
+
+
+
+# ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
@@ -400,10 +520,13 @@ def test_str_subclass_raises_clean_error(roundtrip: Roundtrip) -> None:
 
 
 def test_dict_subclass_raises_clean_error(roundtrip: Roundtrip) -> None:
-    dd: defaultdict[str, list[int]] = defaultdict(list)
-    dd["a"].append(1)
+    """Ad-hoc dict subclasses without a registered serializer fail cleanly."""
+
+    class MyDict(dict):
+        pass
+
     with pytest.raises(SerializationError):
-        roundtrip(dd)
+        roundtrip(MyDict({"a": 1}))
 
 
 def test_unknown_class_raises_clean_error(roundtrip: Roundtrip) -> None:
