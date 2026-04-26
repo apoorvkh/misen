@@ -22,7 +22,6 @@ from rich.pretty import Pretty
 from rich.text import Text
 from rich.tree import Tree
 
-from misen.exceptions import CacheError
 from misen.executor import ExecutorType  # noqa: TC001
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
@@ -705,18 +704,13 @@ def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
 
 def _list_task_logs(task: Task[Any], workspace: Any, console: Console) -> None:
     """List available task log entries with metadata."""
-    try:
-        resolved_hash = task.resolved_hash(workspace=workspace).b32()
-    except CacheError:
-        console.print("  [dim]No resolved hash (task not yet executed).[/dim]")
-        return
-
-    log_dir = Path(workspace.directory) / "task_logs" / resolved_hash[:2]
-    if not log_dir.exists():
+    task_hash = task.task_hash().b32()
+    task_log_dir = Path(workspace.directory) / "task_logs" / task_hash[:2]
+    if not task_log_dir.exists():
         console.print("  [dim]No logs found.[/dim]")
         return
 
-    log_files = sorted(log_dir.glob(f"{resolved_hash}_*.log"), key=lambda p: p.stat().st_mtime)
+    log_files = sorted(task_log_dir.glob(f"{task_hash}_*.log"), key=lambda p: p.stat().st_mtime)
     if not log_files:
         console.print("  [dim]No logs found.[/dim]")
         return

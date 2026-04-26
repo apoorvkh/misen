@@ -214,7 +214,7 @@ class Workspace(Configurable):
     def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
         """Return path where ``task``'s log for ``job_id`` should be written.
 
-        Logs are keyed by ``(resolved_hash, job_id)``; each task execution
+        Logs are keyed by ``(task_hash, job_id)``; each task execution
         produces one log file per job. ``job_id=None`` selects a default
         identifier so callers without a backend-assigned job id still get
         a stable path.

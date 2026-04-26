@@ -1,6 +1,9 @@
+import sys
+
 import pytest
 
 from misen import Task, meta
+from misen.exceptions import CacheError
 from misen.utils.hashing import TaskHash
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.disk import DiskWorkspace, LMDBMapping
@@ -14,6 +17,17 @@ def log_task_a() -> int:
 @meta(id="log_task_b", cache=True)
 def log_task_b() -> int:
     return 2
+
+
+@meta(id="log_task_source", cache=False)
+def log_task_source() -> int:
+    return 1
+
+
+@meta(id="log_task_sink", cache=False)
+def log_task_sink(value: int) -> int:
+    sys.stdout.write(f"sink {value}\n")
+    return value
 
 
 def test_job_log_iter_filters_by_work_unit(tmp_path) -> None:
@@ -31,6 +45,34 @@ def test_job_log_iter_filters_by_work_unit(tmp_path) -> None:
 
     assert set(workspace.job_log_iter(work_unit=work_unit_a)) == {log_a_1, log_a_2}
     assert set(workspace.job_log_iter()) == {log_a_1, log_a_2, log_b_1}
+
+
+def test_task_logs_are_keyed_by_task_hash_for_unresolved_dependencies(tmp_path) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen-task-logs"))
+    source_task = Task(log_task_source)
+    sink_task = Task(log_task_sink, value=source_task.T)
+
+    with pytest.raises(CacheError):
+        sink_task.resolved_hash(workspace=workspace)
+
+    with workspace.get_task_log(task=sink_task, job_id="job-live").open("a", encoding="utf-8") as log:
+        log.write("sink started\n")
+
+    with workspace.read_task_log(task=sink_task, job_id="job-live") as log:
+        assert log.read() == "sink started\n"
+
+
+def test_work_unit_downstream_task_log_uses_original_task_hash(tmp_path) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen-work-unit-task-logs"))
+    source_task = Task(log_task_source)
+    sink_task = Task(log_task_sink, value=source_task.T)
+    work_unit = WorkUnit(root=sink_task, dependencies=set())
+
+    WorkUnit.execute(work_unit.graph, workspace=workspace, job_id="job-live", assigned_resources=None)
+
+    key = sink_task.task_hash().b32()
+    log_path = tmp_path / ".misen-work-unit-task-logs" / "task_logs" / key[:2] / f"{key}_job-live.log"
+    assert log_path.read_text(encoding="utf-8") == "sink 1\n"
 
 
 def test_disk_workspace_close_releases_lmdb_and_blocks_further_use(tmp_path) -> None:

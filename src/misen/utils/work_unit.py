@@ -121,15 +121,17 @@ class WorkUnit:
 
             # Rebuild the task with resolved in-unit non-cacheable dependencies.
             # Cacheable dependencies are still loaded through Workspace in Task.result.
-            task_results[task] = task.with_resolved_args(
+            executable_task = task.with_resolved_args(
                 args=tuple(resolve_arg(arg) for arg in task.args),
                 kwargs={name: resolve_arg(arg) for name, arg in task.kwargs.items()},
-            ).result(
+            )
+            task_results[task] = executable_task.result(
                 workspace=workspace,
                 compute_if_uncached=True,
                 compute_uncached_deps=False,
                 _job_id=job_id,
                 _assigned_resources=assigned_resources,
+                _log_task=task,
             )
 
     def as_payload(self, workspace: Workspace, job_id: str) -> bytes:

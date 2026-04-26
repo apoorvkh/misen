@@ -343,7 +343,7 @@ class DiskWorkspace(Workspace):
         return d
 
     def _task_log_dir(self, task: Task) -> tuple[Path, str]:
-        key_str = task.resolved_hash(workspace=self).b32()
+        key_str = task.task_hash().b32()
         log_dir = Path(self._directory) / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str

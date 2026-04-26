@@ -197,6 +197,7 @@ def execute_task(
     dependency_results: dict[Task[Any], Any],
     assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
     job_id: str,
+    log_task: Task[Any] | None = None,
 ) -> tuple[R, Path | None]:
     """Execute task function under log capture.
 
@@ -206,6 +207,9 @@ def execute_task(
         dependency_results: Precomputed dependency results.
         assigned_resources: Optional runtime resources for sentinel injection.
         job_id: Job id for task-log grouping.
+        log_task: Task identity to use for log storage. This can differ from
+            ``task`` when a work unit executes an internal copy with resolved
+            non-cacheable dependencies.
 
     Returns:
         Task result value plus the runtime work directory used (if any).
@@ -226,7 +230,8 @@ def execute_task(
     runtime_event(f"Task started: {display}", style="yellow")
     started_at = time.perf_counter()
 
-    log_path = workspace.get_task_log(task=task, job_id=job_id)
+    log_identity = log_task or task
+    log_path = workspace.get_task_log(task=log_identity, job_id=job_id)
     try:
         with log_path.open("a", buffering=1, encoding="utf-8") as task_log:
             with capture_all_output(task_log, tee_to_stdout=True):
@@ -241,7 +246,7 @@ def execute_task(
                     )
                     raise
     finally:
-        workspace.finalize_task_log(task=task, job_id=job_id)
+        workspace.finalize_task_log(task=log_identity, job_id=job_id)
 
     logger.info("Task finished: %s in %.2fs.", debug_name, time.perf_counter() - started_at)
     runtime_event(f"Task finished: {display} in {(time.perf_counter() - started_at):.2f}s", style="green")

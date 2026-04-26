@@ -336,6 +336,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         compute_uncached_deps: bool = False,
         _job_id: str | None = None,
         _assigned_resources: AssignedResources | AssignedResourcesPerNode | None = None,
+        _log_task: Task[Any] | None = None,
     ) -> R:
         """Compute (or retrieve) this Task's result.
 
@@ -347,6 +348,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 dependencies.
             _job_id: Optional executor job identifier for log grouping.
             _assigned_resources: Optional runtime resources injected by executor.
+            _log_task: Optional original task to use for runtime log identity.
 
         Returns:
             Result of ``func(*resolved_args, **resolved_kwargs)``.
@@ -428,6 +430,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 dependency_results=dependency_results,
                 assigned_resources=_assigned_resources,
                 job_id=_job_id,
+                log_task=_log_task,
             )
 
         save_task_result(task=self, result=result, workspace=workspace)

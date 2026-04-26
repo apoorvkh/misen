@@ -367,10 +367,10 @@ class CloudWorkspace(Workspace):
         return path
 
     def _task_log_paths(self, task: Task, job_id: str) -> tuple[Path, str]:
-        rh = task.resolved_hash(workspace=self).b32()
-        local_dir = self._scratch / "task_logs" / rh
+        key = task.task_hash().b32()
+        local_dir = self._scratch / "task_logs" / key
         local_dir.mkdir(parents=True, exist_ok=True)
-        return local_dir / f"{job_id}.log", self._under("task_logs", rh, f"{job_id}.log")
+        return local_dir / f"{job_id}.log", self._under("task_logs", key, f"{job_id}.log")
 
     def _start_live_upload(self, local_path: Path, remote_key: str) -> None:
         with self._live_log_lock:
@@ -522,14 +522,14 @@ class CloudWorkspace(Workspace):
         self._stop_live_upload(local_path)
 
     def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
-        rh = task.resolved_hash(workspace=self).b32()
+        key = task.task_hash().b32()
         if job_id is not None:
             local_path, remote_key = self._task_log_paths(task, job_id)
             self._refresh_log_local(remote_key, local_path)
             return local_path.open("r", encoding="utf-8")
 
-        local_dir = self._scratch / "task_logs" / rh
-        remote_logs = self._remote_logs(self._under("task_logs", rh) + "/")
+        local_dir = self._scratch / "task_logs" / key
+        remote_logs = self._remote_logs(self._under("task_logs", key) + "/")
         candidates: list[tuple[float, Path, str | None]] = []
         if local_dir.exists():
             candidates.extend((p.stat().st_mtime, p, None) for p in local_dir.glob("*.log"))
