@@ -25,8 +25,6 @@ from misen.utils.resource_binding import apply_resource_binding
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-JOB_LOG_PATH_ARG = "--job-log-path"
-
 
 def execute(
     payload: Path,

@@ -29,8 +29,6 @@ import cloudpickle
 import uv
 from dotenv import load_dotenv
 
-from misen.utils.execute import JOB_LOG_PATH_ARG
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -40,6 +38,15 @@ if TYPE_CHECKING:
     from misen.workspace import Workspace
 
 __all__ = ["LocalSnapshot", "NullSnapshot", "Snapshot", "apply_env_files_temporarily"]
+
+# CLI flag the worker entrypoint accepts (matches ``execute.execute``'s
+# ``job_log_path`` parameter). Defined here rather than in
+# ``misen.utils.execute`` so importing snapshot doesn't pre-load the worker
+# module — the worker runs as ``python -m misen.utils.execute``, and the
+# package-import chain (misen → executor → snapshot) would otherwise put
+# ``misen.utils.execute`` in ``sys.modules`` before runpy executes it as
+# ``__main__``, triggering a ``RuntimeWarning``.
+JOB_LOG_PATH_ARG = "--job-log-path"
 
 
 class Snapshot(ABC):
