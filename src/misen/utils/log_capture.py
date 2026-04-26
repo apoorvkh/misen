@@ -40,9 +40,31 @@ def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
         _try(target.flush)
 
 
+def _try_fsync(target: TextIO) -> None:
+    """Call ``os.fsync`` on ``target`` if it's a real file; no-op otherwise."""
+    fileno = _try(getattr, target, "fileno")
+    if not callable(fileno):
+        return
+    fd = _try(fileno)
+    if fd is None:
+        return
+    _try(os.fsync, fd)
+
+
 def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
     """Create incremental decoder for the given encoding."""
     return codecs.getincrementaldecoder(enc)(errors="replace")
+
+
+# Default cadence at which the reader thread fsyncs the log targets.
+# ``flush()`` only gets bytes into the kernel; on NFS-mounted shared
+# filesystems (typical SLURM clusters) the client-side write-back cache
+# can sit on those bytes for several seconds before propagating them to
+# the server, so a tail-reader on another node sees stale content. An
+# explicit fsync triggers an NFS COMMIT, but per-write fsyncs are an
+# RPC each — throttle to a small interval so the worst-case staleness is
+# bounded without paying RPC cost on every chunk.
+_LOG_FSYNC_INTERVAL_S = 0.1
 
 
 def _drain_and_write(
@@ -52,13 +74,19 @@ def _drain_and_write(
     targets: Sequence[TextIO],
     *,
     deadline: float | None = None,
+    fsync_interval_s: float = _LOG_FSYNC_INTERVAL_S,
 ) -> None:
     """Read from ``pipe_fd`` until EOF/error and write decoded text to targets.
 
     Stops when the pipe returns EOF, raises ``OSError``/``BlockingIOError``, or
     ``deadline`` (a ``time.monotonic`` timestamp) is reached. Always flushes the
-    decoder's trailing bytes to every target before returning.
+    decoder's trailing bytes to every target before returning, and fsyncs every
+    target on exit so its final contents reach durable storage.
+
+    ``fsync_interval_s`` throttles the inline fsync rate; pass ``0`` to fsync
+    after every chunk (more responsive, more RPC cost on NFS).
     """
+    last_fsync_at = time.monotonic()
     while deadline is None or time.monotonic() < deadline:
         try:
             chunk = os.read(pipe_fd, 8192)
@@ -69,10 +97,16 @@ def _drain_and_write(
         text = decoder.decode(chunk)
         for target in targets:
             _write(text, lock=lock, target=target)
+        now = time.monotonic()
+        if now - last_fsync_at >= fsync_interval_s:
+            for target in targets:
+                _try_fsync(target)
+            last_fsync_at = now
 
     tail = decoder.decode(b"", final=True)
     for target in targets:
         _write(tail, lock=lock, target=target)
+        _try_fsync(target)
 
 
 def _wrap_fd(fd: int, enc: str, *, closefd: bool = False) -> TextIO:
