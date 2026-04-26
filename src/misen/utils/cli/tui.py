@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.text import Text
 from rich.tree import Tree as RichTree
 
+from misen.exceptions import CacheError
 from misen.executor import CompletedJob, JobState, bulk_job_states
 from misen.utils.cli.display import format_task_line_markup, format_task_line_text, iter_task_arg_children
 from misen.utils.runtime_events import task_label
@@ -803,7 +804,12 @@ def _run_textual_task_monitor(
                     f.seek(self._log_offset)
                     chunk = f.read()
                     self._log_offset = f.tell()
-            except FileNotFoundError:
+            except (FileNotFoundError, CacheError):
+                # CacheError fires when the task log path can't be resolved
+                # yet — its directory is keyed by ``resolved_hash``, which
+                # requires every dependency's result hash, which doesn't
+                # exist until the deps complete. Treat that the same as
+                # "log file not produced yet" and show the placeholder.
                 if is_new_source:
                     log_viewer.write(Text(placeholder, style="dim italic"))
                 return
