@@ -1335,11 +1335,13 @@ def test_watch_tasks_uses_textual_runner(monkeypatch) -> None:
         job_graph: DependencyGraph[Job],
         workspace: object,
         poll_interval_s: float,
+        state_poll_interval_s: float,
     ) -> None:
         seen["named_tasks"] = named_tasks
         seen["job_graph"] = job_graph
         seen["workspace"] = workspace
         seen["poll_interval_s"] = poll_interval_s
+        seen["state_poll_interval_s"] = state_poll_interval_s
 
     monkeypatch.setattr(tui_module, "_run_textual_task_monitor", fake_run_textual)
 
@@ -1349,9 +1351,11 @@ def test_watch_tasks_uses_textual_runner(monkeypatch) -> None:
         job_graph=graph,
         workspace=workspace,
         poll_interval_s=0.0,
+        state_poll_interval_s=1.5,
     )
 
     assert seen["job_graph"] is graph
     assert seen["workspace"] is workspace
     assert seen["named_tasks"] is named_tasks
     assert seen["poll_interval_s"] == 0.0
+    assert seen["state_poll_interval_s"] == 1.5

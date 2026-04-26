@@ -25,6 +25,7 @@ from misen.utils.snapshot import LocalSnapshot
 from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
     from pathlib import Path
 
     from misen.task_metadata import Resources
@@ -34,9 +35,11 @@ if TYPE_CHECKING:
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
-__all__ = ["Executor", "Job"]
+__all__ = ["Executor", "Job", "JobState", "bulk_job_states"]
 
 ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
+JobState: TypeAlias = Literal["pending", "running", "done", "failed", "unknown"]
+_VALID_JOB_STATES: frozenset[JobState] = frozenset({"pending", "running", "done", "failed", "unknown"})
 JobT = TypeVar("JobT", bound="Job")
 SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
 logger = logging.getLogger(__name__)
@@ -315,8 +318,24 @@ class Job(ABC):
         return work_unit_label(self.work_unit)
 
     @abstractmethod
-    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
+    def state(self) -> JobState:
         """Return the current backend job state."""
+
+    @classmethod
+    def bulk_state(cls, jobs: Sequence[Job]) -> dict[Job, JobState]:
+        """Return the current state for each of ``jobs`` as a dict.
+
+        The default implementation calls :meth:`state` once per job. Backends
+        that can answer many jobs in a single backend call (e.g. one
+        ``squeue`` invocation covering many SLURM job ids) should override
+        this so the UI can poll many jobs without paying the per-job cost
+        N times.
+
+        Callers are expected to pass instances of ``cls`` (or to use
+        :func:`bulk_job_states`, which does this grouping for them); a
+        backend override may rely on that homogeneity.
+        """
+        return {job: job.state() for job in jobs}
 
     def wait(self, poll_s: float = 0.5) -> None:
         """Block until job reaches a terminal state.
@@ -328,6 +347,31 @@ class Job(ABC):
             if self.state() in ("done", "failed"):
                 return
             time.sleep(poll_s)
+
+
+def bulk_job_states(jobs: Iterable[Job]) -> dict[Job, JobState]:
+    """Return states for a heterogeneous set of jobs in as few calls as possible.
+
+    Groups ``jobs`` by concrete class and dispatches one
+    :meth:`Job.bulk_state` call per class. If a class's ``bulk_state``
+    raises a known query error, every job in that group is reported as
+    ``"unknown"`` rather than letting the failure propagate.
+    """
+    by_class: dict[type[Job], list[Job]] = {}
+    for job in jobs:
+        by_class.setdefault(type(job), []).append(job)
+    result: dict[Job, JobState] = {}
+    for klass, group in by_class.items():
+        try:
+            states = klass.bulk_state(group)
+        except (FileNotFoundError, OSError, RuntimeError):
+            for job in group:
+                result[job] = "unknown"
+            continue
+        for job in group:
+            state = states.get(job, "unknown")
+            result[job] = state if state in _VALID_JOB_STATES else "unknown"
+    return result
 
 
 class CompletedJob(Job):
@@ -346,3 +390,8 @@ class CompletedJob(Job):
     def state(self) -> Literal["done"]:
         """Return terminal ``done`` state."""
         return "done"
+
+    @classmethod
+    def bulk_state(cls, jobs: Sequence[Job]) -> dict[Job, JobState]:
+        """All ``CompletedJob`` instances are unconditionally ``done``."""
+        return dict.fromkeys(jobs, "done")

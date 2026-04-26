@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import time
@@ -13,7 +14,7 @@ from rich.console import Console
 from rich.text import Text
 from rich.tree import Tree as RichTree
 
-from misen.executor import CompletedJob
+from misen.executor import CompletedJob, JobState, bulk_job_states
 from misen.utils.cli.display import format_task_line_markup, format_task_line_text, iter_task_arg_children
 from misen.utils.runtime_events import task_label
 
@@ -37,7 +38,6 @@ __all__ = [
     "watch_tasks",
 ]
 
-JobState = Literal["pending", "running", "done", "failed", "unknown"]
 Mode = Literal["task", "job"]
 _TERMINAL_STATES = frozenset({"done", "failed"})
 _STATE_STYLES: dict[JobState, str] = {
@@ -67,9 +67,10 @@ def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> 
         with _runtime_events_suppressed():
             watch_tasks(named_tasks=named_tasks, job_graph=job_graph, workspace=workspace)
     jobs = list(job_graph.nodes())
-    if all(_safe_job_state(job) in _TERMINAL_STATES for job in jobs):
+    final_states = bulk_job_states(jobs)
+    if all(final_states.get(job, "unknown") in _TERMINAL_STATES for job in jobs):
         executor.cleanup_snapshot(snapshot)
-    _print_final_tree(named_tasks=named_tasks, job_graph=job_graph)
+    _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, states=final_states)
 
 
 def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
@@ -82,6 +83,7 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
     named_tasks = experiment.normalized_tasks()
     tasks = set(named_tasks.values())
     console = Console(stderr=True, soft_wrap=True)
+    final_states: dict[Job, JobState] = {}
     with _runtime_job_board_suppressed():
         job_graph, snapshot = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
         if not job_graph.nodes():
@@ -94,10 +96,11 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
                 _watch_line_events(job_graph=job_graph, console=console)
         finally:
             jobs = list(job_graph.nodes())
-            if all(_safe_job_state(job) in _TERMINAL_STATES for job in jobs):
+            final_states = bulk_job_states(jobs)
+            if all(final_states.get(job, "unknown") in _TERMINAL_STATES for job in jobs):
                 executor.cleanup_snapshot(snapshot)
     if not console.is_terminal:
-        _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, console=console)
+        _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, console=console, states=final_states)
 
 
 def watch_tasks(
@@ -106,8 +109,21 @@ def watch_tasks(
     job_graph: DependencyGraph[Job],
     workspace: Workspace,
     poll_interval_s: float = 0.2,
+    state_poll_interval_s: float = 2.0,
 ) -> None:
-    """Render the task dependency tree and stream logs until users exit."""
+    """Render the task dependency tree and stream logs until users exit.
+
+    Args:
+        named_tasks: User-named root tasks to render.
+        job_graph: Dependency graph of dispatched job handles.
+        workspace: Workspace whose log files the UI will tail.
+        poll_interval_s: How often the UI re-reads log files. The default is
+            chosen to feel "live" without burning CPU.
+        state_poll_interval_s: How often backend job state is polled. State
+            queries can be expensive on busy SLURM controllers, so they
+            run on a slower cadence than log streaming and execute on a
+            background thread to avoid blocking the UI.
+    """
     console = Console(stderr=True, soft_wrap=True)
     if not job_graph.nodes():
         console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
@@ -117,6 +133,7 @@ def watch_tasks(
         job_graph=job_graph,
         workspace=workspace,
         poll_interval_s=poll_interval_s,
+        state_poll_interval_s=state_poll_interval_s,
     )
 
 
@@ -156,14 +173,6 @@ class _JobStateIndex:
         return self.wu_by_root.get(task)
 
 
-def _safe_job_state(job: Job) -> JobState:
-    try:
-        state = job.state()
-    except (FileNotFoundError, OSError, RuntimeError):
-        return "unknown"
-    return state if state in _STATE_STYLES else "unknown"
-
-
 def _render_node_label(entry: _TaskTreeNode, *, emphasis_style: str | None = None) -> Text:
     """Return the styled Textual label for a task tree node."""
     text = Text()
@@ -195,6 +204,7 @@ def _run_textual_task_monitor(
     job_graph: DependencyGraph[Job],
     workspace: Workspace,
     poll_interval_s: float,
+    state_poll_interval_s: float,
 ) -> None:
     try:
         from textual.app import App, ComposeResult
@@ -209,6 +219,7 @@ def _run_textual_task_monitor(
         raise RuntimeError(msg) from e
 
     index = _JobStateIndex.build(job_graph)
+    all_jobs: list[Job] = list(job_graph.nodes())
 
     class _FilteredTree(Tree):
         """Tree whose arrow-key cursor snaps to an explicit list of stop lines."""
@@ -471,6 +482,13 @@ def _run_textual_task_monitor(
             self._user_interrupted: bool = False
             """Set by :meth:`action_interrupt` so the runner can re-raise
             ``KeyboardInterrupt`` once the TUI has shut down cleanly."""
+            self._job_states: dict[Job, JobState] = dict.fromkeys(all_jobs, "unknown")
+            """Single source of truth for per-job state. Refreshed by the
+            slow state tick; every UI consumer reads from this cache so a
+            slow ``squeue``/``sacct`` call doesn't run N times per render."""
+            self._state_poll_pending: bool = False
+            """Set while a backgrounded state poll is in flight to prevent
+            two overlapping polls when the controller is slow."""
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
@@ -489,13 +507,17 @@ def _run_textual_task_monitor(
             tree.show_root = False
             tree.root.expand()
             self._build_tree(tree)
-            self._refresh_states()
+            # Initial state poll runs synchronously so the first paint shows
+            # accurate states; subsequent polls go through the background
+            # path so the UI never blocks on SLURM CLI latency.
+            self._apply_states(bulk_job_states(all_jobs))
             self._repaint_tree()
             self._render_summary_widget()
             self._update_log_title()
             self._stream_log_chunk()
             self.call_after_refresh(self._post_mount_focus)
-            self.set_interval(max(0.1, poll_interval_s), self._tick)
+            self.set_interval(max(0.05, poll_interval_s), self._log_tick)
+            self.set_interval(max(0.5, state_poll_interval_s), self._state_tick)
 
         def _post_mount_focus(self) -> None:
             tree = self.query_one("#task-tree", _FilteredTree)
@@ -577,10 +599,12 @@ def _run_textual_task_monitor(
             if self._entries and self._cursor_entry is None:
                 self._cursor_entry = self._entries[0]
 
-        def _refresh_states(self) -> None:
+        def _apply_states(self, states: dict[Job, JobState]) -> None:
+            """Replace the cached state map and propagate it to tree entries."""
+            self._job_states = states
             for entry in self._entries:
                 job = index.job_for_work_unit(entry.work_unit)
-                entry.state = _safe_job_state(job) if job is not None else "unknown"
+                entry.state = states.get(job, "unknown") if job is not None else "unknown"
 
         def _repaint_tree(self) -> None:
             cursor_entry = self._cursor_entry
@@ -603,21 +627,47 @@ def _run_textual_task_monitor(
         def _render_summary_widget(self) -> None:
             summary_widget = self.query_one("#summary", Static)
             jobs = list(job_graph.nodes())
-            states = [_safe_job_state(job) for job in jobs]
+            states = [self._job_states.get(job, "unknown") for job in jobs]
             summary_widget.update(_render_summary(jobs, states))
 
         def _update_log_title(self) -> None:
             title = self.query_one("#log-title", Static)
             title.update("Task log" if self._mode == "task" else "Job log")
 
-        def _tick(self) -> None:
+        def _log_tick(self) -> None:
+            """Fast tick: stream log chunks and observe user scroll activity.
+
+            Re-painting the tree here picks up the cursor-emphasis change as
+            soon as the user moves the cursor, without waiting on the slower
+            state tick.
+            """
             if not self.is_mounted:
                 return
-            self._refresh_states()
-            self._repaint_tree()
-            self._render_summary_widget()
             self._stream_log_chunk()
             self._poll_scroll_activity()
+
+        async def _state_tick(self) -> None:
+            """Slow tick: refresh job states off the UI thread.
+
+            Backend state queries (especially ``squeue``/``sacct`` on a busy
+            SLURM controller) can take seconds. Running them on the event
+            loop would freeze log streaming for that whole window, so we
+            offload to a worker thread via :func:`asyncio.to_thread`. The
+            ``_state_poll_pending`` flag guards against firing a second
+            poll while the previous one is still in flight.
+            """
+            if not self.is_mounted or self._state_poll_pending:
+                return
+            self._state_poll_pending = True
+            try:
+                states = await asyncio.to_thread(bulk_job_states, all_jobs)
+            finally:
+                self._state_poll_pending = False
+            if not self.is_mounted:
+                return
+            self._apply_states(states)
+            self._repaint_tree()
+            self._render_summary_widget()
             self._update_completion_state()
 
         def _poll_scroll_activity(self) -> None:
@@ -636,7 +686,7 @@ def _run_textual_task_monitor(
 
         def _all_jobs_terminal(self) -> bool:
             return all(
-                _safe_job_state(job) in _TERMINAL_STATES for job in job_graph.nodes()
+                self._job_states.get(job, "unknown") in _TERMINAL_STATES for job in job_graph.nodes()
             )
 
         def _update_completion_state(self) -> None:
@@ -864,19 +914,25 @@ def _runtime_job_board_suppressed() -> Any:
 def _build_session_rich_tree(
     named_tasks: Mapping[str, Task[Any]],
     job_graph: DependencyGraph[Job],
+    states: Mapping[Job, JobState] | None = None,
 ) -> RichTree:
     """Build a Rich dependency tree labelled with per-task job states.
 
     The hierarchy mirrors :meth:`_TaskMonitorApp._build_tree`: named tasks that
     are dependencies of other named tasks are rendered under their parent only,
     with back-references shown as ``↩`` leaves.
+
+    ``states`` lets callers pass a pre-computed state map so the tree
+    builder doesn't re-poll the backend (one bulk call upstream is much
+    cheaper than per-job calls here).
     """
     index = _JobStateIndex.build(job_graph)
+    resolved_states: Mapping[Job, JobState] = states if states is not None else bulk_job_states(job_graph.nodes())
 
     def state_for(task: Task[Any], parent_wu: WorkUnit | None) -> tuple[JobState, WorkUnit | None]:
         wu = index.work_unit_of_root(task) or parent_wu
         job = index.job_for_work_unit(wu)
-        state: JobState = _safe_job_state(job) if job is not None else "unknown"
+        state: JobState = resolved_states.get(job, "unknown") if job is not None else "unknown"
         return state, wu
 
     def render_label(task: Task[Any], state: JobState, arg_prefix: str | None, *, backref: bool) -> str:
@@ -938,12 +994,13 @@ def _print_final_tree(
     named_tasks: Mapping[str, Task[Any]],
     job_graph: DependencyGraph[Job],
     console: Console | None = None,
+    states: Mapping[Job, JobState] | None = None,
 ) -> None:
     """Print a dependency tree with final job states to stderr."""
     if not named_tasks:
         return
     target = console if console is not None else Console(stderr=True, soft_wrap=True)
-    target.print(_build_session_rich_tree(named_tasks, job_graph))
+    target.print(_build_session_rich_tree(named_tasks, job_graph, states))
 
 
 def _watch_live_tree(
@@ -957,16 +1014,18 @@ def _watch_live_tree(
     from rich.live import Live
 
     jobs = list(job_graph.nodes())
+    states = bulk_job_states(jobs)
     with Live(
-        _build_session_rich_tree(named_tasks, job_graph),
+        _build_session_rich_tree(named_tasks, job_graph, states),
         console=console,
         refresh_per_second=4,
         transient=False,
     ) as live:
-        while not all(_safe_job_state(job) in _TERMINAL_STATES for job in jobs):
+        while not all(states.get(job, "unknown") in _TERMINAL_STATES for job in jobs):
             time.sleep(poll_interval_s)
-            live.update(_build_session_rich_tree(named_tasks, job_graph))
-        live.update(_build_session_rich_tree(named_tasks, job_graph))
+            states = bulk_job_states(jobs)
+            live.update(_build_session_rich_tree(named_tasks, job_graph, states))
+        live.update(_build_session_rich_tree(named_tasks, job_graph, states))
 
 
 def _watch_line_events(
@@ -979,9 +1038,10 @@ def _watch_line_events(
     jobs = list(job_graph.nodes())
     last: dict[int, JobState] = {}
     while True:
+        states = bulk_job_states(jobs)
         all_terminal = True
         for job in jobs:
-            state = _safe_job_state(job)
+            state = states.get(job, "unknown")
             if state not in _TERMINAL_STATES:
                 all_terminal = False
             if last.get(id(job)) != state:

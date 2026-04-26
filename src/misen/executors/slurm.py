@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import msgspec
 
-from misen.executor import Executor, Job
+from misen.executor import Executor, Job, JobState
 from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 from misen.utils.execute import JOB_LOG_PATH_ARG
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from misen.utils.work_unit import WorkUnit
@@ -60,30 +60,62 @@ class SlurmJob(Job):
 
     def state(self) -> _State:
         """Return the current SLURM state, normalized to a misen job state."""
-        for command, args in (
-            ("squeue", ["-h", "-j", self.slurm_job_id, "-o", "%T"]),
-            ("sacct", ["-n", "-j", self.slurm_job_id, "--format=State"]),
-        ):
-            result = subprocess.run(  # noqa: S603
-                [_resolve_slurm_cmd(command), *args],
-                check=False,
-                capture_output=True,
-                text=True,
+        return type(self).bulk_state([self]).get(self, "unknown")
+
+    @classmethod
+    def bulk_state(cls, jobs: Sequence[Job]) -> dict[Job, JobState]:
+        """Return states for many SLURM jobs using one ``squeue`` + one ``sacct`` call.
+
+        ``squeue`` is queried first because it answers from the controller's
+        in-memory state (fast). Anything not returned by ``squeue`` is looked
+        up in ``sacct`` (slower, hits SlurmDBD), which covers jobs that have
+        already left the controller's queue. A single batched call replaces
+        the N per-job invocations the default :meth:`Job.bulk_state` would
+        make, which matters when the TUI is polling many jobs at once.
+
+        ``jobs`` must be ``SlurmJob`` instances; :func:`bulk_job_states`
+        partitions a heterogeneous list by class before dispatching here.
+        """
+        if not jobs:
+            return {}
+        slurm_jobs = cast("Sequence[SlurmJob]", jobs)
+
+        # Group by slurm id so duplicate handles to the same job all get the
+        # same state (rare but tolerated).
+        by_id: dict[str, list[SlurmJob]] = {}
+        for job in slurm_jobs:
+            by_id.setdefault(job.slurm_job_id, []).append(job)
+
+        states: dict[str, JobState] = dict.fromkeys(by_id, "unknown")
+        remaining = set(by_id)
+
+        squeue_out = _run_slurm_query(
+            "squeue", ["-h", "-j", ",".join(sorted(remaining)), "-o", "%i %T"]
+        )
+        for sid, raw in _parse_id_state_rows(squeue_out):
+            if sid in by_id:
+                states[sid] = _normalize_slurm_state(raw)
+                remaining.discard(sid)
+
+        if remaining:
+            sacct_out = _run_slurm_query(
+                "sacct",
+                ["-n", "-X", "-j", ",".join(sorted(remaining)), "--format=JobIDRaw,State"],
             )
-            if result.returncode != 0 or not (output := result.stdout.strip()):
-                continue
+            for sid, raw in _parse_id_state_rows(sacct_out):
+                if sid in by_id:
+                    states[sid] = _normalize_slurm_state(raw)
+                    remaining.discard(sid)
 
-            state = output.splitlines()[0].strip()
-            if command == "sacct":
-                state = state.split()[0]
-            state = state.upper().split("+", maxsplit=1)[0].split(":", maxsplit=1)[0]
-            misen_state = _SLURM_STATE_MAP.get(state, "unknown")
-            if not self._finalized and misen_state in {"done", "failed"} and self.log_path is not None:
-                self.workspace.finalize_job_log(self.log_path)
-                self._finalized = True
-            return misen_state
-
-        return "unknown"
+        result: dict[Job, JobState] = {}
+        for sid, group in by_id.items():
+            state = states[sid]
+            for job in group:
+                if not job._finalized and state in {"done", "failed"} and job.log_path is not None:  # noqa: SLF001
+                    job.workspace.finalize_job_log(job.log_path)
+                    job._finalized = True  # noqa: SLF001
+                result[job] = state
+        return result
 
 
 class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
@@ -304,6 +336,43 @@ def _resolve_slurm_cmd(name: str) -> str:
         msg = f"Required command {name!r} not found on PATH. Is SLURM installed on this system?"
         raise FileNotFoundError(msg)
     return path
+
+
+def _run_slurm_query(command: str, args: list[str]) -> str:
+    """Invoke a SLURM CLI tool and return stdout, or ``""`` if the call failed."""
+    try:
+        binary = _resolve_slurm_cmd(command)
+    except FileNotFoundError:
+        return ""
+    try:
+        result = subprocess.run(  # noqa: S603
+            [binary, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def _parse_id_state_rows(output: str) -> list[tuple[str, str]]:
+    """Parse ``<JobID> <State>`` rows from squeue/sacct output."""
+    rows: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) < 2:  # noqa: PLR2004
+            continue
+        rows.append((parts[0], parts[1]))
+    return rows
+
+
+def _normalize_slurm_state(raw: str) -> JobState:
+    """Strip SLURM annotations like ``"CANCELLED+"`` / ``"CANCELLED by 1"`` and map to misen state."""
+    head = raw.upper().split("+", maxsplit=1)[0].split(":", maxsplit=1)[0].split(None, 1)[0]
+    return _SLURM_STATE_MAP.get(head, "unknown")
 
 
 def _assigned_resources_slurm(env: Mapping[str, str] | None = None) -> AssignedResources:
