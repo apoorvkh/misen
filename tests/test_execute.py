@@ -1,10 +1,24 @@
 import base64
 import cloudpickle
 import os
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 
 import misen.utils.execute as execute_mod
 from misen.utils.assigned_resources import AssignedResources
+from misen.workspace import Workspace
+
+
+def _stub_workspace() -> Workspace:
+    """Return a minimal stub workspace with a no-op streaming_job_log."""
+    import contextlib
+
+    return cast(
+        "Workspace",
+        SimpleNamespace(streaming_job_log=lambda _path: contextlib.nullcontext()),
+    )
 
 
 def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -> None:
@@ -34,7 +48,7 @@ def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -
         return expected
 
     payload_path = tmp_path / "payload.pkl"
-    payload_path.write_bytes(cloudpickle.dumps(payload_fn))
+    payload_path.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": payload_fn}))
 
     encoded_getter = base64.urlsafe_b64encode(cloudpickle.dumps(getter)).decode("ascii")
 
@@ -46,7 +60,7 @@ def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -
 
 def test_execute_rejects_invalid_encoded_assigned_resources_getter(tmp_path) -> None:
     payload_path = tmp_path / "payload.pkl"
-    payload_path.write_bytes(cloudpickle.dumps(lambda: None))
+    payload_path.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": lambda **_: None}))
 
     with pytest.raises(ValueError, match="expected URL-safe base64"):
         execute_mod.execute(payload=payload_path, assigned_resources_getter="not-base64@@")

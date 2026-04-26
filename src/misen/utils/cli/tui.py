@@ -783,14 +783,14 @@ def _run_textual_task_monitor(
                         return ("task", id(entry.task), "pending"), None, "(no task log yet)"
                     return (
                         ("task", id(entry.task), job_id),
-                        lambda: workspace.open_task_log(entry.task, mode="r", job_id=job_id),
+                        lambda: workspace.read_task_log(entry.task, job_id=job_id),
                         "(no task log yet)",
                     )
                 # No current-session job, or a cached CompletedJob — fall back
                 # to whichever task log was most recently written.
                 return (
                     ("task", id(entry.task)),
-                    lambda: workspace.open_task_log(entry.task, mode="r"),
+                    lambda: workspace.read_task_log(entry.task),
                     "(no task log yet)",
                 )
             wu = entry.work_unit

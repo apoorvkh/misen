@@ -19,6 +19,8 @@ dependencies = [
   # pinned to a specific commit until the change ships in a release.
   "flufl-lock>=8.2.0",
   "lmdb>=1.7.5",
+  # cloud workspace
+  "obstore>=0.9.4",
   # in-process executor
   "python-dotenv>=1.2.2",
   # UI

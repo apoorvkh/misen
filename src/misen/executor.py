@@ -221,6 +221,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
                     msg = f"{executor_name} observed {len(failed_jobs)} failed job(s): {failed_labels}"
                     logger.error(msg)
                     runtime_event(msg, style="bold red")
+                    raise RuntimeError(msg)
             finally:
                 self.cleanup_snapshot(snapshot)
 
@@ -272,7 +273,13 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
 
 
 class Job(ABC):
-    """Abstract job handle returned by an executor backend."""
+    """Abstract job handle returned by an executor backend.
+
+    Job-log lifecycle is owned by the worker that produces the log
+    (see :meth:`Workspace.streaming_job_log`), so this base class does
+    not participate in log finalization -- subclasses just implement
+    :meth:`state` directly.
+    """
 
     __slots__ = ("job_id", "log_path", "work_unit")
 

@@ -226,18 +226,22 @@ def execute_task(
     runtime_event(f"Task started: {display}", style="yellow")
     started_at = time.perf_counter()
 
-    with workspace.open_task_log(task=task, mode="a", job_id=job_id) as task_log:
-        with capture_all_output(task_log, tee_to_stdout=True):
-            try:
-                result = task.func(*resolved_args, **resolved_kwargs)
-            except Exception:
-                RichConsole(stderr=True).print_exception()
-                logger.exception("Task failed: %s after %.2fs.", debug_name, time.perf_counter() - started_at)
-                runtime_event(
-                    f"Task failed: {display} in {(time.perf_counter() - started_at):.2f}s",
-                    style="bold red",
-                )
-                raise
+    log_path = workspace.get_task_log(task=task, job_id=job_id)
+    try:
+        with log_path.open("a", buffering=1, encoding="utf-8") as task_log:
+            with capture_all_output(task_log, tee_to_stdout=True):
+                try:
+                    result = task.func(*resolved_args, **resolved_kwargs)
+                except Exception:
+                    RichConsole(stderr=True).print_exception()
+                    logger.exception("Task failed: %s after %.2fs.", debug_name, time.perf_counter() - started_at)
+                    runtime_event(
+                        f"Task failed: {display} in {(time.perf_counter() - started_at):.2f}s",
+                        style="bold red",
+                    )
+                    raise
+    finally:
+        workspace.finalize_task_log(task=task, job_id=job_id)
 
     logger.info("Task finished: %s in %.2fs.", debug_name, time.perf_counter() - started_at)
     runtime_event(f"Task finished: {display} in {(time.perf_counter() - started_at):.2f}s", style="green")

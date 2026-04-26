@@ -20,6 +20,7 @@ import logging
 import shutil
 from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar
 
 from misen.exceptions import CacheError
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 __all__ = ["Workspace"]
 
 
-WorkspaceType: TypeAlias = Literal["disk"]
+WorkspaceType: TypeAlias = Literal["disk", "cloud"]
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,10 @@ class Workspace(Configurable):
 
     _config_key: ClassVar[str] = "workspace"
     _config_default_type: ClassVar[str] = "misen.workspaces.disk:DiskWorkspace"
-    _config_aliases: ClassVar[dict[WorkspaceType, str]] = {"disk": "misen.workspaces.disk:DiskWorkspace"}
+    _config_aliases: ClassVar[dict[WorkspaceType, str]] = {
+        "disk": "misen.workspaces.disk:DiskWorkspace",
+        "cloud": "misen.workspaces.cloud:CloudWorkspace",
+    }
 
     def _post_init(
         self,
@@ -207,34 +211,51 @@ class Workspace(Configurable):
     def _get_work_dir(self, task: Task) -> Path: ...
 
     @abstractmethod
-    def open_task_log(
-        self,
-        task: Task,
-        mode: Literal["a", "r"],
-        job_id: str | None = None,
-    ) -> TextIO:
-        """Open a log file for the given task.
+    def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
+        """Return path where ``task``'s log for ``job_id`` should be written.
 
-        Logs are keyed by ``(resolved_hash, job_id)``. Each task execution
-        produces one log file per job.
+        Logs are keyed by ``(resolved_hash, job_id)``; each task execution
+        produces one log file per job. ``job_id=None`` selects a default
+        identifier so callers without a backend-assigned job id still get
+        a stable path.
 
-        Implementations must support:
-
-        - **Write mode** (``mode="a"``): open (or create) the log for the
-          given task and job_id. If ``job_id`` is ``None``, use a default
-          identifier.
-        - **Read mode** (``mode="r"``): if ``job_id`` is provided, open that
-          specific log. If ``job_id`` is ``None``, open the most recent log
-          for the task. Recency is implementation-defined (e.g., filesystem
-          mtime, object-store upload timestamp, or an internal index).
-        - Raise ``FileNotFoundError`` in read mode when no matching log exists.
-
-        Args:
-            task: Task associated with the log file.
-            mode: File open mode (``"a"`` for write/append, ``"r"`` for read).
-            job_id: Optional job identifier. Selects a specific log in read
-                mode; groups output in write mode.
+        Workspaces that publish to remote storage (e.g.
+        :class:`misen.workspaces.cloud.CloudWorkspace`) start streaming the
+        local file to the bucket on this call; the matching
+        :meth:`finalize_task_log` call stops it.
         """
+
+    def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
+        """Hook called when a task log is no longer being written.
+
+        Workspaces that publish locally-written logs to a shared store
+        should override this to flush the final state. Implementations
+        must be idempotent and tolerant of a missing local file.
+        The base implementation is a no-op (correct for
+        :class:`misen.workspaces.disk.DiskWorkspace`).
+        """
+
+    @abstractmethod
+    def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
+        """Open a previously-written task log for reading.
+
+        If ``job_id`` is provided, opens that specific log. If ``job_id``
+        is ``None``, opens the most recent log for the task. Recency is
+        implementation-defined (e.g., filesystem mtime, object-store
+        upload timestamp).
+
+        Raises:
+            FileNotFoundError: If no matching log exists.
+        """
+
+    def _job_logs_dir(self) -> Path:
+        """Return the local directory where job-log files live.
+
+        Subclasses may override to relocate logs (e.g. out of an
+        ephemeral temp dir). The default is alongside the workspace's
+        temporary directory.
+        """
+        return self.get_temp_dir().parent / "job_logs"
 
     def get_job_log(self, job_id: str, work_unit: WorkUnit) -> Path:
         """Return job-log path for a work unit.
@@ -246,12 +267,48 @@ class Workspace(Configurable):
         Returns:
             Path where the backend should write combined job logs.
         """
-        log_dir = self.get_temp_dir() / "job_logs"
+        log_dir = self._job_logs_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         work_unit_prefix = work_unit.root.task_hash().b32()
         path = log_dir / f"{work_unit_prefix}_{job_id}.log"
         logger.debug("Resolved job log path for work unit %s: %s.", work_unit, path)
         return path
+
+    def streaming_job_log(self, local_path: Path) -> AbstractContextManager[None]:
+        """Return a context manager that publishes ``local_path`` while it is open.
+
+        The worker process that writes ``local_path`` is expected to wrap
+        its entire lifecycle in ``with workspace.streaming_job_log(...):``.
+        Workspaces that publish to a remote shared store (e.g.
+        :class:`misen.workspaces.cloud.CloudWorkspace`) start a background
+        uploader on enter and finalize on exit. The base implementation
+        returns a no-op context manager, which is correct for
+        :class:`misen.workspaces.disk.DiskWorkspace` where ``local_path``
+        is already on a durable shared filesystem.
+
+        Implementations must be safe under abnormal exit (e.g. the worker
+        being killed mid-execution): the context's ``__exit__`` should
+        still leave the bucket in a consistent state if it runs.
+        """
+        _ = local_path
+        return contextlib.nullcontext()
+
+    def finalize_job_log(self, local_path: Path) -> None:
+        """One-shot publish of ``local_path``'s current contents.
+
+        Intended to be called by the parent (executor) after the job has
+        reached a terminal state, to capture anything written to the file
+        *after* the worker's :meth:`streaming_job_log` context closed --
+        most importantly, a SLURM epilogue, which the controller writes
+        to ``--output`` once the wrapped command has exited.
+
+        Implementations must be idempotent and tolerant of a missing
+        local file. The base implementation is a no-op (correct for
+        workspaces where ``local_path`` is already on durable shared
+        storage and for backends like a future remote/cloud executor
+        where the parent has no access to the worker's filesystem).
+        """
+        _ = local_path
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
         """Return iterator over job-log files.
@@ -262,7 +319,7 @@ class Workspace(Configurable):
         Returns:
             Iterator of log-file paths.
         """
-        log_dir = self.get_temp_dir() / "job_logs"
+        log_dir = self._job_logs_dir()
         if work_unit is None:
             logger.debug("Iterating all job logs in %s.", log_dir)
             return log_dir.iterdir()

@@ -1,7 +1,19 @@
-"""CLI entrypoint for executing serialized work-unit payloads."""
+"""CLI entrypoint for executing serialized work-unit payloads.
+
+The worker process runs this module to execute a single work unit.  It also
+owns the **job-log lifecycle**: the parent (executor) merely tells the worker
+where to write its log via the ``MISEN_JOB_LOG_PATH`` environment variable;
+the worker wraps its full lifecycle in
+``workspace.streaming_job_log(...)`` so a remote workspace can publish the
+local file to shared storage as it grows.  This way the same code captures
+every byte the worker emits -- allocation/setup, ``WorkUnit.execute``,
+post-execute finalizers -- regardless of where the worker is running.
+"""
 
 import base64
 import binascii
+import contextlib
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,12 +27,18 @@ from misen.utils.resource_binding import apply_resource_binding
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+JOB_LOG_PATH_ENV = "MISEN_JOB_LOG_PATH"
+
 
 def execute(payload: Path, assigned_resources_getter: str, gpu_runtime: GpuRuntime = "cuda") -> None:
-    """Execute a cloudpickle payload file.
+    """Execute a cloudpickle work-unit payload file.
 
     Args:
-        payload: Path to payload bytes representing a zero-argument callable.
+        payload: Path to payload bytes; the payload is a dict with keys
+            ``workspace`` (Workspace) and ``fn`` (callable accepting
+            ``assigned_resources=``). The workspace is exposed so the
+            worker can wrap its lifecycle in
+            :meth:`Workspace.streaming_job_log` for live log publishing.
         assigned_resources_getter: URL-safe base64 string containing a
             cloudpickled assigned-resources getter callable.
         gpu_runtime: Expected runtime for GPU resources (if any). Defaults
@@ -31,9 +49,19 @@ def execute(payload: Path, assigned_resources_getter: str, gpu_runtime: GpuRunti
     )
     apply_resource_binding(assigned_resources=assigned_resources, gpu_runtime=gpu_runtime)
 
-    payload_fn: Callable[[AssignedResources | AssignedResourcesPerNode | None], None]
-    payload_fn = cloudpickle.loads(payload.read_bytes())
-    payload_fn(assigned_resources=assigned_resources)
+    bundle = cloudpickle.loads(payload.read_bytes())
+    workspace = bundle["workspace"]
+    payload_fn: Callable[..., None] = bundle["fn"]
+
+    # The parent points the scheduler's stdout (``Popen(stdout=...)`` /
+    # SLURM ``--output=...``) at this same path, so the live uploader
+    # sees everything the worker writes -- allocation/setup,
+    # ``WorkUnit.execute``, post-execute Python finalizers.
+    log_path_env = os.environ.get(JOB_LOG_PATH_ENV)
+    streaming = workspace.streaming_job_log(Path(log_path_env)) if log_path_env else contextlib.nullcontext()
+
+    with streaming:
+        payload_fn(assigned_resources=assigned_resources)
 
 
 def _get_assigned_resources(encoded_getter: str) -> AssignedResources | AssignedResourcesPerNode | None:

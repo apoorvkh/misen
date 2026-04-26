@@ -135,23 +135,28 @@ class WorkUnit:
     def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
         """Serialize executable payload for backend dispatch.
 
+        The payload bundles the workspace separately from the callable so
+        the worker entrypoint can wrap the call in
+        :meth:`Workspace.streaming_job_log` without unpacking a closure.
+
         Args:
-            workspace: Workspace instance captured in payload closure.
+            workspace: Workspace instance, surfaced for the worker's
+                streaming-log context.
             job_id: Job id captured for logging.
-            assigned_resources_getter: Resource getter captured for runtime
-                sentinel resolution.
 
         Returns:
-            Cloudpickle payload bytes.
+            Cloudpickle payload bytes containing ``{"workspace": ..., "fn": ...}``
+            where ``fn`` is a callable accepting ``assigned_resources=``.
         """
-        return cloudpickle.dumps(
-            functools.partial(
+        return cloudpickle.dumps({
+            "workspace": workspace,
+            "fn": functools.partial(
                 WorkUnit.execute,
                 graph=self.graph,
                 workspace=workspace,
                 job_id=job_id,
-            )
-        )
+            ),
+        })
 
 
 def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:

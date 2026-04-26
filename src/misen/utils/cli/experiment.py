@@ -891,7 +891,7 @@ def _show_task_log(
         _list_task_logs(task, workspace, console)
         return True
     try:
-        with workspace.open_task_log(task, mode="r", job_id=job_id) as f:
+        with workspace.read_task_log(task, job_id=job_id) as f:
             log_content = f.read()
     except FileNotFoundError:
         if skip_missing:

@@ -2,20 +2,28 @@
 
 import logging
 import os
+import socket
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Protocol, Self
+from typing import TYPE_CHECKING, Any, Protocol, Self, cast, runtime_checkable
 
 import flufl.lock._lockfile as flufl
+import msgspec
+import obstore as _obs
+from obstore.exceptions import AlreadyExistsError, PreconditionError
 
 from misen.exceptions import LockUnavailableError
 
-__all__ = ["LockLike", "LockUnavailableError", "NFSLock"]
+if TYPE_CHECKING:
+    from obstore import PutMode, PutResult
+
+__all__ = ["LockLike", "LockUnavailableError", "NFSLock", "ObjectStoreLock"]
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +121,7 @@ class _ClockOffsetLock(flufl.Lock):
         return datetime.now() + self._clock_offset  # noqa: DTZ005
 
 
+@runtime_checkable
 class LockLike(Protocol):
     """Protocol describing a lock with context-manager support."""
 
@@ -239,3 +248,210 @@ class NFSLock:
     def is_locked(self) -> bool:
         """Return whether underlying lock is held."""
         return self._lock.is_locked
+
+
+def _owner_id() -> str:
+    """Return a unique-per-acquisition owner identifier for an object-store lock."""
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex}"
+
+
+def _now_ms() -> int:
+    """Return current wall-clock time in milliseconds since the epoch."""
+    return time.time_ns() // 1_000_000
+
+
+class ObjectStoreLock(LockLike):
+    """Distributed lock backed by object-store conditional writes.
+
+    Implements :class:`LockLike` on top of obstore's conditional ``put``
+    semantics:
+
+    - ``put-if-absent`` (``mode="create"``) for fresh acquisition.
+    - ``put-if-match`` (``UpdateVersion``) for refresh and expired-lease
+      takeover.
+    - ``put-if-match`` with an expired payload for release.
+
+    The lock state is a single JSON object at ``key`` carrying owner
+    identity and an absolute-millisecond expiry. A holder process runs a
+    refresh thread that periodically extends the expiry via put-if-match;
+    if the conditional update fails, the holder has lost the lock and the
+    refresh thread terminates.
+
+    S3, GCS, and Azure all implement the conditional-write primitives this
+    lock relies on, so the same code path coordinates correctly across
+    machines for every supported provider.
+    """
+
+    __slots__ = (
+        "_key",
+        "_lifetime_ms",
+        "_owner",
+        "_refresh_interval",
+        "_stop",
+        "_store",
+        "_thread",
+        "_token",
+    )
+
+    def __init__(
+        self,
+        store: Any,
+        key: str,
+        lifetime: int = 30,
+        refresh_interval: int | None = 20,
+    ) -> None:
+        """Initialize the lock.
+
+        Args:
+            store: Underlying obstore store handle.
+            key: Object-store key (path) used for the lock object.
+            lifetime: Lease lifetime in seconds. Holders must refresh before
+                this elapses.
+            refresh_interval: Seconds between refresh attempts. ``None``
+                disables refresh; the lock then expires when its lifetime
+                elapses unless explicitly released.
+        """
+        self._store = store
+        self._key = key
+        self._lifetime_ms = lifetime * 1000
+        self._refresh_interval = refresh_interval
+        self._owner = _owner_id()
+        self._token: PutResult | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _payload(self, *, expiry_ms: int | None = None) -> bytes:
+        """Return JSON-encoded lock metadata for the current lease."""
+        if expiry_ms is None:
+            expiry_ms = _now_ms() + self._lifetime_ms
+        return msgspec.json.encode({"owner": self._owner, "expiry_ms": expiry_ms})
+
+    @staticmethod
+    def _update_mode(token: "PutResult") -> "PutMode":
+        """Return obstore ``put`` ``mode`` argument for put-if-match.
+
+        obstore expects an :class:`obstore.UpdateVersion` ``TypedDict`` here
+        (only ``e_tag`` / ``version`` keys present, omitted when ``None``).
+        """
+        mode: dict[str, str] = {}
+        e_tag = token.get("e_tag")
+        version = token.get("version")
+        if e_tag is not None:
+            mode["e_tag"] = e_tag
+        if version is not None:
+            mode["version"] = version
+        if not mode:
+            msg = "Object store did not return an update token for conditional writes."
+            raise LockUnavailableError(msg)
+        return cast("PutMode", mode)
+
+    def _try_create(self) -> bool:
+        """Attempt fresh put-if-absent. Returns True if we now hold the lock."""
+        try:
+            token = _obs.put(self._store, self._key, self._payload(), mode="create")
+        except AlreadyExistsError:
+            return False
+        self._update_mode(token)
+        self._token = token
+        return True
+
+    def _try_takeover(self) -> bool:
+        """Attempt to take over an expired lease. Returns True on success."""
+        try:
+            existing = _obs.get(self._store, self._key)
+            existing_meta = existing.meta
+            existing_body = bytes(existing.bytes())
+        except FileNotFoundError:
+            return self._try_create()
+
+        try:
+            existing_state = msgspec.json.decode(existing_body)
+        except msgspec.DecodeError:
+            existing_state = {"expiry_ms": 0}
+
+        if existing_state.get("expiry_ms", 0) > _now_ms():
+            return False
+
+        candidate = cast("PutResult", {"e_tag": existing_meta.get("e_tag"), "version": existing_meta.get("version")})
+        mode = self._update_mode(candidate)
+        try:
+            self._token = _obs.put(self._store, self._key, self._payload(), mode=mode)
+        except (PreconditionError, AlreadyExistsError):
+            return False
+        return True
+
+    def acquire(self, *, blocking: bool = True, timeout: int | None = None) -> None:
+        """Acquire the lock, optionally waiting up to ``timeout`` seconds.
+
+        Args:
+            blocking: Whether to block until the lock can be acquired.
+            timeout: Maximum wait time in seconds when blocking. ``None``
+                means wait indefinitely.
+
+        Raises:
+            LockUnavailableError: If the lock cannot be acquired within
+                the requested time budget.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        backoff = 0.1
+        while True:
+            if self._try_create() or self._try_takeover():
+                self._start_refresh()
+                return
+            if not blocking:
+                msg = f"Could not acquire lock {self._key!r}."
+                raise LockUnavailableError(msg)
+            if deadline is not None and time.monotonic() >= deadline:
+                msg = f"Could not acquire lock {self._key!r} within {timeout}s."
+                raise LockUnavailableError(msg)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 2.0)
+
+    def _start_refresh(self) -> None:
+        """Start the background refresh thread if refresh is enabled."""
+        if self._refresh_interval is None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
+        self._thread.start()
+
+    def _refresh_loop(self) -> None:
+        """Refresh the lease until release or until refresh fails."""
+        while not self._stop.wait(self._refresh_interval):
+            token = self._token
+            if token is None:
+                return
+            try:
+                self._token = _obs.put(self._store, self._key, self._payload(), mode=self._update_mode(token))
+            except (PreconditionError, AlreadyExistsError, FileNotFoundError):
+                logger.warning("Lost lease on lock %s during refresh.", self._key)
+                self._token = None
+                return
+
+    def release(self) -> None:
+        """Release the lock. Idempotent."""
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            join_timeout = max(self._refresh_interval or 1, 1)
+            thread.join(timeout=join_timeout)
+        self._thread = None
+        token = self._token
+        self._token = None
+        if token is None:
+            return
+        with suppress(AlreadyExistsError, FileNotFoundError, PreconditionError):
+            _obs.put(self._store, self._key, self._payload(expiry_ms=0), mode=self._update_mode(token))
+
+    def is_locked(self) -> bool:
+        """Return whether this lock instance currently holds the lease."""
+        return self._token is not None
+
+    @contextmanager
+    def context(self, *, blocking: bool = True, timeout: int | None = None) -> Iterator[Self]:
+        """Context manager that acquires/releases the lock."""
+        self.acquire(blocking=blocking, timeout=timeout)
+        try:
+            yield self
+        finally:
+            self.release()

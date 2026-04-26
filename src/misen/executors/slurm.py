@@ -16,6 +16,7 @@ import msgspec
 
 from misen.executor import Executor, Job
 from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
+from misen.utils.execute import JOB_LOG_PATH_ENV
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
@@ -32,14 +33,30 @@ logger = logging.getLogger(__name__)
 
 
 class SlurmJob(Job):
-    """Job handle backed by a SLURM job id."""
+    """Job handle backed by a SLURM job id.
 
-    __slots__ = ("slurm_job_id",)
+    On the first observation of a terminal state, the job calls
+    :meth:`Workspace.finalize_job_log` to capture anything written to
+    the ``--output`` file *after* the worker's streaming context closed
+    (most importantly, the SLURM epilogue: exit status, resource
+    accounting, OOM messages, etc.).
+    """
 
-    def __init__(self, work_unit: WorkUnit, job_id: str, slurm_job_id: str, log_path: Path) -> None:
+    __slots__ = ("_finalized", "slurm_job_id", "workspace")
+
+    def __init__(
+        self,
+        work_unit: WorkUnit,
+        job_id: str,
+        slurm_job_id: str,
+        log_path: Path,
+        workspace: Workspace,
+    ) -> None:
         """Initialize SLURM job wrapper."""
         super().__init__(work_unit=work_unit, job_id=job_id, log_path=log_path)
         self.slurm_job_id = slurm_job_id
+        self.workspace = workspace
+        self._finalized = False
 
     def state(self) -> _State:
         """Return the current SLURM state, normalized to a misen job state."""
@@ -60,7 +77,11 @@ class SlurmJob(Job):
             if command == "sacct":
                 state = state.split()[0]
             state = state.upper().split("+", maxsplit=1)[0].split(":", maxsplit=1)[0]
-            return _SLURM_STATE_MAP.get(state, "unknown")
+            misen_state = _SLURM_STATE_MAP.get(state, "unknown")
+            if not self._finalized and misen_state in {"done", "failed"} and self.log_path is not None:
+                self.workspace.finalize_job_log(self.log_path)
+                self._finalized = True
+            return misen_state
 
         return "unknown"
 
@@ -158,9 +179,10 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        wrapped = [*argv]
-        if env_overrides:
-            wrapped = ["env", *(f"{key}={value}" for key, value in env_overrides.items()), *wrapped]
+        # Tell the worker entrypoint where its log file lives so it can
+        # wrap its lifecycle in workspace.streaming_job_log(...).
+        worker_env = {**env_overrides, JOB_LOG_PATH_ENV: str(log_path)}
+        wrapped = ["env", *(f"{key}={value}" for key, value in worker_env.items()), *argv]
         sbatch_cmd.extend(["--output", str(log_path), "--export", "ALL", "--wrap", shlex.join(wrapped)])
         logger.debug("sbatch command for %s: %s", label, shlex.join(sbatch_cmd))
 
@@ -179,7 +201,13 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             raise RuntimeError(msg)
 
         logger.info("Submitted SLURM work unit %s (job_id=%s, slurm_job_id=%s).", label, job_id, slurm_job_id)
-        return SlurmJob(work_unit=work_unit, job_id=job_id, slurm_job_id=slurm_job_id, log_path=log_path)
+        return SlurmJob(
+            work_unit=work_unit,
+            job_id=job_id,
+            slurm_job_id=slurm_job_id,
+            log_path=log_path,
+            workspace=workspace,
+        )
 
 
 _State = Literal["pending", "running", "done", "failed", "unknown"]

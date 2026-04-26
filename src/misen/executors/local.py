@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from misen.executor import Executor, Job
 from misen.utils.assigned_resources import AssignedResources
+from misen.utils.execute import JOB_LOG_PATH_ENV
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -45,10 +46,10 @@ class LocalJob(Job):
     """Job handle backed by a local subprocess."""
 
     __slots__ = (
+        "_cached_state",
         "_lock",
         "_log_fp",
         "_process",
-        "_state",
         "assigned_cpu_indices",
         "assigned_gpu_indices",
         "dependencies",
@@ -72,14 +73,14 @@ class LocalJob(Job):
         self.assigned_gpu_indices: list[int] = []
         self._process: subprocess.Popen[bytes] | None = None
         self._log_fp: FileIO | None = None
-        self._state: _JobState = "pending"
+        self._cached_state: _JobState = "pending"
         self._lock = threading.Lock()
 
     def state(self) -> _JobState:
         """Return the current process-backed job state."""
         with self._lock:
-            if self._state in {"done", "failed"}:
-                return self._state
+            if self._cached_state in {"done", "failed"}:
+                return self._cached_state
             if self._process is None:
                 return "pending"
 
@@ -88,15 +89,15 @@ class LocalJob(Job):
                 return "running"
 
             self._close_log_fp_locked()
-            self._state = "done" if return_code == 0 else "failed"
+            self._cached_state = "done" if return_code == 0 else "failed"
             logger.info(
                 "Local job %s for %s exited with code %d -> state=%s.",
                 self.job_id or "n/a",
                 self.label,
                 return_code,
-                self._state,
+                self._cached_state,
             )
-            return self._state
+            return self._cached_state
 
     def set_process(
         self,
@@ -112,7 +113,7 @@ class LocalJob(Job):
             self._log_fp = log_fp
             self.assigned_cpu_indices = list(cpu_indices)
             self.assigned_gpu_indices = list(gpu_indices)
-            self._state = "running"
+            self._cached_state = "running"
             logger.info(
                 "Local job %s for %s is running (pid=%d).",
                 self.job_id or "n/a",
@@ -124,7 +125,7 @@ class LocalJob(Job):
         """Mark a pending/running job failed and close local handles."""
         with self._lock:
             self._close_log_fp_locked()
-            self._state = "failed"
+            self._cached_state = "failed"
             logger.error("Local job %s for %s marked failed.", self.job_id or "n/a", self.label)
 
     def terminate(self) -> None:
@@ -469,7 +470,13 @@ class _LocalScheduler:
             )
             process = subprocess.Popen(  # noqa: S603
                 argv,
-                env=os.environ | {"FORCE_COLOR": "1", "MISEN_RUNTIME_EVENTS": "1"} | env_overrides,
+                env=os.environ
+                | {
+                    "FORCE_COLOR": "1",
+                    "MISEN_RUNTIME_EVENTS": "1",
+                    JOB_LOG_PATH_ENV: str(job.log_path),
+                }
+                | env_overrides,
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
                 preexec_fn=_PREEXEC_FN,  # noqa: PLW1509

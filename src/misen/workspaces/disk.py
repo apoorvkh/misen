@@ -279,7 +279,7 @@ class DiskWorkspace(Workspace):
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
         (self._directory / "work").mkdir(parents=True, exist_ok=True)
         (self._directory / "task_logs").mkdir(parents=True, exist_ok=True)
-        (self.get_temp_dir() / "job_logs").mkdir(parents=True, exist_ok=True)
+        (self._directory / "job_logs").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
 
@@ -342,46 +342,26 @@ class DiskWorkspace(Workspace):
         logger.debug("Resolved work dir for task %s: %s.", task, d)
         return d
 
-    def open_task_log(
-        self,
-        task: Task,
-        mode: Literal["a", "r"],
-        job_id: str | None = None,
-    ) -> TextIO:
-        """Open a task log file in the workspace.
-
-        Args:
-            task: Task whose logs to open.
-            mode: File mode (``"a"`` or ``"r"``).
-            job_id: Optional job identifier to filter/select log stream.
-                In read mode with no job_id, opens the most recently modified log.
-
-        Returns:
-            Open text file object.
-
-        Raises:
-            FileNotFoundError: If ``mode="r"`` and no matching logs exist.
-        """
+    def _task_log_dir(self, task: Task) -> tuple[Path, str]:
         key_str = task.resolved_hash(workspace=self).b32()
         log_dir = Path(self._directory) / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir, key_str
 
-        if job_id is None and mode == "r":
-            # Find the most recently modified log for this task.
+    def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
+        """Return path where ``task``'s log for ``job_id`` should be written."""
+        log_dir, key_str = self._task_log_dir(task)
+        return log_dir / f"{key_str}_{job_id or '0'}.log"
+
+    def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
+        """Open a previously-written task log for reading."""
+        log_dir, key_str = self._task_log_dir(task)
+        if job_id is None:
             matches = sorted(log_dir.glob(f"{key_str}_*.log"), key=lambda p: p.stat().st_mtime)
             if not matches:
                 msg = f"No logs found for {key_str} in {log_dir}"
                 raise FileNotFoundError(msg)
             log_path = matches[-1]
         else:
-            selected_job_id = job_id or "0"
-            log_path = log_dir / f"{key_str}_{selected_job_id}.log"
-
-        logger.debug(
-            "Opening task log for %s at %s (mode=%s, job_id=%s).",
-            task,
-            log_path,
-            mode,
-            job_id,
-        )
-        return log_path.open(mode, buffering=1)
+            log_path = log_dir / f"{key_str}_{job_id}.log"
+        return log_path.open("r", buffering=1)
