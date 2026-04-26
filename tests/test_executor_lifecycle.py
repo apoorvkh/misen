@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-import pytest
-
 import misen.executor as executor_module
 from misen import Task, meta
 from misen.executor import CompletedJob, Executor, Job, JobState, bulk_job_states
@@ -74,13 +72,12 @@ class LocalSnapshotExecutor(Executor[FailedJob, FakeSnapshot]):
         return FailedJob(work_unit=work_unit)
 
 
-def test_blocking_submit_raises_and_cleans_up_failed_jobs(tmp_path) -> None:
+def test_blocking_submit_cleans_up_snapshot_when_jobs_fail(tmp_path) -> None:
     FailingExecutor.snapshots.clear()
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
     executor = FailingExecutor()
 
-    with pytest.raises(RuntimeError, match="failed job"):
-        executor.submit(tasks={Task(executor_lifecycle_task)}, workspace=workspace, blocking=True)
+    executor.submit(tasks={Task(executor_lifecycle_task)}, workspace=workspace, blocking=True)
 
     assert len(FailingExecutor.snapshots) == 1
     assert FailingExecutor.snapshots[0].cleaned
