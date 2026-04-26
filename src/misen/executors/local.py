@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from misen.executor import Executor, Job
 from misen.utils.assigned_resources import AssignedResources
-from misen.utils.execute import JOB_LOG_PATH_ARG
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -451,16 +450,13 @@ class _LocalScheduler:
         log_fp: FileIO | None = None
         process: subprocess.Popen[bytes] | None = None
         try:
-            job.job_id, argv, env_overrides = job.snapshot.prepare_job(
+            job.job_id, argv, env_overrides, job.log_path = job.snapshot.prepare_job(
                 work_unit=job.work_unit,
                 workspace=job.workspace,
                 assigned_resources_getter=lambda r=assigned_resources: r,
                 gpu_runtime=job.resources["gpu_runtime"],
             )
-            job.log_path = job.workspace.get_job_log(job_id=job.job_id, work_unit=job.work_unit)
-            job.log_path.parent.mkdir(parents=True, exist_ok=True)
             log_fp = job.log_path.open("ab", buffering=0)
-            argv = [*argv, JOB_LOG_PATH_ARG, str(job.log_path)]
             self._logger.debug(
                 "Launching local subprocess for %s with job_id=%s cpu_indices=%s gpu_indices=%s log=%s.",
                 job.work_unit,

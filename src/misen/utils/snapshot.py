@@ -29,6 +29,8 @@ import cloudpickle
 import uv
 from dotenv import load_dotenv
 
+from misen.utils.execute import JOB_LOG_PATH_ARG
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -56,8 +58,14 @@ class Snapshot(ABC):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
-    ) -> tuple[str, list[str], dict[str, str]]:
+    ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command and environment for one work unit.
+
+        ``argv`` includes the worker's ``--job-log-path`` argument so the
+        worker can wrap its lifecycle in
+        :meth:`Workspace.streaming_job_log` against the same file the
+        executor parent will use for its own output redirection (the
+        returned ``log_path``).
 
         Args:
             work_unit: Work unit to execute.
@@ -67,7 +75,7 @@ class Snapshot(ABC):
             gpu_runtime: Runtime environment for GPU resources.
 
         Returns:
-            Tuple ``(job_id, argv, env_overrides)``.
+            Tuple ``(job_id, argv, env_overrides, log_path)``.
         """
 
 
@@ -111,7 +119,7 @@ class NullSnapshot(Snapshot):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
-    ) -> tuple[str, list[str], dict[str, str]]:
+    ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare argv to execute the payload via ``uv run --no-project``.
 
         Args:
@@ -122,7 +130,7 @@ class NullSnapshot(Snapshot):
             gpu_runtime: Runtime environment for GPU resources.
 
         Returns:
-            Tuple ``(job_id, argv, env_overrides)``.
+            Tuple ``(job_id, argv, env_overrides, log_path)``.
         """
         job_id = token_base32(6)
 
@@ -134,12 +142,15 @@ class NullSnapshot(Snapshot):
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
         encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
 
+        log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         argv = [
             *_detect_pixi_wrap(),
             *_uv_execute_argv(_active_env_files(), payload_path, encoded_getter, gpu_runtime),
+            JOB_LOG_PATH_ARG,
+            str(log_path),
         ]
 
-        return job_id, argv, {}
+        return job_id, argv, {}, log_path
 
 
 class LocalSnapshot(Snapshot):
@@ -192,7 +203,7 @@ class LocalSnapshot(Snapshot):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
-    ) -> tuple[str, list[str], dict[str, str]]:
+    ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute serialized payload.
 
         Args:
@@ -203,7 +214,7 @@ class LocalSnapshot(Snapshot):
             gpu_runtime: Runtime environment for GPU resources.
 
         Returns:
-            Tuple ``(job_id, argv, env_overrides)``.
+            Tuple ``(job_id, argv, env_overrides, log_path)``.
         """
         job_id = token_base32(6)
 
@@ -219,9 +230,12 @@ class LocalSnapshot(Snapshot):
 
         argv += _uv_execute_argv(self.env_files, payload_path, encoded_getter, gpu_runtime)
 
+        log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
+        argv += [JOB_LOG_PATH_ARG, str(log_path)]
+
         env_overrides: dict[str, str] = {"VIRTUAL_ENV": str(self.python_env_dir)}
 
-        return job_id, argv, env_overrides
+        return job_id, argv, env_overrides, log_path
 
     def _snapshot_python_env(self, python_env_dir: Path) -> Path:
         """Install a frozen dependency snapshot into virtual environment.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 import misen.executor as executor_module
@@ -27,8 +28,8 @@ class FakeSnapshot(Snapshot):
     def cleanup(self) -> None:
         self.cleaned = True
 
-    def prepare_job(self, *args: object, **kwargs: object) -> tuple[str, list[str], dict[str, str]]:
-        return "fake-job", [], {}
+    def prepare_job(self, *args: object, **kwargs: object) -> tuple[str, list[str], dict[str, str], Path]:
+        return "fake-job", [], {}, Path("/dev/null")
 
 
 class FailedJob(Job):

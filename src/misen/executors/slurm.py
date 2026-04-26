@@ -16,7 +16,6 @@ import msgspec
 
 from misen.executor import Executor, Job, JobState
 from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
-from misen.utils.execute import JOB_LOG_PATH_ARG
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
@@ -200,7 +199,7 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
         if dependencies:
             sbatch_cmd.extend(["--dependency", f"afterok:{':'.join(job.slurm_job_id for job in dependencies)}"])
 
-        job_id, argv, env_overrides = snapshot.prepare_job(
+        job_id, argv, env_overrides, log_path = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,
             assigned_resources_getter=_assigned_resources_slurm_per_node
@@ -208,17 +207,14 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
             else _assigned_resources_slurm,
             gpu_runtime=resources["gpu_runtime"],
         )
-        log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Tell the worker entrypoint where its log file lives so it can
-        # wrap its lifecycle in workspace.streaming_job_log(...).
+        # ``argv`` already carries ``--job-log-path`` so the worker can
+        # wrap its lifecycle in ``workspace.streaming_job_log(...)``;
+        # ``--output`` points SLURM's stdout capture at the same file.
         wrapped = [
             "env",
             *(f"{key}={value}" for key, value in env_overrides.items()),
             *argv,
-            JOB_LOG_PATH_ARG,
-            str(log_path),
         ]
         sbatch_cmd.extend(["--output", str(log_path), "--export", "ALL", "--wrap", shlex.join(wrapped)])
         logger.debug("sbatch command for %s: %s", label, shlex.join(sbatch_cmd))
