@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from misen.executor import Executor, Job
 from misen.utils.assigned_resources import AssignedResources
-from misen.utils.execute import JOB_LOG_PATH_ENV
+from misen.utils.execute import JOB_LOG_PATH_ARG
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -460,6 +460,7 @@ class _LocalScheduler:
             job.log_path = job.workspace.get_job_log(job_id=job.job_id, work_unit=job.work_unit)
             job.log_path.parent.mkdir(parents=True, exist_ok=True)
             log_fp = job.log_path.open("ab", buffering=0)
+            argv = [*argv, JOB_LOG_PATH_ARG, str(job.log_path)]
             self._logger.debug(
                 "Launching local subprocess for %s with job_id=%s cpu_indices=%s gpu_indices=%s log=%s.",
                 job.work_unit,
@@ -474,7 +475,6 @@ class _LocalScheduler:
                 | {
                     "FORCE_COLOR": "1",
                     "MISEN_RUNTIME_EVENTS": "1",
-                    JOB_LOG_PATH_ENV: str(job.log_path),
                 }
                 | env_overrides,
                 stdout=log_fp,

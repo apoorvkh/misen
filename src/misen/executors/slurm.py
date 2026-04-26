@@ -16,7 +16,7 @@ import msgspec
 
 from misen.executor import Executor, Job
 from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
-from misen.utils.execute import JOB_LOG_PATH_ENV
+from misen.utils.execute import JOB_LOG_PATH_ARG
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import LocalSnapshot
 
@@ -181,8 +181,13 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
 
         # Tell the worker entrypoint where its log file lives so it can
         # wrap its lifecycle in workspace.streaming_job_log(...).
-        worker_env = {**env_overrides, JOB_LOG_PATH_ENV: str(log_path)}
-        wrapped = ["env", *(f"{key}={value}" for key, value in worker_env.items()), *argv]
+        wrapped = [
+            "env",
+            *(f"{key}={value}" for key, value in env_overrides.items()),
+            *argv,
+            JOB_LOG_PATH_ARG,
+            str(log_path),
+        ]
         sbatch_cmd.extend(["--output", str(log_path), "--export", "ALL", "--wrap", shlex.join(wrapped)])
         logger.debug("sbatch command for %s: %s", label, shlex.join(sbatch_cmd))
 

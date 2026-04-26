@@ -221,6 +221,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
                     msg = f"{executor_name} observed {len(failed_jobs)} failed job(s): {failed_labels}"
                     logger.error(msg)
                     runtime_event(msg, style="bold red")
+                    raise RuntimeError(msg)
             finally:
                 self.cleanup_snapshot(snapshot)
 
