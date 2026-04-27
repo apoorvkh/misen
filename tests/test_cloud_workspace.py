@@ -706,6 +706,93 @@ def test_cloud_workspace_job_log_live_streamed_to_bucket(tmp_path) -> None:
     assert paths[0].read_text().splitlines() == ["partial output", "more output"]
 
 
+def test_cloud_workspace_read_does_not_truncate_sibling_writer_task_log(tmp_path) -> None:
+    """A read in one workspace must not clobber a sibling writer on the same FS.
+
+    With LocalExecutor (and SLURM on shared NFS), the orchestrator and the
+    worker subprocess share ``.cache/misen`` via cwd. A cache refresh that
+    materialized downloaded chunks into a path the worker was still
+    appending to would orphan the worker's open inode and lose every byte
+    written between the last chunk upload and the rename. Regression test
+    for that bug.
+    """
+    bucket = "test-sibling-task-log"
+    scratch = tmp_path / "scratch-shared"
+    writer_ws = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        scratch_dir=str(scratch),
+        log_flush_interval_s=60,  # Long; chunk + state are published manually below.
+    )
+    task = Task(cloud_test_task_a)
+    writer_ws.set_resolved_hash(task, ResolvedTaskHash.from_object(("sibling", "task")))
+
+    log_path = writer_ws.get_task_log(task=task, job_id="job-sib")
+    remote_key = writer_ws._under("task_logs", task.task_hash().b32(), "job-sib.log")
+
+    fp = log_path.open("a", buffering=1, encoding="utf-8")
+    try:
+        fp.write("first-chunk\n")
+        fp.flush()
+
+        # Publish a chunk + state, simulating what the writer's live uploader
+        # would have pushed. We do this by hand to keep the test
+        # deterministic instead of racing with a background thread.
+        obs.put(
+            writer_ws._store,
+            f"{remote_key}.chunks/00000000000000000000.chunk",
+            b"first-chunk\n",
+            mode="overwrite",
+        )
+        obs.put(
+            writer_ws._store,
+            f"{remote_key}.state.json",
+            b'{"offset": 12, "closed": false}',
+            mode="overwrite",
+        )
+
+        # Writer continues. Now ``local_size > state_info.offset`` -- this
+        # is the gap where a refresh would (pre-fix) rename the writer's
+        # file to a truncated copy.
+        fp.write("second-chunk\n")
+        fp.flush()
+
+        # Reader in a separate workspace instance with the same scratch:
+        # simulates orchestrator-vs-subprocess (LocalExecutor). The
+        # orchestrator's ``_live_log_uploaders`` dict does NOT contain the
+        # writer path (a different process owns it), so the in-process
+        # guard inside ``_refresh_log_local`` cannot save us here.
+        reader_ws = _MemoryCloudWorkspace(
+            backend="s3",
+            bucket=bucket,
+            scratch_dir=str(scratch),
+        )
+        reader_ws.set_resolved_hash(task, ResolvedTaskHash.from_object(("sibling", "task")))
+        with reader_ws.read_task_log(task, job_id="job-sib") as f:
+            f.read()
+
+        # Pre-fix, the read above renamed the writer's file. This write
+        # lands in the orphaned inode and is invisible to compact.
+        fp.write("third-chunk\n")
+        fp.flush()
+    finally:
+        fp.close()
+        writer_ws.finalize_task_log(task=task, job_id="job-sib")
+
+    # A fresh client (no shared scratch) reads via the compacted .log blob.
+    # If the read had clobbered the writer file, compact would have
+    # uploaded only the truncated 12-byte chunk content.
+    fresh = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        scratch_dir=str(tmp_path / "scratch-fresh"),
+    )
+    fresh.set_resolved_hash(task, ResolvedTaskHash.from_object(("sibling", "task")))
+    with fresh.read_task_log(task, job_id="job-sib") as f:
+        final = f.read()
+    assert final.splitlines() == ["first-chunk", "second-chunk", "third-chunk"]
+
+
 def test_cloud_workspace_close_stops_live_uploaders(tmp_path) -> None:
     """Closing the workspace stops any outstanding live-upload threads."""
     workspace = _MemoryCloudWorkspace(

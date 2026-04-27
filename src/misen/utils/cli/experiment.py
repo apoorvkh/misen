@@ -22,6 +22,7 @@ from rich.pretty import Pretty
 from rich.text import Text
 from rich.tree import Tree
 
+from misen.exceptions import CacheError
 from misen.executor import ExecutorType  # noqa: TC001
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
@@ -704,13 +705,17 @@ def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
 
 def _list_task_logs(task: Task[Any], workspace: Any, console: Console) -> None:
     """List available task log entries with metadata."""
-    task_hash = task.task_hash().b32()
-    task_log_dir = Path(workspace.directory) / "task_logs" / task_hash[:2]
+    try:
+        log_key = task.resolved_hash(workspace=workspace).b32()
+    except CacheError:
+        console.print("  [dim]No logs found.[/dim]")
+        return
+    task_log_dir = Path(workspace.directory) / "task_logs" / log_key[:2]
     if not task_log_dir.exists():
         console.print("  [dim]No logs found.[/dim]")
         return
 
-    log_files = sorted(task_log_dir.glob(f"{task_hash}_*.log"), key=lambda p: p.stat().st_mtime)
+    log_files = sorted(task_log_dir.glob(f"{log_key}_*.log"), key=lambda p: p.stat().st_mtime)
     if not log_files:
         console.print("  [dim]No logs found.[/dim]")
         return
@@ -887,7 +892,11 @@ def _show_task_log(
     try:
         with workspace.read_task_log(task, job_id=job_id) as f:
             log_content = f.read()
-    except FileNotFoundError:
+    except (FileNotFoundError, CacheError):
+        # CacheError fires when the task log path can't be resolved yet --
+        # the directory is keyed by ``resolved_hash``, which requires every
+        # dependency's result hash, which doesn't exist until the deps
+        # complete. Treat that the same as "no log produced yet".
         if skip_missing:
             return False
         console.print("[dim]No logs found.[/dim]")

@@ -343,7 +343,12 @@ class DiskWorkspace(Workspace):
         return d
 
     def _task_log_dir(self, task: Task) -> tuple[Path, str]:
-        key_str = task.task_hash().b32()
+        # Logs are keyed by resolved_hash so two runs of the same task with
+        # different dependency results land in distinct log directories.
+        # Resolving the hash requires every dependency's result hash to be
+        # cached; callers that may invoke this before deps complete should
+        # expect ``CacheError``.
+        key_str = task.resolved_hash(workspace=self).b32()
         log_dir = Path(self._directory) / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str

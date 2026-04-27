@@ -301,7 +301,7 @@ class CloudWorkspace(Workspace):
     backend: CloudBackend
     bucket: str
     prefix: str = ""
-    scratch_dir: str = ".misen-scratch"
+    scratch_dir: str = ".cache/misen"
     config: dict[str, str] = msgspec.field(default_factory=dict)
     log_flush_interval_s: float = 1.0
 
@@ -313,7 +313,7 @@ class CloudWorkspace(Workspace):
         self._store = self._build_store()
         self._cloud_prefix = self.prefix.strip("/")
         self._scratch = Path(self.scratch_dir)
-        for subdir in ("tmp", "work", "task_logs", "job_logs", "results_cache"):
+        for subdir in ("tmp", "work", "task_logs", "task_log_cache", "job_logs", "job_log_cache", "results_cache"):
             (self._scratch / subdir).mkdir(parents=True, exist_ok=True)
         self._live_log_uploaders: dict[Path, _LiveLogUploader] = {}
         self._live_log_lock = threading.Lock()
@@ -366,11 +366,35 @@ class CloudWorkspace(Workspace):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _task_log_paths(self, task: Task, job_id: str) -> tuple[Path, str]:
-        key = task.task_hash().b32()
-        local_dir = self._scratch / "task_logs" / key
-        local_dir.mkdir(parents=True, exist_ok=True)
-        return local_dir / f"{job_id}.log", self._under("task_logs", key, f"{job_id}.log")
+    def _task_log_paths(self, task: Task, job_id: str) -> tuple[Path, Path, str]:
+        """Return ``(writer_path, cache_path, remote_key)`` for a task log.
+
+        ``writer_path`` is the file the executor appends to and the live
+        uploader reads chunks from. The read path never writes to it.
+
+        ``cache_path`` is a separate location where reads materialize a
+        downloaded copy of the cloud blob. Keeping it distinct prevents the
+        cache refresh (which uses an atomic rename) from orphaning the inode
+        that an active writer is appending to -- a real risk on shared
+        scratch (LocalExecutor and SLURM both share the orchestrator's
+        ``.cache/misen`` via cwd).
+
+        Logs are keyed by :meth:`Task.resolved_hash`, so two runs of the
+        same task with different dependency results land in distinct log
+        directories. Resolving the hash requires every dependency's result
+        hash to be cached -- callers that may invoke this before the deps
+        complete should expect :class:`CacheError`.
+        """
+        key = task.resolved_hash(workspace=self).b32()
+        writer_dir = self._scratch / "task_logs" / key
+        cache_dir = self._scratch / "task_log_cache" / key
+        writer_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return (
+            writer_dir / f"{job_id}.log",
+            cache_dir / f"{job_id}.log",
+            self._under("task_logs", key, f"{job_id}.log"),
+        )
 
     def _start_live_upload(self, local_path: Path, remote_key: str) -> None:
         with self._live_log_lock:
@@ -513,36 +537,46 @@ class CloudWorkspace(Workspace):
         return logs
 
     def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
-        local_path, remote_key = self._task_log_paths(task, job_id or "0")
-        self._start_live_upload(local_path, remote_key)
-        return local_path
+        writer_path, _, remote_key = self._task_log_paths(task, job_id or "0")
+        self._start_live_upload(writer_path, remote_key)
+        return writer_path
 
     def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
-        local_path, _ = self._task_log_paths(task, job_id or "0")
-        self._stop_live_upload(local_path)
+        writer_path, _, _ = self._task_log_paths(task, job_id or "0")
+        self._stop_live_upload(writer_path)
 
     def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
-        key = task.task_hash().b32()
         if job_id is not None:
-            local_path, remote_key = self._task_log_paths(task, job_id)
-            self._refresh_log_local(remote_key, local_path)
-            return local_path.open("r", encoding="utf-8")
+            return self._open_task_log_for_read(task, job_id)
 
-        local_dir = self._scratch / "task_logs" / key
+        key = task.resolved_hash(workspace=self).b32()
+        writer_dir = self._scratch / "task_logs" / key
         remote_logs = self._remote_logs(self._under("task_logs", key) + "/")
-        candidates: list[tuple[float, Path, str | None]] = []
-        if local_dir.exists():
-            candidates.extend((p.stat().st_mtime, p, None) for p in local_dir.glob("*.log"))
-        candidates.extend((ts, local_dir / key.rsplit("/", 1)[-1], key) for key, ts in remote_logs.items())
+        candidates: list[tuple[float, str]] = []
+        if writer_dir.exists():
+            candidates.extend((p.stat().st_mtime, p.stem) for p in writer_dir.glob("*.log"))
+        for remote_key, ts in remote_logs.items():
+            filename = remote_key.rsplit("/", 1)[-1]
+            if filename.endswith(".log"):
+                candidates.append((ts, filename[: -len(".log")]))
 
         if not candidates:
             msg = f"No logs found for task {task} in workspace {self.backend}://{self.bucket!r}."
             raise FileNotFoundError(msg)
 
-        _, local_path, remote_key = max(candidates, key=lambda item: item[0])
-        if remote_key is not None:
-            self._refresh_log_local(remote_key, local_path)
-        return local_path.open("r", encoding="utf-8")
+        _, latest_job_id = max(candidates, key=lambda item: item[0])
+        return self._open_task_log_for_read(task, latest_job_id)
+
+    def _open_task_log_for_read(self, task: Task, job_id: str) -> TextIO:
+        writer_path, cache_path, remote_key = self._task_log_paths(task, job_id)
+        # Writer files visible on local FS (this process or a same-FS sibling
+        # like a LocalExecutor subprocess or a SLURM worker on shared scratch)
+        # always have the freshest bytes. Read-only opens never disturb the
+        # writer, so prefer the writer file when present.
+        if writer_path.exists():
+            return writer_path.open("r", encoding="utf-8")
+        self._refresh_log_local(remote_key, cache_path)
+        return cache_path.open("r", encoding="utf-8")
 
     def _job_log_remote_key(self, local_path: Path) -> str:
         return self._under("job_logs", local_path.name)
@@ -565,14 +599,32 @@ class CloudWorkspace(Workspace):
             self._stop_live_upload(local_path)
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
-        local_dir = self._scratch / "job_logs"
-        local_dir.mkdir(parents=True, exist_ok=True)
+        writer_dir = self._scratch / "job_logs"
+        cache_dir = self._scratch / "job_log_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Refresh remote logs into the read cache. The cache is distinct from
+        # the writer dir, so a refresh cannot clobber a writer that's still
+        # appending to ``writer_dir/<filename>``.
+        paths: dict[str, Path] = {}
         for remote_key in self._remote_logs(self._under("job_logs") + "/"):
-            self._refresh_log_local(remote_key, local_dir / remote_key.rsplit("/", 1)[-1])
+            filename = remote_key.rsplit("/", 1)[-1]
+            cache_path = cache_dir / filename
+            self._refresh_log_local(remote_key, cache_path)
+            paths[filename] = cache_path
+
+        # Local writer files (this process or a same-FS sibling) override the
+        # cache for the same filename: they always have the freshest bytes,
+        # and read-only opens by callers don't disturb them.
+        if writer_dir.exists():
+            for p in writer_dir.iterdir():
+                if p.is_file():
+                    paths[p.name] = p
 
         if work_unit is None:
-            return iter(p for p in local_dir.iterdir() if p.is_file())
-        return iter(local_dir.glob(f"{work_unit.root.task_hash().b32()}_*.log"))
+            return iter(paths.values())
+        prefix = f"{work_unit.root.task_hash().b32()}_"
+        return iter(p for filename, p in paths.items() if filename.startswith(prefix))
 
     def close(self) -> None:
         with self._live_log_lock:

@@ -47,22 +47,24 @@ def test_job_log_iter_filters_by_work_unit(tmp_path) -> None:
     assert set(workspace.job_log_iter()) == {log_a_1, log_a_2, log_b_1}
 
 
-def test_task_logs_are_keyed_by_task_hash_for_unresolved_dependencies(tmp_path) -> None:
+def test_task_logs_require_resolvable_dependencies(tmp_path) -> None:
+    """Task logs are keyed by ``resolved_hash``; lookup before deps are
+    computed surfaces ``CacheError`` rather than silently using a path that
+    a later run would collide with.
+    """
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen-task-logs"))
     source_task = Task(log_task_source)
     sink_task = Task(log_task_sink, value=source_task.T)
 
     with pytest.raises(CacheError):
         sink_task.resolved_hash(workspace=workspace)
-
-    with workspace.get_task_log(task=sink_task, job_id="job-live").open("a", encoding="utf-8") as log:
-        log.write("sink started\n")
-
-    with workspace.read_task_log(task=sink_task, job_id="job-live") as log:
-        assert log.read() == "sink started\n"
+    with pytest.raises(CacheError):
+        workspace.get_task_log(task=sink_task, job_id="job-live")
+    with pytest.raises(CacheError):
+        workspace.read_task_log(task=sink_task, job_id="job-live")
 
 
-def test_work_unit_downstream_task_log_uses_original_task_hash(tmp_path) -> None:
+def test_work_unit_downstream_task_log_uses_resolved_hash(tmp_path) -> None:
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen-work-unit-task-logs"))
     source_task = Task(log_task_source)
     sink_task = Task(log_task_sink, value=source_task.T)
@@ -70,7 +72,7 @@ def test_work_unit_downstream_task_log_uses_original_task_hash(tmp_path) -> None
 
     WorkUnit.execute(work_unit.graph, workspace=workspace, job_id="job-live", assigned_resources=None)
 
-    key = sink_task.task_hash().b32()
+    key = sink_task.resolved_hash(workspace=workspace).b32()
     log_path = tmp_path / ".misen-work-unit-task-logs" / "task_logs" / key[:2] / f"{key}_job-live.log"
     assert log_path.read_text(encoding="utf-8") == "sink 1\n"
 
