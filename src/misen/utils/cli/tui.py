@@ -148,7 +148,6 @@ class _TaskTreeNode:
     named_as: str | None
     work_unit: WorkUnit | None = None
     state: JobState = "unknown"
-    is_backref: bool = False
 
 
 @dataclass
@@ -174,14 +173,85 @@ class _JobStateIndex:
         return self.wu_by_root.get(task)
 
 
+def _canonical_parent_edges(
+    named_tasks: Mapping[str, Task[Any]],
+) -> tuple[list[tuple[str, Task[Any]]], dict[Task[Any], tuple[Task[Any], str] | None]]:
+    """Pick a single (parent, arg-label) for each task that places it at maximum depth.
+
+    The result is a deepest-placement spanning tree of the task DAG: every task
+    reachable from a top-level named root is rendered exactly once, under the
+    parent edge whose path from a root is longest. Ties are broken by
+    topological visit order, which mirrors argument iteration order from each
+    parent.
+
+    Returns a ``(roots, canonical)`` pair. ``roots`` is the alphabetically
+    sorted list of ``(alias, task)`` pairs that aren't reachable as a
+    descendant of any other named task. ``canonical[task]`` is ``None`` for
+    those roots and ``(parent, label)`` for every other reachable task.
+    """
+    all_descendants: set[Task[Any]] = set()
+
+    def collect_descendants(task: Task[Any], seen: set[Task[Any]]) -> None:
+        if task in seen:
+            return
+        seen.add(task)
+        for _, child in iter_task_arg_children(task):
+            all_descendants.add(child)
+            collect_descendants(child, seen)
+
+    for named_task in named_tasks.values():
+        collect_descendants(named_task, set())
+
+    roots: list[tuple[str, Task[Any]]] = [
+        (alias, task) for alias, task in sorted(named_tasks.items()) if task not in all_descendants
+    ]
+    root_tasks = {task for _, task in roots}
+
+    in_count: dict[Task[Any], int] = {}
+
+    def explore(task: Task[Any], seen: set[Task[Any]]) -> None:
+        if task in seen:
+            return
+        seen.add(task)
+        in_count.setdefault(task, 0)
+        for _, child in iter_task_arg_children(task):
+            in_count[child] = in_count.get(child, 0) + 1
+            explore(child, seen)
+
+    explored: set[Task[Any]] = set()
+    for task in root_tasks:
+        explore(task, explored)
+
+    depth: dict[Task[Any], int] = {task: 0 for task in root_tasks}
+    canonical: dict[Task[Any], tuple[Task[Any], str] | None] = {task: None for task in root_tasks}
+    remaining = dict(in_count)
+    for task in root_tasks:
+        remaining[task] = 0
+
+    queue: list[Task[Any]] = [task for _, task in roots]
+    head = 0
+    while head < len(queue):
+        parent = queue[head]
+        head += 1
+        for label, child in iter_task_arg_children(parent):
+            candidate = depth[parent] + 1
+            if child not in depth or candidate > depth[child]:
+                depth[child] = candidate
+                canonical[child] = (parent, label)
+            if child in remaining:
+                remaining[child] -= 1
+                if remaining[child] == 0:
+                    queue.append(child)
+
+    return roots, canonical
+
+
 def _render_node_label(entry: _TaskTreeNode, *, emphasis_style: str | None = None) -> Text:
     """Return the styled Textual label for a task tree node."""
     text = Text()
     text.append(_STATE_ICONS[entry.state], style=_STATE_STYLES[entry.state])
     text.append(" ")
     text.append_text(format_task_line_text(entry.task, prefix=entry.arg_prefix))
-    if entry.is_backref:
-        text.append("  \u21a9", style="dim italic")
     if emphasis_style is not None:
         text.stylize(emphasis_style)
     return text
@@ -527,49 +597,33 @@ def _run_textual_task_monitor(
             self._snap_cursor_to_mode_stop()
 
         def _build_tree(self, tree: Any) -> None:
-            # Expand each named task's full arg-descendant set so we can
-            # identify which named tasks are strict subtrees of another. Those
-            # non-roots are rendered under their parents rather than at the top
-            # level — which is what makes the hierarchy readable when multiple
-            # named tasks share a DAG.
-            all_descendants: set[Task[Any]] = set()
-
-            def collect_descendants(task: Task[Any], seen: set[Task[Any]]) -> None:
-                if task in seen:
-                    return
-                seen.add(task)
-                for _, child in iter_task_arg_children(task):
-                    all_descendants.add(child)
-                    collect_descendants(child, seen)
-
-            for named_task in named_tasks.values():
-                collect_descendants(named_task, set())
-
-            rendered: set[Task[Any]] = set()
+            # Render each task once, under the parent that places it at the
+            # deepest position reachable from any top-level named root. Tasks
+            # whose only paths run through another named task are rendered
+            # under that parent, not at the top level.
+            roots, canonical = _canonical_parent_edges(named_tasks)
 
             def add_subtree(
                 parent_node: Any,
                 task: Task[Any],
                 arg_prefix: str | None,
                 named_as: str | None,
-                ancestry: set[Task[Any]],
                 parent_wu: WorkUnit | None,
             ) -> None:
-                if task in ancestry:
-                    return
                 node_wu = index.work_unit_of_root(task) or parent_wu
-                is_backref = task in rendered
                 entry = _TaskTreeNode(
                     task=task,
                     tree_node=None,
                     arg_prefix=arg_prefix,
                     named_as=named_as,
                     work_unit=node_wu,
-                    is_backref=is_backref,
                 )
-                # Back-refs render as leaves; otherwise a node gets a chevron
-                # only when it actually has dependency children to reveal.
-                has_children = not is_backref and bool(iter_task_arg_children(task))
+                children = [
+                    (label, child)
+                    for label, child in iter_task_arg_children(task)
+                    if canonical.get(child) == (task, label)
+                ]
+                has_children = bool(children)
                 node = parent_node.add(
                     _render_node_label(entry),
                     data=entry,
@@ -581,21 +635,11 @@ def _run_textual_task_monitor(
                 self._entry_by_node_id[id(node)] = entry
                 if node_wu is not None and node_wu not in self._wu_canonical:
                     self._wu_canonical[node_wu] = entry
+                for child_label, child_task in children:
+                    add_subtree(node, child_task, child_label, None, node_wu)
 
-                if is_backref:
-                    # Leave back-references as leaves — the full subtree lives
-                    # under the canonical occurrence.
-                    return
-
-                rendered.add(task)
-                next_ancestry = ancestry | {task}
-                for child_prefix, child_task in iter_task_arg_children(task):
-                    add_subtree(node, child_task, child_prefix, None, next_ancestry, node_wu)
-
-            for alias, task in sorted(named_tasks.items()):
-                if task in all_descendants:
-                    continue
-                add_subtree(tree.root, task, None, alias, set(), None)
+            for alias, task in roots:
+                add_subtree(tree.root, task, None, alias, None)
 
             if self._entries and self._cursor_entry is None:
                 self._cursor_entry = self._entries[0]
@@ -924,9 +968,10 @@ def _build_session_rich_tree(
 ) -> RichTree:
     """Build a Rich dependency tree labelled with per-task job states.
 
-    The hierarchy mirrors :meth:`_TaskMonitorApp._build_tree`: named tasks that
-    are dependencies of other named tasks are rendered under their parent only,
-    with back-references shown as ``↩`` leaves.
+    The hierarchy mirrors :meth:`_TaskMonitorApp._build_tree`: each task is
+    rendered exactly once, under the parent edge that places it at maximum
+    depth from any top-level named root. Other paths to the same task are
+    omitted entirely (no back-references).
 
     ``states`` lets callers pass a pre-computed state map so the tree
     builder doesn't re-poll the backend (one bulk call upstream is much
@@ -941,56 +986,29 @@ def _build_session_rich_tree(
         state: JobState = resolved_states.get(job, "unknown") if job is not None else "unknown"
         return state, wu
 
-    def render_label(task: Task[Any], state: JobState, arg_prefix: str | None, *, backref: bool) -> str:
+    def render_label(task: Task[Any], state: JobState, arg_prefix: str | None) -> str:
         style = _STATE_STYLES[state]
         icon = _STATE_ICONS[state]
         body = format_task_line_markup(task, prefix=arg_prefix)
-        line = f"[{style}]{icon}[/{style}] {body}"
-        if backref:
-            line += "  [dim italic]↩[/dim italic]"
-        return line
+        return f"[{style}]{icon}[/{style}] {body}"
 
-    all_descendants: set[Task[Any]] = set()
-
-    def collect_descendants(task: Task[Any], seen: set[Task[Any]]) -> None:
-        if task in seen:
-            return
-        seen.add(task)
-        for _, child in iter_task_arg_children(task):
-            all_descendants.add(child)
-            collect_descendants(child, seen)
-
-    for named_task in named_tasks.values():
-        collect_descendants(named_task, set())
-
-    rendered: set[Task[Any]] = set()
+    roots, canonical = _canonical_parent_edges(named_tasks)
     root = RichTree("[bold cyan]Tasks[/bold cyan]")
 
     def add_subtree(
         parent_branch: RichTree,
         task: Task[Any],
         arg_prefix: str | None,
-        ancestry: set[Task[Any]],
         parent_wu: WorkUnit | None,
     ) -> None:
-        if task in ancestry:
-            return
         state, wu = state_for(task, parent_wu)
-        is_backref = task in rendered
-        label = render_label(task, state, arg_prefix, backref=is_backref)
-        if is_backref:
-            parent_branch.add(label)
-            return
-        rendered.add(task)
-        branch = parent_branch.add(label)
-        next_ancestry = ancestry | {task}
-        for child_prefix, child_task in iter_task_arg_children(task):
-            add_subtree(branch, child_task, child_prefix, next_ancestry, wu)
+        branch = parent_branch.add(render_label(task, state, arg_prefix))
+        for label, child in iter_task_arg_children(task):
+            if canonical.get(child) == (task, label):
+                add_subtree(branch, child, label, wu)
 
-    for _alias, task in sorted(named_tasks.items()):
-        if task in all_descendants:
-            continue
-        add_subtree(root, task, None, set(), None)
+    for _alias, task in roots:
+        add_subtree(root, task, None, None)
 
     return root
 
