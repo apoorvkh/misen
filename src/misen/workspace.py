@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 __all__ = ["Workspace"]
 
 
-WorkspaceType: TypeAlias = Literal["disk", "cloud"]
+WorkspaceType: TypeAlias = Literal["disk", "cloud", "memory"]
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ class Workspace(Configurable):
     _config_aliases: ClassVar[dict[WorkspaceType, str]] = {
         "disk": "misen.workspaces.disk:DiskWorkspace",
         "cloud": "misen.workspaces.cloud:CloudWorkspace",
+        "memory": "misen.workspaces.memory:InMemoryWorkspace",
     }
 
     def _post_init(
