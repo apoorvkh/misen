@@ -59,7 +59,7 @@ class Resources(TypedDict, total=False):
         gpu_runtime: Requested GPU runtime.
     """
 
-    time: int | None
+    time: int
     nodes: int
     memory: int
     cpus: int
@@ -69,7 +69,7 @@ class Resources(TypedDict, total=False):
 
 
 _DEFAULT_RESOURCES: Resources = {
-    "time": None,
+    "time": 60,
     "nodes": 1,
     "memory": 8,
     "cpus": 1,
@@ -112,11 +112,7 @@ def aggregate_resources(resources: Iterable[Resources]) -> Resources:
             raise ValueError(msg)
 
     return Resources(
-        time=(
-            None
-            if any(r["time"] is None for r in resource_list)
-            else sum(cast("int", r["time"]) for r in resource_list)
-        ),
+        time=sum(r["time"] for r in resource_list),
         nodes=max(r["nodes"] for r in resource_list),
         memory=max(r["memory"] for r in resource_list),
         cpus=max(r["cpus"] for r in resource_list),
