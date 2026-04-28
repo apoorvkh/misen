@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from bisect import insort
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -49,6 +50,7 @@ class LocalJob(Job):
         "_lock",
         "_log_fp",
         "_process",
+        "_started_at",
         "assigned_cpu_indices",
         "assigned_gpu_indices",
         "dependencies",
@@ -73,6 +75,7 @@ class LocalJob(Job):
         self._process: subprocess.Popen[bytes] | None = None
         self._log_fp: FileIO | None = None
         self._cached_state: _JobState = "pending"
+        self._started_at: float | None = None
         self._lock = threading.Lock()
 
     def state(self) -> _JobState:
@@ -113,12 +116,23 @@ class LocalJob(Job):
             self.assigned_cpu_indices = list(cpu_indices)
             self.assigned_gpu_indices = list(gpu_indices)
             self._cached_state = "running"
+            self._started_at = time.monotonic()
             logger.info(
                 "Local job %s for %s is running (pid=%d).",
                 self.job_id or "n/a",
                 self.label,
                 process.pid,
             )
+
+    def time_limit_exceeded(self) -> bool:
+        """Return True if a running job has exceeded its requested time limit."""
+        time_limit = self.resources["time"]
+        if time_limit is None:
+            return False
+        with self._lock:
+            if self._started_at is None or self._cached_state != "running":
+                return False
+            return time.monotonic() - self._started_at > time_limit * 60
 
     def mark_failed(self) -> None:
         """Mark a pending/running job failed and close local handles."""
@@ -165,6 +179,7 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
     num_xpu_gpus: int = 0
     xpu_gpu_indices: list[int] | None = None
     snapshot: bool = True
+    enforce_time_limits: bool = False
 
     def __post_init__(self) -> None:
         """Infer resource limits and initialize the scheduler."""
@@ -230,6 +245,7 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
             available_budget=self._resource_budget,
             available_cpu_indices=cpu_indices,
             available_gpu_indices=gpu_indices_by_runtime,
+            enforce_time_limits=self.enforce_time_limits,
         )
         logger.info(
             "Initialized LocalExecutor budget: memory=%sGiB cpus=%d cuda_gpus=%d rocm_gpus=%d xpu_gpus=%d.",
@@ -335,6 +351,7 @@ class _LocalScheduler:
         "available_budget",
         "available_cpu_indices",
         "available_gpu_indices",
+        "enforce_time_limits",
     )
     _logger = logging.getLogger(__name__)
 
@@ -344,10 +361,12 @@ class _LocalScheduler:
         available_budget: _ResourceBudget,
         available_cpu_indices: list[int],
         available_gpu_indices: dict[str, list[int]],
+        enforce_time_limits: bool = False,
     ) -> None:
         self.available_budget = available_budget
         self.available_cpu_indices = list(available_cpu_indices)
         self.available_gpu_indices = {runtime: list(indices) for runtime, indices in available_gpu_indices.items()}
+        self.enforce_time_limits = enforce_time_limits
         self._pending: list[LocalJob] = []
         self._running: set[LocalJob] = set()
         self._condition = threading.Condition()
@@ -372,12 +391,26 @@ class _LocalScheduler:
     def _run(self) -> None:
         while True:
             with self._condition:
+                if self.enforce_time_limits:
+                    self._terminate_timed_out_locked()
                 self._collect_finished_locked()
                 progress_made = self._start_ready_jobs_locked()
                 if not self._pending and not self._running:
                     self._condition.wait()
                 elif not progress_made:
                     self._condition.wait(timeout=0.1)
+
+    def _terminate_timed_out_locked(self) -> None:
+        for job in list(self._running):
+            if not job.time_limit_exceeded():
+                continue
+            self._logger.warning(
+                "Local job %s for %s exceeded time limit of %d minute(s); sending SIGTERM.",
+                job.job_id or "n/a",
+                job.label,
+                job.resources["time"],
+            )
+            job.terminate()
 
     def _collect_finished_locked(self) -> None:
         finished_any = False
