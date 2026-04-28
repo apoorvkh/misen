@@ -67,10 +67,14 @@ wheels = [
 [[package]]
 name = "flufl-lock"
 version = "9.1.0"
-source = { git = "https://gitlab.com/warsaw/flufl.lock.git?rev=ca111345834da11524ac778a5d75c4b22c452890#ca111345834da11524ac778a5d75c4b22c452890" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "atpublic" },
     { name = "psutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/82/c5/a2970cea7d0c0369da6c22b6fc6c6f04c06bd71bfc25e417157c0d4f60d2/flufl_lock-9.1.0.tar.gz", hash = "sha256:8d73c88cab7c98b7926710299c1162bec7ce253f9b9c5f0a2ca8037f9f240234", size = 33999, upload-time = "2026-04-27T18:38:18.213Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/67/97efedcd446c8561e3430d35a2ed6c467df724cc2e44dea5dd8a1e62d4cd/flufl_lock-9.1.0-py3-none-any.whl", hash = "sha256:84d7c85628604dc878fea29bf19262498aec1bd3f162f83be291507169681a9b", size = 11234, upload-time = "2026-04-27T18:38:16.697Z" },
 ]
 
 [[package]]
@@ -371,7 +375,6 @@ dependencies = [
     { name = "msgspec" },
     { name = "obstore" },
     { name = "psutil", marker = "sys_platform != 'linux'" },
-    { name = "pygments" },
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "rustworkx" },
@@ -396,13 +399,12 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "cloudpickle", specifier = ">=3.0" },
-    { name = "flufl-lock", git = "https://gitlab.com/warsaw/flufl.lock.git?rev=ca111345834da11524ac778a5d75c4b22c452890" },
+    { name = "flufl-lock", specifier = ">=9.1.0" },
     { name = "libcst", specifier = ">=1.8.2" },
     { name = "lmdb", specifier = ">=1.7.5" },
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "obstore", specifier = ">=0.9.4" },
     { name = "psutil", marker = "sys_platform != 'linux'", specifier = ">=6.0" },
-    { name = "pygments", specifier = ">=2.20.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=13.7.0" },
     { name = "rustworkx", specifier = ">=0.15.0" },

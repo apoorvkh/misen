@@ -15,9 +15,7 @@ dependencies = [
   "uv>=0.11.6",
   "xxhash>=3.0.0",
   # disk workspace
-  # issue40 branch adds the _now() hook we override for NFS clock offsets;
-  # pinned to a specific commit until the change ships in a release.
-  "flufl-lock>=8.2.0",
+  "flufl-lock>=9.1.0",
   "lmdb>=1.7.5",
   # cloud workspace
   "obstore>=0.9.4",
@@ -28,9 +26,6 @@ dependencies = [
   "rich>=13.7.0",
   "textual>=0.78.0",
   "tyro>=1.0.0",
-  # transitive dep of rich/textual
-  # earlier versions contain a vulnerability
-  "pygments>=2.20.0"
 ]
 
 [project.scripts]
@@ -43,9 +38,6 @@ docs = ["mkdocstrings-python==2.0.1", "zensical==0.0.17"]
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12"]
 build-backend = "uv_build"
-
-[tool.uv.sources]
-flufl-lock = { git = "https://gitlab.com/warsaw/flufl.lock.git", rev = "ca111345834da11524ac778a5d75c4b22c452890" }
 
 [tool.ruff]
 line-length = 120
