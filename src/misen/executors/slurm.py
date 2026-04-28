@@ -17,7 +17,7 @@ import msgspec
 from misen.executor import Executor, Job, JobState
 from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 from misen.utils.runtime_events import work_unit_label
-from misen.utils.snapshot import LocalSnapshot
+from misen.utils.snapshot import LocalSnapshot, NullSnapshot
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -117,7 +117,7 @@ class SlurmJob(Job):
         return result
 
 
-class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
+class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
     """Executor that submits work units to SLURM via ``sbatch``."""
 
     partition: str | None = None
@@ -126,21 +126,23 @@ class SlurmExecutor(Executor[SlurmJob, LocalSnapshot]):
     constraint: str | None = None
     default_flags: dict[str, _SetValue] = msgspec.field(default_factory=dict)
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
+    snapshot: bool = True
 
     def __post_init__(self) -> None:
         """Normalize untyped config into msgspec structs."""
         self.default_flags = msgspec.convert(self.default_flags, type=dict[str, _SetValue])
         self.rules = msgspec.convert(self.rules, type=list[_SlurmRule])
 
-    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        return self._make_local_snapshot(workspace=workspace)
+    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot | NullSnapshot:
+        """Return a local snapshot for this workspace, or ``NullSnapshot`` when disabled."""
+        return self._make_local_snapshot(workspace=workspace) if self.snapshot else NullSnapshot()
 
     def _dispatch(
         self,
         work_unit: WorkUnit,
         dependencies: set[SlurmJob],
         workspace: Workspace,
-        snapshot: LocalSnapshot,
+        snapshot: LocalSnapshot | NullSnapshot,
     ) -> SlurmJob:
         """Submit one work unit to SLURM."""
         resources = work_unit.resources
