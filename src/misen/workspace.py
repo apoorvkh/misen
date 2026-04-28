@@ -210,6 +210,65 @@ class Workspace(Configurable):
     @abstractmethod
     def _get_work_dir(self, task: Task) -> Path: ...
 
+    def start_work_dir_sync(self, task: Task) -> None:
+        """Begin syncing a cacheable task's work_dir with durable storage.
+
+        Workspaces with off-machine durable storage (e.g.
+        :class:`misen.workspaces.cloud.CloudWorkspace`) should override
+        this to download any existing snapshot from durable storage into
+        the local work_dir and start a background uploader that
+        periodically pushes local writes back. The uploader gives
+        cacheable tasks a checkpoint location: writes that reach
+        durable storage survive a worker crash, so a future invocation
+        with the same resolved hash can resume from the latest synced
+        state.
+
+        The base implementation is a no-op (correct for
+        :class:`misen.workspaces.disk.DiskWorkspace`, where the work_dir
+        already lives on durable shared storage).
+
+        Implementations must be idempotent: subsequent calls while sync
+        is already active are no-ops. Implementations must also be safe
+        under abnormal exit (worker killed mid-execution): on-exit
+        :meth:`finalize_work_dir` should leave durable storage in a
+        consistent state if it runs, but if it does not run the next
+        invocation must still produce correct behavior.
+        """
+        _ = task
+
+    def finalize_work_dir(self, task: Task) -> None:
+        """Stop the background sync and perform a final upload sweep.
+
+        Idempotent. Called by the runtime after the task function
+        returns (success or failure). For cacheable tasks the work_dir
+        contents are preserved in durable storage so a future
+        resumption can start from the latest checkpoint.
+
+        The base implementation is a no-op.
+        """
+        _ = task
+
+    def remove_work_dir(self, task: Task) -> None:
+        """Remove durable + local copies of a cacheable task's work_dir.
+
+        Called when ``@meta(cleanup_work_dir=True)`` after a successful
+        run. The default implementation removes only the local
+        directory; backends with off-machine durable storage override
+        to also delete remote objects.
+
+        Args:
+            task: Cacheable task whose work_dir should be removed.
+
+        Raises:
+            RuntimeError: If the task is non-cacheable.
+        """
+        if not task.meta.cache:
+            msg = f"{task} cannot use workspace work_dir unless Task.meta.cache == True."
+            raise RuntimeError(msg)
+        path = self._get_work_dir(task)
+        if path.exists():
+            shutil.rmtree(path)
+
     @abstractmethod
     def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
         """Return path where ``task``'s log for ``job_id`` should be written.

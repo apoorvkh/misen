@@ -435,10 +435,14 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         save_task_result(task=self, result=result, workspace=workspace)
         logger.debug("Persisted task result metadata for %s.", self)
-        should_cleanup = not self.meta.cache or self.meta.cleanup_work_dir
-        if should_cleanup and work_dir is not None and work_dir.exists():
-            shutil.rmtree(work_dir)
-            logger.debug("Removed work directory for %s at %s.", self, work_dir)
+        if work_dir is not None:
+            if not self.meta.cache:
+                if work_dir.exists():
+                    shutil.rmtree(work_dir)
+                    logger.debug("Removed ephemeral work directory for %s at %s.", self, work_dir)
+            elif self.meta.cleanup_work_dir:
+                workspace.remove_work_dir(task=self)
+                logger.debug("Removed work directory (local + durable) for %s.", self)
 
         return result
 

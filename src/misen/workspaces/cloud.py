@@ -211,6 +211,120 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
         return sum(1 for _ in self)
 
 
+class _WorkDirSync:
+    """Sync a local work_dir to/from cloud object storage.
+
+    The runtime lock for cacheable tasks already guarantees a single
+    active execution per resolved hash, so this class assumes the local
+    directory has exactly one writer (the task itself) for the lifetime
+    of one start/stop cycle.
+
+    On :meth:`restore` the latest snapshot under ``remote_prefix`` is
+    downloaded into ``local_dir`` (overwriting any existing local
+    files at matching paths), seeding the per-file ``(size, mtime)``
+    map so the uploader does not immediately re-upload restored bytes.
+    On :meth:`start` a background thread wakes every ``interval_s``
+    seconds, walks the local tree, and pushes any new or modified file
+    plus deletes any remote object whose local counterpart was removed.
+    On :meth:`stop` the thread is joined and (by default) one final
+    sweep runs so the bucket reflects the directory's terminal state.
+    """
+
+    __slots__ = (
+        "_interval_s",
+        "_known",
+        "_local_dir",
+        "_remote_prefix",
+        "_stop",
+        "_store",
+        "_thread",
+    )
+
+    def __init__(self, store: Any, local_dir: Path, remote_prefix: str, interval_s: float) -> None:
+        self._store = store
+        self._local_dir = local_dir
+        self._remote_prefix = remote_prefix.rstrip("/")
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._known: dict[str, tuple[int, float]] = {}
+
+    def restore(self) -> None:
+        """Download the remote snapshot into the local dir."""
+        prefix = f"{self._remote_prefix}/"
+        for batch in obs.list(self._store, prefix=prefix):
+            for entry in batch:
+                rel = entry["path"][len(prefix) :]
+                if not rel:
+                    continue
+                local_path = self._local_dir / rel
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    data = bytes(obs.get(self._store, entry["path"]).bytes())
+                except FileNotFoundError:
+                    continue
+                local_path.write_bytes(data)
+                stat = local_path.stat()
+                self._known[rel] = (stat.st_size, stat.st_mtime)
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f"misen-work-sync[{self._remote_prefix}]",
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_s):
+            try:
+                self._sync_once()
+            except Exception:
+                logger.exception("Work dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
+
+    def _sync_once(self) -> None:
+        seen: set[str] = set()
+        if self._local_dir.exists():
+            for path in self._local_dir.rglob("*"):
+                if not path.is_file():
+                    continue
+                try:
+                    stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                rel = path.relative_to(self._local_dir).as_posix()
+                seen.add(rel)
+                current = (stat.st_size, stat.st_mtime)
+                if self._known.get(rel) == current:
+                    continue
+                try:
+                    with path.open("rb") as f:
+                        obs.put(self._store, f"{self._remote_prefix}/{rel}", f, mode="overwrite")
+                except FileNotFoundError:
+                    continue
+                self._known[rel] = current
+        # Mirror local deletions to the remote, but only for keys we
+        # previously uploaded -- never touch objects this sync did not
+        # produce, so a stale or unrelated entry under the prefix is
+        # left alone.
+        for rel in [r for r in self._known if r not in seen]:
+            with contextlib.suppress(FileNotFoundError):
+                obs.delete(self._store, f"{self._remote_prefix}/{rel}")
+            del self._known[rel]
+
+    def stop(self, *, final_upload: bool = True) -> None:
+        self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=max(self._interval_s * 2, 2.0))
+        self._thread = None
+        if final_upload:
+            try:
+                self._sync_once()
+            except Exception:
+                logger.exception("Final work dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
+
+
 class _LiveLogUploader:
     """Upload appended log chunks in the background, then compact on close."""
 
@@ -307,10 +421,14 @@ class CloudWorkspace(Workspace):
     config: dict[str, str] = msgspec.field(default_factory=dict)
     scratch_dir: str = ".cache/misen"
     log_flush_interval_s: float = 1.0
+    work_dir_sync_interval_s: float = 30.0
 
     def __post_init__(self) -> None:
         if self.log_flush_interval_s <= 0:
             msg = "log_flush_interval_s must be positive"
+            raise ValueError(msg)
+        if self.work_dir_sync_interval_s <= 0:
+            msg = "work_dir_sync_interval_s must be positive"
             raise ValueError(msg)
         if self.s3_region is not None and self.backend != "s3":
             msg = f"s3_region is only supported for backend='s3', got backend={self.backend!r}."
@@ -329,6 +447,8 @@ class CloudWorkspace(Workspace):
             (self._scratch / subdir).mkdir(parents=True, exist_ok=True)
         self._live_log_uploaders: dict[Path, _LiveLogUploader] = {}
         self._live_log_lock = threading.Lock()
+        self._work_dir_syncs: dict[str, _WorkDirSync] = {}
+        self._work_dir_lock = threading.Lock()
 
         super()._post_init(
             resolved_hash_cache=ObstoreMapping[TaskHash, ResolvedTaskHash](
@@ -406,6 +526,52 @@ class CloudWorkspace(Workspace):
         path = self._scratch / "work" / task.resolved_hash(workspace=self).b32()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def _work_dir_remote_prefix(self, task: Task) -> str:
+        return self._under("work_dirs", task.resolved_hash(workspace=self).b32())
+
+    def start_work_dir_sync(self, task: Task) -> None:
+        if not task.meta.cache:
+            return
+        local_path = self._get_work_dir(task)
+        remote_prefix = self._work_dir_remote_prefix(task)
+        key = task.resolved_hash(workspace=self).b32()
+        with self._work_dir_lock:
+            if key in self._work_dir_syncs:
+                return
+            sync = _WorkDirSync(self._store, local_path, remote_prefix, self.work_dir_sync_interval_s)
+            self._work_dir_syncs[key] = sync
+        sync.restore()
+        sync.start()
+
+    def finalize_work_dir(self, task: Task) -> None:
+        if not task.meta.cache:
+            return
+        key = task.resolved_hash(workspace=self).b32()
+        with self._work_dir_lock:
+            sync = self._work_dir_syncs.pop(key, None)
+        if sync is not None:
+            sync.stop(final_upload=True)
+
+    def _delete_work_dir_remote(self, remote_prefix: str) -> None:
+        prefix = f"{remote_prefix}/"
+        keys = [entry["path"] for batch in obs.list(self._store, prefix=prefix) for entry in batch]
+        if keys:
+            obs.delete(self._store, keys)
+
+    def remove_work_dir(self, task: Task) -> None:
+        if not task.meta.cache:
+            msg = f"{task} cannot use workspace work_dir unless Task.meta.cache == True."
+            raise RuntimeError(msg)
+        key = task.resolved_hash(workspace=self).b32()
+        with self._work_dir_lock:
+            sync = self._work_dir_syncs.pop(key, None)
+        if sync is not None:
+            sync.stop(final_upload=False)
+        self._delete_work_dir_remote(self._work_dir_remote_prefix(task))
+        local_path = self._scratch / "work" / key
+        if local_path.exists():
+            shutil.rmtree(local_path)
 
     def _task_log_paths(self, task: Task, job_id: str) -> tuple[Path, Path, str]:
         """Return ``(writer_path, cache_path, remote_key)`` for a task log.
@@ -673,5 +839,10 @@ class CloudWorkspace(Workspace):
             self._live_log_uploaders.clear()
         for uploader in uploaders:
             uploader.stop(final_upload=True)
+        with self._work_dir_lock:
+            syncs = list(self._work_dir_syncs.values())
+            self._work_dir_syncs.clear()
+        for sync in syncs:
+            sync.stop(final_upload=True)
         with contextlib.suppress(AttributeError):
             del self._store

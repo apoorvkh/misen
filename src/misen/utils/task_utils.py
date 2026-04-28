@@ -232,6 +232,9 @@ def execute_task(
 
     log_identity = log_task or task
     log_path = workspace.get_task_log(task=log_identity, job_id=job_id)
+    sync_work_dir = task.meta.cache and work_directory is not None
+    if sync_work_dir:
+        workspace.start_work_dir_sync(task=task)
     try:
         with log_path.open("a", buffering=1, encoding="utf-8") as task_log:
             with capture_all_output(task_log, tee_to_stdout=True):
@@ -246,6 +249,8 @@ def execute_task(
                     )
                     raise
     finally:
+        if sync_work_dir:
+            workspace.finalize_work_dir(task=task)
         workspace.finalize_task_log(task=log_identity, job_id=job_id)
 
     logger.info("Task finished: %s in %.2fs.", debug_name, time.perf_counter() - started_at)
