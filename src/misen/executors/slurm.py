@@ -9,7 +9,7 @@ import re
 import shlex
 import shutil
 import subprocess
-from functools import cache
+from functools import cache, partial
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import msgspec
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from misen.task_metadata import GpuRuntime
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -201,13 +202,15 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
         if dependencies:
             sbatch_cmd.extend(["--dependency", f"afterok:{':'.join(job.slurm_job_id for job in dependencies)}"])
 
+        assigned_resources_getter = (
+            _assigned_resources_slurm_per_node if resources["nodes"] > 1 else _assigned_resources_slurm
+        )
         job_id, argv, env_overrides, log_path = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,
-            assigned_resources_getter=_assigned_resources_slurm_per_node
-            if resources["nodes"] > 1
-            else _assigned_resources_slurm,
+            assigned_resources_getter=partial(assigned_resources_getter, gpu_runtime=resources["gpu_runtime"]),
             gpu_runtime=resources["gpu_runtime"],
+            bind_gpu_env=False,
         )
 
         # ``argv`` already carries ``--job-log-path`` so the worker can
@@ -373,7 +376,18 @@ def _normalize_slurm_state(raw: str) -> JobState:
     return _SLURM_STATE_MAP.get(head, "unknown")
 
 
-def _assigned_resources_slurm(env: Mapping[str, str] | None = None) -> AssignedResources:
+_GPU_VISIBLE_ENV_BY_RUNTIME = {
+    "cuda": ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"),
+    "rocm": ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"),
+    "xpu": ("ZE_AFFINITY_MASK",),
+}
+
+
+def _assigned_resources_slurm(
+    env: Mapping[str, str] | None = None,
+    *,
+    gpu_runtime: GpuRuntime = "cuda",
+) -> AssignedResources:
     """Parse node-local resources from SLURM environment variables."""
     env = os.environ if env is None else env
 
@@ -388,7 +402,10 @@ def _assigned_resources_slurm(env: Mapping[str, str] | None = None) -> AssignedR
     if not cpu_indices and cpu_count is not None:
         cpu_indices = list(range(cpu_count))
 
-    gpu_visible = next((value for key in ("SLURM_STEP_GPUS", "SLURM_JOB_GPUS") if (value := env.get(key))), None)
+    gpu_visible = _runtime_gpu_visible_env(env=env, gpu_runtime=gpu_runtime) or next(
+        (value for key in ("SLURM_STEP_GPUS", "SLURM_JOB_GPUS") if (value := env.get(key))),
+        None,
+    )
     gpu_indices = _parse_numeric_indices(gpu_visible)
     gpu_count = None
     for key in ("SLURM_GPUS_PER_TASK", "SLURM_GPUS_ON_NODE"):
@@ -414,7 +431,11 @@ def _assigned_resources_slurm(env: Mapping[str, str] | None = None) -> AssignedR
     )
 
 
-def _assigned_resources_slurm_per_node(env: Mapping[str, str] | None = None) -> AssignedResourcesPerNode:
+def _assigned_resources_slurm_per_node(
+    env: Mapping[str, str] | None = None,
+    *,
+    gpu_runtime: GpuRuntime = "cuda",
+) -> AssignedResourcesPerNode:
     """Parse host -> resources from SLURM environment variables."""
     env = os.environ if env is None else env
     hostnames = _expand_slurm_nodelist(
@@ -430,7 +451,7 @@ def _assigned_resources_slurm_per_node(env: Mapping[str, str] | None = None) -> 
     if not hostnames and (hostname := env.get("SLURMD_NODENAME")):
         hostnames = (hostname,)
 
-    resources = _assigned_resources_slurm(env)
+    resources = _assigned_resources_slurm(env, gpu_runtime=gpu_runtime)
     return {
         hostname: AssignedResources(
             cpu_indices=[*resources["cpu_indices"]],
@@ -440,6 +461,11 @@ def _assigned_resources_slurm_per_node(env: Mapping[str, str] | None = None) -> 
         )
         for hostname in hostnames
     }
+
+
+def _runtime_gpu_visible_env(env: Mapping[str, str], gpu_runtime: GpuRuntime) -> str | None:
+    """Return the scheduler-provided runtime GPU visibility mask, if present."""
+    return next((value for key in _GPU_VISIBLE_ENV_BY_RUNTIME[gpu_runtime] if (value := env.get(key))), None)
 
 
 def _parse_slurm_memory_to_gib(value: str | None) -> int | None:

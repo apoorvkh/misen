@@ -65,6 +65,8 @@ class Snapshot(ABC):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
+        *,
+        bind_gpu_env: bool = True,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command and environment for one work unit.
 
@@ -80,6 +82,8 @@ class Snapshot(ABC):
             assigned_resources_getter: Callable returning runtime resources for
                 sentinel injection and worker CPU/GPU binding.
             gpu_runtime: Runtime environment for GPU resources.
+            bind_gpu_env: Whether the worker should apply GPU visibility
+                environment variables from assigned resources.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -126,6 +130,8 @@ class NullSnapshot(Snapshot):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
+        *,
+        bind_gpu_env: bool = True,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare argv to execute the payload via ``uv run --no-project``.
 
@@ -135,6 +141,8 @@ class NullSnapshot(Snapshot):
             assigned_resources_getter: Callable returning runtime resources for
                 task sentinel injection and worker binding.
             gpu_runtime: Runtime environment for GPU resources.
+            bind_gpu_env: Whether the worker should apply GPU visibility
+                environment variables from assigned resources.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -152,7 +160,13 @@ class NullSnapshot(Snapshot):
         log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         argv = [
             *_detect_pixi_wrap(),
-            *_uv_execute_argv(_active_env_files(), payload_path, encoded_getter, gpu_runtime),
+            *_uv_execute_argv(
+                _active_env_files(),
+                payload_path,
+                encoded_getter,
+                gpu_runtime,
+                bind_gpu_env=bind_gpu_env,
+            ),
             JOB_LOG_PATH_ARG,
             str(log_path),
         ]
@@ -210,6 +224,8 @@ class LocalSnapshot(Snapshot):
         workspace: Workspace,
         assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
+        *,
+        bind_gpu_env: bool = True,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute serialized payload.
 
@@ -219,6 +235,8 @@ class LocalSnapshot(Snapshot):
             assigned_resources_getter: Callable returning runtime resources for
                 task sentinel injection and worker binding.
             gpu_runtime: Runtime environment for GPU resources.
+            bind_gpu_env: Whether the worker should apply GPU visibility
+                environment variables from assigned resources.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -235,7 +253,13 @@ class LocalSnapshot(Snapshot):
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
         encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
 
-        argv += _uv_execute_argv(self.env_files, payload_path, encoded_getter, gpu_runtime)
+        argv += _uv_execute_argv(
+            self.env_files,
+            payload_path,
+            encoded_getter,
+            gpu_runtime,
+            bind_gpu_env=bind_gpu_env,
+        )
 
         log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         argv += [JOB_LOG_PATH_ARG, str(log_path)]
@@ -454,6 +478,8 @@ def _uv_execute_argv(
     payload_path: Path,
     encoded_getter: str,
     gpu_runtime: GpuRuntime,
+    *,
+    bind_gpu_env: bool = True,
 ) -> list[str]:
     """Build the ``uv run --no-project -m misen.utils.execute ...`` argv.
 
@@ -474,6 +500,7 @@ def _uv_execute_argv(
         encoded_getter,
         "--gpu-runtime",
         gpu_runtime,
+        *(["--no-bind-gpu-env"] if not bind_gpu_env else []),
     ]
 
 

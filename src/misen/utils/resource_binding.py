@@ -42,11 +42,14 @@ _DYNAMIC_THREAD_DISABLE_ENV = {
 
 
 def apply_resource_binding(
-    assigned_resources: AssignedResources | AssignedResourcesPerNode | None, gpu_runtime: GpuRuntime
+    assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
+    gpu_runtime: GpuRuntime,
+    *,
+    bind_gpu_env: bool = True,
 ) -> None:
     """Bind current process to assigned resources (CPU/GPU/threading)."""
     local = select_local_assigned_resources(assigned_resources)
-    env_overrides = _binding_env_overrides(local=local, gpu_runtime=gpu_runtime)
+    env_overrides = _binding_env_overrides(local=local, gpu_runtime=gpu_runtime, bind_gpu_env=bind_gpu_env)
 
     for key, value in env_overrides.items():
         os.environ[key] = value
@@ -55,7 +58,12 @@ def apply_resource_binding(
         _apply_cpu_affinity(local["cpu_indices"])
 
 
-def _binding_env_overrides(local: AssignedResources | None, gpu_runtime: GpuRuntime) -> dict[str, str]:
+def _binding_env_overrides(
+    local: AssignedResources | None,
+    gpu_runtime: GpuRuntime,
+    *,
+    bind_gpu_env: bool,
+) -> dict[str, str]:
     """Compute process-environment overrides for assigned resources."""
     env = dict(_DYNAMIC_THREAD_DISABLE_ENV)
     if local is None:
@@ -67,9 +75,10 @@ def _binding_env_overrides(local: AssignedResources | None, gpu_runtime: GpuRunt
         for key in _CPU_THREAD_CAP_VARS:
             env[key] = cpu_count_str
 
-    gpu_mask = ",".join(str(index) for index in local["gpu_indices"])
-    for key in _GPU_MASK_VARS[gpu_runtime]:
-        env[key] = gpu_mask
+    if bind_gpu_env:
+        gpu_mask = ",".join(str(index) for index in local["gpu_indices"])
+        for key in _GPU_MASK_VARS[gpu_runtime]:
+            env[key] = gpu_mask
 
     return env
 

@@ -30,6 +30,8 @@ def execute(
     payload: Path,
     assigned_resources_getter: str,
     gpu_runtime: GpuRuntime = "cuda",
+    *,
+    bind_gpu_env: bool = True,
     job_log_path: Path | None = None,
 ) -> None:
     """Execute a cloudpickle work-unit payload file.
@@ -44,6 +46,9 @@ def execute(
             cloudpickled assigned-resources getter callable.
         gpu_runtime: Expected runtime for GPU resources (if any). Defaults
             to ``"cuda"`` for backward compatibility with older payload runners.
+        bind_gpu_env: Whether to apply GPU visibility environment variables
+            from assigned resources. Schedulers such as SLURM may already set
+            these correctly for the job step, so backends can disable this.
         job_log_path: Path where the parent executor is writing this worker's
             combined stdout/stderr log. When provided, the workspace can stream
             the log while the worker is still running.
@@ -51,7 +56,11 @@ def execute(
     assigned_resources: AssignedResources | AssignedResourcesPerNode | None = _get_assigned_resources(
         encoded_getter=assigned_resources_getter
     )
-    apply_resource_binding(assigned_resources=assigned_resources, gpu_runtime=gpu_runtime)
+    apply_resource_binding(
+        assigned_resources=assigned_resources,
+        gpu_runtime=gpu_runtime,
+        bind_gpu_env=bind_gpu_env,
+    )
 
     bundle = cloudpickle.loads(payload.read_bytes())
     workspace = bundle["workspace"]

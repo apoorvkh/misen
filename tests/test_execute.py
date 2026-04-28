@@ -43,8 +43,12 @@ def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -
     calls: list[dict[str, object]] = []
     payload_marker = tmp_path / "payload-ran.txt"
 
-    def fake_apply_resource_binding(*, assigned_resources: object, gpu_runtime: str) -> None:
-        calls.append({"assigned_resources": assigned_resources, "gpu_runtime": gpu_runtime})
+    def fake_apply_resource_binding(*, assigned_resources: object, gpu_runtime: str, bind_gpu_env: bool) -> None:
+        calls.append({
+            "assigned_resources": assigned_resources,
+            "gpu_runtime": gpu_runtime,
+            "bind_gpu_env": bind_gpu_env,
+        })
 
     monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
     monkeypatch.setenv("MISEN_TEST_GETTER", "1")
@@ -66,8 +70,28 @@ def test_execute_uses_encoded_assigned_resources_getter(tmp_path, monkeypatch) -
 
     execute_mod.execute(payload=payload_path, assigned_resources_getter=encoded_getter)
 
-    assert calls == [{"assigned_resources": expected, "gpu_runtime": "cuda"}]
+    assert calls == [{"assigned_resources": expected, "gpu_runtime": "cuda", "bind_gpu_env": True}]
     assert payload_marker.read_text(encoding="utf-8") == "ran"
+
+
+def test_execute_can_skip_gpu_env_binding(tmp_path, monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+    payload_path = tmp_path / "payload.pkl"
+    payload_path.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": lambda **_: None}))
+    encoded_getter = base64.urlsafe_b64encode(cloudpickle.dumps(lambda: None)).decode("ascii")
+
+    def fake_apply_resource_binding(*, assigned_resources: object, gpu_runtime: str, bind_gpu_env: bool) -> None:
+        calls.append({
+            "assigned_resources": assigned_resources,
+            "gpu_runtime": gpu_runtime,
+            "bind_gpu_env": bind_gpu_env,
+        })
+
+    monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
+
+    execute_mod.execute(payload=payload_path, assigned_resources_getter=encoded_getter, bind_gpu_env=False)
+
+    assert calls == [{"assigned_resources": None, "gpu_runtime": "cuda", "bind_gpu_env": False}]
 
 
 def test_execute_streams_explicit_job_log_path(tmp_path) -> None:

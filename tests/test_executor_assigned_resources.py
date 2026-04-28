@@ -37,6 +37,34 @@ def test_assigned_resources_slurm_parses_cpu_gpu_and_memory() -> None:
     )
 
 
+def test_assigned_resources_slurm_prefers_cuda_visible_devices_over_physical_step_gpus() -> None:
+    env = {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "SLURM_STEP_GPUS": "3",
+        "SLURM_GPUS_ON_NODE": "1",
+    }
+    assert _assigned_resources_slurm(env=env) == _resources(
+        cpu_indices=[],
+        gpu_indices=[0],
+        memory=None,
+        gpu_memory=None,
+    )
+
+
+def test_assigned_resources_slurm_uses_runtime_specific_visible_devices() -> None:
+    env = {
+        "ROCR_VISIBLE_DEVICES": "1",
+        "SLURM_STEP_GPUS": "3",
+        "SLURM_GPUS_ON_NODE": "1",
+    }
+    assert _assigned_resources_slurm(env=env, gpu_runtime="rocm") == _resources(
+        cpu_indices=[],
+        gpu_indices=[1],
+        memory=None,
+        gpu_memory=None,
+    )
+
+
 def test_assigned_resources_slurm_uses_uuid_tokens_without_synthesizing_indices() -> None:
     env = {
         "SLURM_GPUS_ON_NODE": "2",

@@ -11,7 +11,7 @@ import pytest
 
 import misen.executors.slurm as slurm_module
 from misen import Task, meta
-from misen.executors.slurm import SlurmJob
+from misen.executors.slurm import SlurmExecutor, SlurmJob
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
 
@@ -135,6 +135,30 @@ def test_slurm_bulk_state_returns_unknown_when_slurm_cli_missing(monkeypatch) ->
 
 def test_slurm_bulk_state_handles_empty_input() -> None:
     assert SlurmJob.bulk_state([]) == {}
+
+
+def test_slurm_dispatch_preserves_scheduler_gpu_env(monkeypatch, tmp_path) -> None:
+    work_unit = WorkUnit(root=Task(_slurm_test_task, x=0), dependencies=set())
+    workspace = cast("Workspace", MagicMock(spec=Workspace))
+    snapshot = MagicMock()
+    log_path = tmp_path / "slurm.log"
+    snapshot.prepare_job.return_value = ("job-local", ["python", "-m", "worker"], {}, log_path)
+
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        slurm_module.subprocess,
+        "run",
+        lambda *_, **__: subprocess.CompletedProcess(args=[], returncode=0, stdout="123\n", stderr=""),
+    )
+
+    SlurmExecutor()._dispatch(  # noqa: SLF001
+        work_unit=work_unit,
+        dependencies=set(),
+        workspace=workspace,
+        snapshot=snapshot,
+    )
+
+    assert snapshot.prepare_job.call_args.kwargs["bind_gpu_env"] is False
 
 
 @pytest.mark.parametrize(
