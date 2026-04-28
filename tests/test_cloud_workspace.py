@@ -84,6 +84,54 @@ def test_cloud_workspace_hash_caches_roundtrip(tmp_path) -> None:
     assert workspace.get_result_hash(task) == result_hash
 
 
+def test_cloud_workspace_id_isolates_distinct_workspaces(tmp_path) -> None:
+    """Distinct identities resolve to distinct scratch subdirs under one base."""
+    base = tmp_path / "scratch"
+    ws_default = _MemoryCloudWorkspace(backend="s3", bucket="b", scratch_dir=str(base))
+    ws_prefix = _MemoryCloudWorkspace(backend="s3", bucket="b", prefix="x", scratch_dir=str(base))
+    ws_endpoint = _MemoryCloudWorkspace(
+        backend="s3", bucket="b", endpoint="https://r2.example", scratch_dir=str(base)
+    )
+    ws_region = _MemoryCloudWorkspace(
+        backend="s3", bucket="b", s3_region="us-west-2", scratch_dir=str(base)
+    )
+
+    ids = {ws.workspace_id for ws in (ws_default, ws_prefix, ws_endpoint, ws_region)}
+    assert len(ids) == 4
+    for ws in (ws_default, ws_prefix, ws_endpoint, ws_region):
+        assert ws._scratch.parent == base
+        assert ws._scratch.name == ws.workspace_id
+
+    # Same identity => same id => same scratch subdir (safe sharing).
+    twin = _MemoryCloudWorkspace(backend="s3", bucket="b", scratch_dir=str(base))
+    assert twin.workspace_id == ws_default.workspace_id
+    assert twin._scratch == ws_default._scratch
+
+
+def test_cloud_workspace_rejects_misapplied_locator_fields() -> None:
+    """``s3_region`` and ``endpoint`` only apply to backends that support them."""
+    with pytest.raises(ValueError, match="s3_region"):
+        _MemoryCloudWorkspace(backend="gcs", bucket="b", s3_region="us-east-1")
+    with pytest.raises(ValueError, match="s3_region"):
+        _MemoryCloudWorkspace(backend="azure", bucket="b", s3_region="us-east-1")
+    with pytest.raises(ValueError, match="endpoint"):
+        _MemoryCloudWorkspace(backend="gcs", bucket="b", endpoint="https://example")
+
+
+def test_cloud_workspace_rejects_duplicate_locator_in_config(tmp_path) -> None:
+    """Setting the same locator key in both ``config`` and a dedicated field errors."""
+    # _MemoryCloudWorkspace overrides _build_store, so use the real
+    # CloudWorkspace path (validation runs in _build_store via __post_init__).
+    with pytest.raises(ValueError, match="region"):
+        CloudWorkspace(
+            backend="s3",
+            bucket="b",
+            s3_region="us-east-1",
+            config={"region": "us-east-1"},
+            scratch_dir=str(tmp_path / "scratch"),
+        )
+
+
 def test_cloud_workspace_caches_persist_across_instances(tmp_path) -> None:
     """A second workspace with a fresh scratch dir loads results from the bucket."""
     bucket = "test-persist"

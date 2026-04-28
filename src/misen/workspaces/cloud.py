@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TextIO, TypeAlias
 import msgspec
 import obstore as obs
 from obstore.store import AzureStore, GCSStore, S3Store
+from xxhash import xxh3_64_hexdigest
 
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import ObjectStoreLock
@@ -301,18 +302,29 @@ class CloudWorkspace(Workspace):
     backend: CloudBackend
     bucket: str
     prefix: str = ""
-    scratch_dir: str = ".cache/misen"
+    endpoint: str | None = None
+    s3_region: str | None = None
     config: dict[str, str] = msgspec.field(default_factory=dict)
+    scratch_dir: str = ".cache/misen"
     log_flush_interval_s: float = 1.0
 
     def __post_init__(self) -> None:
         if self.log_flush_interval_s <= 0:
             msg = "log_flush_interval_s must be positive"
             raise ValueError(msg)
+        if self.s3_region is not None and self.backend != "s3":
+            msg = f"s3_region is only supported for backend='s3', got backend={self.backend!r}."
+            raise ValueError(msg)
+        if self.endpoint is not None and self.backend == "gcs":
+            msg = "endpoint is not supported for backend='gcs'."
+            raise ValueError(msg)
 
         self._store = self._build_store()
         self._cloud_prefix = self.prefix.strip("/")
-        self._scratch = Path(self.scratch_dir)
+        # Append a deterministic id so distinct workspaces never share scratch.
+        # Two workspaces with identical identity-affecting fields collapse to
+        # the same subdir, which is exactly when sharing is safe.
+        self._scratch = Path(self.scratch_dir) / self.workspace_id
         for subdir in ("tmp", "work", "task_logs", "task_log_cache", "job_logs", "job_log_cache", "results_cache"):
             (self._scratch / subdir).mkdir(parents=True, exist_ok=True)
         self._live_log_uploaders: dict[Path, _LiveLogUploader] = {}
@@ -330,14 +342,43 @@ class CloudWorkspace(Workspace):
             result_store=ObstoreResultStore(self._store, self._under("results"), self._scratch / "results_cache"),
         )
         logger.info(
-            "Initialized CloudWorkspace backend=%s bucket=%s scratch=%s.",
+            "Initialized CloudWorkspace id=%s backend=%s bucket=%s scratch=%s.",
+            self.workspace_id,
             self.backend,
             self.bucket,
             self._scratch,
         )
 
+    @property
+    def workspace_id(self) -> str:
+        """Short deterministic id derived from identity-affecting fields.
+
+        Two workspaces with the same ``(backend, bucket, prefix, endpoint,
+        s3_region)`` produce the same id and may safely share local scratch;
+        any other pair produces distinct ids.
+        """
+        payload = msgspec.json.encode(
+            (self.backend, self.bucket, self.prefix, self.endpoint, self.s3_region)
+        )
+        return xxh3_64_hexdigest(payload)
+
     def _build_store(self) -> Any:
-        cfg = cast("dict[str, Any]", self.config)
+        cfg = cast("dict[str, Any]", dict(self.config))
+        explicit: dict[str, Any] = {}
+        if self.backend == "s3":
+            if self.s3_region is not None:
+                explicit["region"] = self.s3_region
+            if self.endpoint is not None:
+                explicit["endpoint"] = self.endpoint
+        elif self.backend == "azure":
+            if self.endpoint is not None:
+                explicit["endpoint"] = self.endpoint
+        for key, value in explicit.items():
+            if key in cfg:
+                msg = f"{key!r} cannot appear in both config and the dedicated field."
+                raise ValueError(msg)
+            cfg[key] = value
+
         if self.backend == "s3":
             return S3Store(bucket=self.bucket, **cfg)
         if self.backend == "gcs":
