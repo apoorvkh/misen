@@ -240,14 +240,14 @@ def execute_task(
             with capture_all_output(task_log, tee_to_stdout=True):
                 try:
                     result = task.func(*resolved_args, **resolved_kwargs)
-                except Exception:
+                except Exception as exc:
                     RichConsole(stderr=True).print_exception()
                     logger.exception("Task failed: %s after %.2fs.", debug_name, time.perf_counter() - started_at)
                     runtime_event(
                         f"Task failed: {display} in {(time.perf_counter() - started_at):.2f}s",
                         style="bold red",
                     )
-                    raise
+                    raise exc.with_traceback(None) from None
     finally:
         if sync_work_dir:
             workspace.finalize_work_dir(task=task)
