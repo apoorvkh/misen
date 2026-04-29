@@ -2,8 +2,8 @@
 """Object-store-backed workspace for S3, GCS, and Azure Blob.
 
 This backend stores hash indices, result payloads, task logs, and job logs in a
-cloud object store through ``obstore``. Work directories and actively-written
-logs stay on local scratch storage; live logs are uploaded as offset chunks and
+cloud object store through ``obstore``. Scratch directories and actively-written
+logs stay on local cache storage; live logs are uploaded as offset chunks and
 compacted into a single ``.log`` object on close.
 """
 
@@ -211,8 +211,8 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
         return sum(1 for _ in self)
 
 
-class _WorkDirSync:
-    """Sync a local work_dir to/from cloud object storage.
+class _ScratchDirSync:
+    """Sync a local scratch_dir to/from cloud object storage.
 
     The runtime lock for cacheable tasks already guarantees a single
     active execution per resolved hash, so this class assumes the local
@@ -272,7 +272,7 @@ class _WorkDirSync:
         self._thread = threading.Thread(
             target=self._run,
             daemon=True,
-            name=f"misen-work-sync[{self._remote_prefix}]",
+            name=f"misen-scratch-sync[{self._remote_prefix}]",
         )
         self._thread.start()
 
@@ -281,7 +281,7 @@ class _WorkDirSync:
             try:
                 self._sync_once()
             except Exception:
-                logger.exception("Work dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
+                logger.exception("Scratch dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
 
     def _sync_once(self) -> None:
         seen: set[str] = set()
@@ -322,7 +322,7 @@ class _WorkDirSync:
             try:
                 self._sync_once()
             except Exception:
-                logger.exception("Final work dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
+                logger.exception("Final scratch dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
 
 
 class _LiveLogUploader:
@@ -419,16 +419,16 @@ class CloudWorkspace(Workspace):
     endpoint: str | None = None
     s3_region: str | None = None
     config: dict[str, str] = msgspec.field(default_factory=dict)
-    scratch_dir: str = ".cache/misen"
+    cache_dir: str = ".cache/misen"
     log_flush_interval_s: float = 1.0
-    work_dir_sync_interval_s: float = 30.0
+    scratch_dir_sync_interval_s: float = 30.0
 
     def __post_init__(self) -> None:
         if self.log_flush_interval_s <= 0:
             msg = "log_flush_interval_s must be positive"
             raise ValueError(msg)
-        if self.work_dir_sync_interval_s <= 0:
-            msg = "work_dir_sync_interval_s must be positive"
+        if self.scratch_dir_sync_interval_s <= 0:
+            msg = "scratch_dir_sync_interval_s must be positive"
             raise ValueError(msg)
         if self.s3_region is not None and self.backend != "s3":
             msg = f"s3_region is only supported for backend='s3', got backend={self.backend!r}."
@@ -439,16 +439,16 @@ class CloudWorkspace(Workspace):
 
         self._store = self._build_store()
         self._cloud_prefix = self.prefix.strip("/")
-        # Append a deterministic id so distinct workspaces never share scratch.
+        # Append a deterministic id so distinct workspaces never share cache.
         # Two workspaces with identical identity-affecting fields collapse to
         # the same subdir, which is exactly when sharing is safe.
-        self._scratch = Path(self.scratch_dir) / self.workspace_id
-        for subdir in ("tmp", "work", "task_logs", "task_log_cache", "job_logs", "job_log_cache", "results_cache"):
-            (self._scratch / subdir).mkdir(parents=True, exist_ok=True)
+        self._cache = Path(self.cache_dir) / self.workspace_id
+        for subdir in ("tmp", "scratch", "task_logs", "task_log_cache", "job_logs", "job_log_cache", "results_cache"):
+            (self._cache / subdir).mkdir(parents=True, exist_ok=True)
         self._live_log_uploaders: dict[Path, _LiveLogUploader] = {}
         self._live_log_lock = threading.Lock()
-        self._work_dir_syncs: dict[str, _WorkDirSync] = {}
-        self._work_dir_lock = threading.Lock()
+        self._scratch_dir_syncs: dict[str, _ScratchDirSync] = {}
+        self._scratch_dir_lock = threading.Lock()
 
         super()._post_init(
             resolved_hash_cache=ObstoreMapping[TaskHash, ResolvedTaskHash](
@@ -459,14 +459,14 @@ class CloudWorkspace(Workspace):
                 self._store,
                 self._under("result_hash_cache"),
             ),
-            result_store=ObstoreResultStore(self._store, self._under("results"), self._scratch / "results_cache"),
+            result_store=ObstoreResultStore(self._store, self._under("results"), self._cache / "results_cache"),
         )
         logger.info(
-            "Initialized CloudWorkspace id=%s backend=%s bucket=%s scratch=%s.",
+            "Initialized CloudWorkspace id=%s backend=%s bucket=%s cache=%s.",
             self.workspace_id,
             self.backend,
             self.bucket,
-            self._scratch,
+            self._cache,
         )
 
     @property
@@ -474,7 +474,7 @@ class CloudWorkspace(Workspace):
         """Short deterministic id derived from identity-affecting fields.
 
         Two workspaces with the same ``(backend, bucket, prefix, endpoint,
-        s3_region)`` produce the same id and may safely share local scratch;
+        s3_region)`` produce the same id and may safely share local cache;
         any other pair produces distinct ids.
         """
         payload = msgspec.json.encode(
@@ -520,56 +520,56 @@ class CloudWorkspace(Workspace):
         )
 
     def get_temp_dir(self) -> Path:
-        return self._scratch / "tmp"
+        return self._cache / "tmp"
 
-    def _get_work_dir(self, task: Task) -> Path:
-        path = self._scratch / "work" / task.resolved_hash(workspace=self).b32()
+    def _get_scratch_dir(self, task: Task) -> Path:
+        path = self._cache / "scratch" / task.resolved_hash(workspace=self).b32()
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _work_dir_remote_prefix(self, task: Task) -> str:
-        return self._under("work_dirs", task.resolved_hash(workspace=self).b32())
+    def _scratch_dir_remote_prefix(self, task: Task) -> str:
+        return self._under("scratch_dirs", task.resolved_hash(workspace=self).b32())
 
-    def start_work_dir_sync(self, task: Task) -> None:
+    def start_scratch_dir_sync(self, task: Task) -> None:
         if not task.meta.cache:
             return
-        local_path = self._get_work_dir(task)
-        remote_prefix = self._work_dir_remote_prefix(task)
+        local_path = self._get_scratch_dir(task)
+        remote_prefix = self._scratch_dir_remote_prefix(task)
         key = task.resolved_hash(workspace=self).b32()
-        with self._work_dir_lock:
-            if key in self._work_dir_syncs:
+        with self._scratch_dir_lock:
+            if key in self._scratch_dir_syncs:
                 return
-            sync = _WorkDirSync(self._store, local_path, remote_prefix, self.work_dir_sync_interval_s)
-            self._work_dir_syncs[key] = sync
+            sync = _ScratchDirSync(self._store, local_path, remote_prefix, self.scratch_dir_sync_interval_s)
+            self._scratch_dir_syncs[key] = sync
         sync.restore()
         sync.start()
 
-    def finalize_work_dir(self, task: Task) -> None:
+    def finalize_scratch_dir(self, task: Task) -> None:
         if not task.meta.cache:
             return
         key = task.resolved_hash(workspace=self).b32()
-        with self._work_dir_lock:
-            sync = self._work_dir_syncs.pop(key, None)
+        with self._scratch_dir_lock:
+            sync = self._scratch_dir_syncs.pop(key, None)
         if sync is not None:
             sync.stop(final_upload=True)
 
-    def _delete_work_dir_remote(self, remote_prefix: str) -> None:
+    def _delete_scratch_dir_remote(self, remote_prefix: str) -> None:
         prefix = f"{remote_prefix}/"
         keys = [entry["path"] for batch in obs.list(self._store, prefix=prefix) for entry in batch]
         if keys:
             obs.delete(self._store, keys)
 
-    def remove_work_dir(self, task: Task) -> None:
+    def remove_scratch_dir(self, task: Task) -> None:
         if not task.meta.cache:
-            msg = f"{task} cannot use workspace work_dir unless Task.meta.cache == True."
+            msg = f"{task} cannot use workspace scratch_dir unless Task.meta.cache == True."
             raise RuntimeError(msg)
         key = task.resolved_hash(workspace=self).b32()
-        with self._work_dir_lock:
-            sync = self._work_dir_syncs.pop(key, None)
+        with self._scratch_dir_lock:
+            sync = self._scratch_dir_syncs.pop(key, None)
         if sync is not None:
             sync.stop(final_upload=False)
-        self._delete_work_dir_remote(self._work_dir_remote_prefix(task))
-        local_path = self._scratch / "work" / key
+        self._delete_scratch_dir_remote(self._scratch_dir_remote_prefix(task))
+        local_path = self._cache / "scratch" / key
         if local_path.exists():
             shutil.rmtree(local_path)
 
@@ -593,8 +593,8 @@ class CloudWorkspace(Workspace):
         complete should expect :class:`CacheError`.
         """
         key = task.resolved_hash(workspace=self).b32()
-        writer_dir = self._scratch / "task_logs" / key
-        cache_dir = self._scratch / "task_log_cache" / key
+        writer_dir = self._cache / "task_logs" / key
+        cache_dir = self._cache / "task_log_cache" / key
         writer_dir.mkdir(parents=True, exist_ok=True)
         cache_dir.mkdir(parents=True, exist_ok=True)
         return (
@@ -757,7 +757,7 @@ class CloudWorkspace(Workspace):
             return self._open_task_log_for_read(task, job_id)
 
         key = task.resolved_hash(workspace=self).b32()
-        writer_dir = self._scratch / "task_logs" / key
+        writer_dir = self._cache / "task_logs" / key
         remote_logs = self._remote_logs(self._under("task_logs", key) + "/")
         candidates: list[tuple[float, str]] = []
         if writer_dir.exists():
@@ -806,8 +806,8 @@ class CloudWorkspace(Workspace):
             self._stop_live_upload(local_path)
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
-        writer_dir = self._scratch / "job_logs"
-        cache_dir = self._scratch / "job_log_cache"
+        writer_dir = self._cache / "job_logs"
+        cache_dir = self._cache / "job_log_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Refresh remote logs into the read cache. The cache is distinct from
@@ -839,9 +839,9 @@ class CloudWorkspace(Workspace):
             self._live_log_uploaders.clear()
         for uploader in uploaders:
             uploader.stop(final_upload=True)
-        with self._work_dir_lock:
-            syncs = list(self._work_dir_syncs.values())
-            self._work_dir_syncs.clear()
+        with self._scratch_dir_lock:
+            syncs = list(self._scratch_dir_syncs.values())
+            self._scratch_dir_syncs.clear()
         for sync in syncs:
             sync.stop(final_upload=True)
         with contextlib.suppress(AttributeError):

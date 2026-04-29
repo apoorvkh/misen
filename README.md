@@ -189,7 +189,7 @@ Defaults: 1 node, 1 CPU, 8 GiB RAM, 0 GPUs. Fields: `time`, `nodes`, `memory`, `
 
 At runtime, `misen` allocates at least the resources you request and binds them to the task process — CPU cores by affinity, GPU indices via the specified runtime (e.g. visible to `torch.cuda.device`). If you need the explicit index lists, pass `ASSIGNED_RESOURCES` or `ASSIGNED_RESOURCES_PER_NODE` as arguments.
 
-Pass `WORK_DIR: Path` as an argument for a per-task scratch directory. It persists across runs for `cache=True` tasks (useful for checkpointing against preemption) and is ephemeral otherwise.
+Pass `SCRATCH_DIR: Path` as an argument for a per-task scratch directory. It persists across runs for `cache=True` tasks (useful for checkpointing against preemption) and is ephemeral otherwise.
 
 The **Executor** decides where tasks run:
 
@@ -207,7 +207,7 @@ For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`,
 
 Before dispatching, `misen` takes a **snapshot** of your project — a frozen copy of your source tree, `uv.lock`, `pixi.lock`, and env files. Remote jobs run against the snapshot, so you can keep editing code locally while queued SLURM jobs stay pinned to the version you submitted.
 
-The **Workspace** (default: `DiskWorkspace` under `.misen/`) stores cached results, task/job logs, and runtime locks. Cacheable tasks with the same identity are mutually exclusive per Workspace — a concurrent duplicate submission fails fast rather than running twice, and any later submission returns the cached result. A few `Task` methods are useful for scripting around the Workspace: `task.is_cached(...)`, `task.done(...)`, `task.is_running(...)`, and `task.work_dir(...)`.
+The **Workspace** (default: `DiskWorkspace` under `.misen/`) stores cached results, task/job logs, and runtime locks. Cacheable tasks with the same identity are mutually exclusive per Workspace — a concurrent duplicate submission fails fast rather than running twice, and any later submission returns the cached result. A few `Task` methods are useful for scripting around the Workspace: `task.is_cached(...)`, `task.done(...)`, `task.is_running(...)`, and `task.scratch_dir(...)`.
 
 ## Configuration
 

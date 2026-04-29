@@ -139,8 +139,8 @@ class TaskMetadata(Struct, frozen=True):
             semantics without renaming the task.
         resources: Callable that computes resource requirements from arguments.
         serializer: Serializer type used to persist cached results.
-        cleanup_work_dir: Whether to remove cacheable task work dirs after a
-            successful run. Non-cacheable task work dirs are always cleaned up.
+        cleanup_scratch_dir: Whether to remove cacheable task scratch dirs after a
+            successful run. Non-cacheable task scratch dirs are always cleaned up.
     """
 
     id: str
@@ -150,7 +150,7 @@ class TaskMetadata(Struct, frozen=True):
     versions: dict[tuple[str, ResultHash], int] = {}
     resources: Callable[..., Resources] = lambda *_, **__: _DEFAULT_RESOURCES
     serializer: type[Serializer] | None = None
-    cleanup_work_dir: bool = False
+    cleanup_scratch_dir: bool = False
 
     def resolve_resources(self, *args: Any, **kwargs: Any) -> Resources:
         """Compute resource requirements for this task, merging with defaults."""
@@ -166,7 +166,7 @@ def meta(
     versions: dict[str, dict[Any, int]] | None = None,
     resources: Callable[..., Resources] | Resources | None = None,
     serializer: type[Serializer[R]] | None = None,
-    cleanup_work_dir: bool = False,
+    cleanup_scratch_dir: bool = False,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Attach :class:`TaskMetadata` metadata to a function.
 
@@ -180,8 +180,8 @@ def meta(
         resources: Static resources object or callable from function args to
             resources.
         serializer: Serializer class used for cached results.
-        cleanup_work_dir: Whether to remove cacheable task work dirs after a
-            successful run. Non-cacheable task work dirs are always cleaned up.
+        cleanup_scratch_dir: Whether to remove cacheable task scratch dirs after a
+            successful run. Non-cacheable task scratch dirs are always cleaned up.
 
     Returns:
         A decorator that annotates the target function.
@@ -217,7 +217,7 @@ def meta(
             versions=_normalize_versions(versions=versions),
             resources=resources_fn,
             serializer=serializer,
-            cleanup_work_dir=cleanup_work_dir,
+            cleanup_scratch_dir=cleanup_scratch_dir,
         )
 
         return func

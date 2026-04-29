@@ -277,7 +277,7 @@ class DiskWorkspace(Workspace):
         self._directory = Path(self.directory)
         self._directory.mkdir(exist_ok=True)
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
-        (self._directory / "work").mkdir(parents=True, exist_ok=True)
+        (self._directory / "scratch").mkdir(parents=True, exist_ok=True)
         (self._directory / "task_logs").mkdir(parents=True, exist_ok=True)
         (self._directory / "job_logs").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
@@ -327,19 +327,19 @@ class DiskWorkspace(Workspace):
         """Return workspace temporary directory path."""
         return Path(self._directory) / "tmp"
 
-    def _get_work_dir(self, task: Task) -> Path:
-        """Return stable working directory for a task.
+    def _get_scratch_dir(self, task: Task) -> Path:
+        """Return stable scratch directory for a task.
 
         Args:
-            task: Task requesting a work directory.
+            task: Task requesting a scratch directory.
 
         Returns:
             Per-task directory path keyed by resolved hash.
         """
         key_str = task.resolved_hash(workspace=self).b32()
-        d = Path(self._directory) / "work" / key_str[:2] / f"{key_str}"
+        d = Path(self._directory) / "scratch" / key_str[:2] / f"{key_str}"
         d.mkdir(parents=True, exist_ok=True)
-        logger.debug("Resolved work dir for task %s: %s.", task, d)
+        logger.debug("Resolved scratch dir for task %s: %s.", task, d)
         return d
 
     def _task_log_dir(self, task: Task) -> tuple[Path, str]:

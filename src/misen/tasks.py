@@ -362,9 +362,9 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             For a given workspace/resolved task identity, this enforces a
             single active runtime. Non-cacheable tasks skip runtime locking and
             can run concurrently.
-            Upon successful completion, non-cacheable task work dirs are
-            cleaned up; cacheable task work dirs are cleaned up when
-            ``@meta(cleanup_work_dir=True)`` is set.
+            Upon successful completion, non-cacheable task scratch dirs are
+            cleaned up; cacheable task scratch dirs are cleaned up when
+            ``@meta(cleanup_scratch_dir=True)`` is set.
             Logs are captured to task logs and optionally mirrored to stdout.
         """
         from misen.workspace import Workspace
@@ -424,7 +424,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         if self.meta.cache:
             logger.debug("Acquiring runtime lock for %s.", self)
         with lock_context:
-            result, work_dir = execute_task(
+            result, scratch_dir = execute_task(
                 task=self,
                 workspace=workspace,
                 dependency_results=dependency_results,
@@ -435,14 +435,14 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         save_task_result(task=self, result=result, workspace=workspace)
         logger.debug("Persisted task result metadata for %s.", self)
-        if work_dir is not None:
+        if scratch_dir is not None:
             if not self.meta.cache:
-                if work_dir.exists():
-                    shutil.rmtree(work_dir)
-                    logger.debug("Removed ephemeral work directory for %s at %s.", self, work_dir)
-            elif self.meta.cleanup_work_dir:
-                workspace.remove_work_dir(task=self)
-                logger.debug("Removed work directory (local + durable) for %s.", self)
+                if scratch_dir.exists():
+                    shutil.rmtree(scratch_dir)
+                    logger.debug("Removed ephemeral scratch directory for %s at %s.", self, scratch_dir)
+            elif self.meta.cleanup_scratch_dir:
+                workspace.remove_scratch_dir(task=self)
+                logger.debug("Removed scratch directory (local + durable) for %s.", self)
 
         return result
 
@@ -472,8 +472,8 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         job_graph, _snapshot = executor.submit(tasks={self}, workspace=workspace, blocking=blocking)
         return job_graph
 
-    def work_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
-        """Return this task's working directory.
+    def scratch_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
+        """Return this task's scratch directory.
 
         Args:
             workspace: Workspace instance or ``"auto"``.
@@ -484,7 +484,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         from misen.workspace import Workspace
 
         workspace = Workspace.resolve_auto(workspace)
-        return workspace.get_work_dir(task=self)
+        return workspace.get_scratch_dir(task=self)
 
     def task_hash(self) -> TaskHash:
         """Return structural hash for this task.

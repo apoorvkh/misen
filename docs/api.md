@@ -18,7 +18,7 @@ change without notice.
         - is_running
         - submit
         - result
-        - work_dir
+        - scratch_dir
 
 # @meta decorator
 

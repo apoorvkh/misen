@@ -134,7 +134,7 @@ class InMemoryWorkspace(Workspace):
     """Workspace backed by process-local memory and a temp directory.
 
     Hash indices and locks live in Python objects that vanish with the
-    workspace. Result payloads, work directories, and logs are written
+    workspace. Result payloads, scratch directories, and logs are written
     under ``directory``; when ``directory`` is left as ``None`` the
     workspace allocates a fresh temp directory and removes it on
     :meth:`close` or when the workspace is finalized.
@@ -156,7 +156,7 @@ class InMemoryWorkspace(Workspace):
         self._locks_table_lock = threading.Lock()
 
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
-        (self._directory / "work").mkdir(parents=True, exist_ok=True)
+        (self._directory / "scratch").mkdir(parents=True, exist_ok=True)
         (self._directory / "task_logs").mkdir(parents=True, exist_ok=True)
         (self._directory / "job_logs").mkdir(parents=True, exist_ok=True)
 
@@ -191,10 +191,10 @@ class InMemoryWorkspace(Workspace):
         """Return workspace temporary directory path."""
         return self._directory / "tmp"
 
-    def _get_work_dir(self, task: Task) -> Path:
-        """Return stable working directory for a task."""
+    def _get_scratch_dir(self, task: Task) -> Path:
+        """Return stable scratch directory for a task."""
         key_str = task.resolved_hash(workspace=self).b32()
-        d = self._directory / "work" / key_str
+        d = self._directory / "scratch" / key_str
         d.mkdir(parents=True, exist_ok=True)
         return d
 

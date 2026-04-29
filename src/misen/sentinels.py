@@ -3,7 +3,7 @@
 These markers can be used as task arguments and are resolved at execution time
 inside :func:`misen.utils.task_utils.execute_task`:
 
-- ``WORK_DIR`` -> per-task working directory path
+- ``SCRATCH_DIR`` -> per-task scratch directory path
 - ``ASSIGNED_RESOURCES`` -> scheduler-assigned CPU/GPU metadata (single-node)
 - ``ASSIGNED_RESOURCES_PER_NODE`` -> scheduler-assigned CPU/GPU metadata keyed by hostname
 """
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
     from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 
-__all__ = ["ASSIGNED_RESOURCES", "ASSIGNED_RESOURCES_PER_NODE", "WORK_DIR"]
+__all__ = ["ASSIGNED_RESOURCES", "ASSIGNED_RESOURCES_PER_NODE", "SCRATCH_DIR"]
 
 
 class _RuntimeSentinel:
@@ -48,8 +48,8 @@ def _runtime_sentinel(name: str) -> _RuntimeSentinel:
     return _RuntimeSentinel(name)
 
 
-WORK_DIR = cast("Path", _RuntimeSentinel("WORK_DIR"))
-"""Sentinel indicating "inject this task's runtime work directory"."""
+SCRATCH_DIR = cast("Path", _RuntimeSentinel("SCRATCH_DIR"))
+"""Sentinel indicating "inject this task's runtime scratch directory"."""
 
 ASSIGNED_RESOURCES = cast("AssignedResources | None", _RuntimeSentinel("ASSIGNED_RESOURCES"))
 """Sentinel indicating "inject scheduler-assigned runtime resources for one node"."""

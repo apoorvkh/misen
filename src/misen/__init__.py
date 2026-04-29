@@ -21,7 +21,7 @@ from misen.exceptions import (
 )
 from misen.executor import Executor
 from misen.experiment import Experiment
-from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, WORK_DIR
+from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, SCRATCH_DIR
 from misen.task_metadata import Resources, meta
 from misen.tasks import Task
 from misen.utils.settings import Settings
@@ -37,8 +37,8 @@ logging.getLogger("misen").addHandler(logging.NullHandler())
 __all__ = [
     "ASSIGNED_RESOURCES",
     "ASSIGNED_RESOURCES_PER_NODE",
+    "SCRATCH_DIR",
     "TRACE_LEVEL",
-    "WORK_DIR",
     "CacheError",
     "ConfigError",
     "Executor",

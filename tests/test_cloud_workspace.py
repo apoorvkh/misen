@@ -18,7 +18,7 @@ import obstore as obs
 import pytest
 from obstore.store import MemoryStore
 
-from misen import WORK_DIR, Task, meta
+from misen import SCRATCH_DIR, Task, meta
 from misen.exceptions import LockUnavailableError
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, ObjectStoreLock
@@ -63,33 +63,33 @@ def cloud_test_task_b_for_filter() -> int:
     return 22
 
 
-@meta(id="cloud_test_writes_workdir", cache=True, exclude={"work_dir"})
-def cloud_test_writes_workdir(work_dir: Path, value: str) -> int:
-    """Write ``value`` to a fixed file inside the runtime work_dir."""
-    (work_dir / "marker.txt").write_text(value)
+@meta(id="cloud_test_writes_scratchdir", cache=True, exclude={"scratch_dir"})
+def cloud_test_writes_scratchdir(scratch_dir: Path, value: str) -> int:
+    """Write ``value`` to a fixed file inside the runtime scratch_dir."""
+    (scratch_dir / "marker.txt").write_text(value)
     return len(value)
 
 
-@meta(id="cloud_test_reads_workdir", cache=True, exclude={"work_dir"})
-def cloud_test_reads_workdir(work_dir: Path) -> str:
+@meta(id="cloud_test_reads_scratchdir", cache=True, exclude={"scratch_dir"})
+def cloud_test_reads_scratchdir(scratch_dir: Path) -> str:
     """Return the contents of a checkpoint file restored from durable storage."""
-    f = work_dir / "preserved.txt"
+    f = scratch_dir / "preserved.txt"
     if f.exists():
         return f.read_text()
     return "fresh"
 
 
-@meta(id="cloud_test_writes_workdir_cleanup", cache=True, cleanup_work_dir=True, exclude={"work_dir"})
-def cloud_test_writes_workdir_cleanup(work_dir: Path) -> int:
-    """Write to work_dir; the runtime will clean it up after the task succeeds."""
-    (work_dir / "to_remove.txt").write_text("bye")
+@meta(id="cloud_test_writes_scratchdir_cleanup", cache=True, cleanup_scratch_dir=True, exclude={"scratch_dir"})
+def cloud_test_writes_scratchdir_cleanup(scratch_dir: Path) -> int:
+    """Write to scratch_dir; the runtime will clean it up after the task succeeds."""
+    (scratch_dir / "to_remove.txt").write_text("bye")
     return 7
 
 
-@meta(id="cloud_test_writes_workdir_no_cache", cache=False, exclude={"work_dir"})
-def cloud_test_writes_workdir_no_cache(work_dir: Path) -> int:
-    """Non-cacheable task that writes to its ephemeral work_dir."""
-    (work_dir / "ephemeral.txt").write_text("nope")
+@meta(id="cloud_test_writes_scratchdir_no_cache", cache=False, exclude={"scratch_dir"})
+def cloud_test_writes_scratchdir_no_cache(scratch_dir: Path) -> int:
+    """Non-cacheable task that writes to its ephemeral scratch_dir."""
+    (scratch_dir / "ephemeral.txt").write_text("nope")
     return 1
 
 
@@ -99,15 +99,15 @@ _during_exec_can_finish = threading.Event()
 _during_exec_observed = threading.Event()
 
 
-@meta(id="cloud_test_pauses_in_workdir", cache=True, exclude={"work_dir"})
-def cloud_test_pauses_in_workdir(work_dir: Path) -> int:
+@meta(id="cloud_test_pauses_in_scratchdir", cache=True, exclude={"scratch_dir"})
+def cloud_test_pauses_in_scratchdir(scratch_dir: Path) -> int:
     """Write a checkpoint, pause for the test to inspect the bucket, then continue."""
-    (work_dir / "early.txt").write_text("written-early")
+    (scratch_dir / "early.txt").write_text("written-early")
     _during_exec_observed.set()
     if not _during_exec_can_finish.wait(timeout=10):
         msg = "test driver never released the during-execution gate"
         raise RuntimeError(msg)
-    (work_dir / "late.txt").write_text("written-late")
+    (scratch_dir / "late.txt").write_text("written-late")
     return 42
 
 
@@ -115,7 +115,7 @@ def _workspace(tmp_path, bucket: str) -> _MemoryCloudWorkspace:
     return _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch"),
+        cache_dir=str(tmp_path / "cache"),
     )
 
 
@@ -136,27 +136,27 @@ def test_cloud_workspace_hash_caches_roundtrip(tmp_path) -> None:
 
 
 def test_cloud_workspace_id_isolates_distinct_workspaces(tmp_path) -> None:
-    """Distinct identities resolve to distinct scratch subdirs under one base."""
-    base = tmp_path / "scratch"
-    ws_default = _MemoryCloudWorkspace(backend="s3", bucket="b", scratch_dir=str(base))
-    ws_prefix = _MemoryCloudWorkspace(backend="s3", bucket="b", prefix="x", scratch_dir=str(base))
+    """Distinct identities resolve to distinct cache subdirs under one base."""
+    base = tmp_path / "cache"
+    ws_default = _MemoryCloudWorkspace(backend="s3", bucket="b", cache_dir=str(base))
+    ws_prefix = _MemoryCloudWorkspace(backend="s3", bucket="b", prefix="x", cache_dir=str(base))
     ws_endpoint = _MemoryCloudWorkspace(
-        backend="s3", bucket="b", endpoint="https://r2.example", scratch_dir=str(base)
+        backend="s3", bucket="b", endpoint="https://r2.example", cache_dir=str(base)
     )
     ws_region = _MemoryCloudWorkspace(
-        backend="s3", bucket="b", s3_region="us-west-2", scratch_dir=str(base)
+        backend="s3", bucket="b", s3_region="us-west-2", cache_dir=str(base)
     )
 
     ids = {ws.workspace_id for ws in (ws_default, ws_prefix, ws_endpoint, ws_region)}
     assert len(ids) == 4
     for ws in (ws_default, ws_prefix, ws_endpoint, ws_region):
-        assert ws._scratch.parent == base
-        assert ws._scratch.name == ws.workspace_id
+        assert ws._cache.parent == base
+        assert ws._cache.name == ws.workspace_id
 
-    # Same identity => same id => same scratch subdir (safe sharing).
-    twin = _MemoryCloudWorkspace(backend="s3", bucket="b", scratch_dir=str(base))
+    # Same identity => same id => same cache subdir (safe sharing).
+    twin = _MemoryCloudWorkspace(backend="s3", bucket="b", cache_dir=str(base))
     assert twin.workspace_id == ws_default.workspace_id
-    assert twin._scratch == ws_default._scratch
+    assert twin._cache == ws_default._cache
 
 
 def test_cloud_workspace_rejects_misapplied_locator_fields() -> None:
@@ -179,17 +179,17 @@ def test_cloud_workspace_rejects_duplicate_locator_in_config(tmp_path) -> None:
             bucket="b",
             s3_region="us-east-1",
             config={"region": "us-east-1"},
-            scratch_dir=str(tmp_path / "scratch"),
+            cache_dir=str(tmp_path / "cache"),
         )
 
 
 def test_cloud_workspace_caches_persist_across_instances(tmp_path) -> None:
-    """A second workspace with a fresh scratch dir loads results from the bucket."""
+    """A second workspace with a fresh cache dir loads results from the bucket."""
     bucket = "test-persist"
     ws_a = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-a"),
+        cache_dir=str(tmp_path / "cache-a"),
     )
     task = Task(cloud_test_task_a)
     result = task.result(workspace=ws_a, compute_if_uncached=True, compute_uncached_deps=True)
@@ -199,19 +199,19 @@ def test_cloud_workspace_caches_persist_across_instances(tmp_path) -> None:
     ws_b = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-b"),
+        cache_dir=str(tmp_path / "cache-b"),
     )
     assert task.is_cached(workspace=ws_b)
     assert task.result(workspace=ws_b) == 11
 
 
 def test_cloud_workspace_log_uploaded_and_downloaded(tmp_path) -> None:
-    """Log writes upload on close and a different scratch dir downloads them."""
+    """Log writes upload on close and a different cache dir downloads them."""
     bucket = "test-logs"
     ws_a = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-a"),
+        cache_dir=str(tmp_path / "cache-a"),
     )
     task = Task(cloud_test_task_a)
     resolved = ResolvedTaskHash.from_object(("log", "key"))
@@ -228,7 +228,7 @@ def test_cloud_workspace_log_uploaded_and_downloaded(tmp_path) -> None:
     ws_b = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-b"),
+        cache_dir=str(tmp_path / "cache-b"),
     )
     ws_b.set_resolved_hash(task, resolved)
     with ws_b.read_task_log(task, job_id="job-1") as f:
@@ -427,7 +427,7 @@ def test_workspace_auto_resolves_cloud_from_toml(tmp_path, monkeypatch: pytest.M
 type = "cloud"
 backend = "s3"
 bucket = "auto-resolved"
-scratch_dir = "{tmp_path / "scratch"}"
+cache_dir = "{tmp_path / "cache"}"
 """
     )
     monkeypatch.setitem(
@@ -463,7 +463,7 @@ def test_cloud_workspace_streaming_job_log_uploads_on_exit(tmp_path) -> None:
     other = _MemoryCloudWorkspace(
         backend="s3",
         bucket="test-stream-exit",
-        scratch_dir=str(tmp_path / "scratch-2"),
+        cache_dir=str(tmp_path / "cache-2"),
     )
     paths = list(other.job_log_iter(work_unit=work_unit))
     assert len(paths) == 1
@@ -475,7 +475,7 @@ def test_cloud_workspace_job_log_chunks_are_compacted_on_finalize(tmp_path) -> N
     workspace = _MemoryCloudWorkspace(
         backend="s3",
         bucket="test-job-chunk-compaction",
-        scratch_dir=str(tmp_path / "scratch"),
+        cache_dir=str(tmp_path / "cache"),
         log_flush_interval_s=0.05,
     )
     work_unit = _work_unit_for(cloud_test_task_a)
@@ -502,7 +502,7 @@ def test_cloud_workspace_prefers_compacted_log_over_stale_chunks(tmp_path) -> No
     workspace = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-a"),
+        cache_dir=str(tmp_path / "cache-a"),
     )
     work_unit = _work_unit_for(cloud_test_task_a)
     log_path = workspace.get_job_log(job_id="job-1", work_unit=work_unit)
@@ -511,7 +511,7 @@ def test_cloud_workspace_prefers_compacted_log_over_stale_chunks(tmp_path) -> No
     other = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-b"),
+        cache_dir=str(tmp_path / "cache-b"),
     )
 
     obs.put(
@@ -544,7 +544,7 @@ def test_cloud_workspace_ignores_incomplete_live_chunks(tmp_path) -> None:
     workspace = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-a"),
+        cache_dir=str(tmp_path / "cache-a"),
     )
     work_unit = _work_unit_for(cloud_test_task_a)
     log_path = workspace.get_job_log(job_id="job-1", work_unit=work_unit)
@@ -568,7 +568,7 @@ def test_cloud_workspace_ignores_incomplete_live_chunks(tmp_path) -> None:
     other = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-b"),
+        cache_dir=str(tmp_path / "cache-b"),
     )
 
     paths = list(other.job_log_iter(work_unit=work_unit))
@@ -581,7 +581,7 @@ def test_cloud_workspace_refresh_does_not_overwrite_active_local_log(tmp_path) -
     workspace = _MemoryCloudWorkspace(
         backend="s3",
         bucket="test-active-log-refresh",
-        scratch_dir=str(tmp_path / "scratch"),
+        cache_dir=str(tmp_path / "cache"),
         log_flush_interval_s=60,
     )
     work_unit = _work_unit_for(cloud_test_task_a)
@@ -626,7 +626,7 @@ def test_cloud_workspace_finalize_job_log_captures_post_streaming_writes(tmp_pat
     ws_a = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-a"),
+        cache_dir=str(tmp_path / "cache-a"),
     )
     work_unit = _work_unit_for(cloud_test_task_a)
     log_path = ws_a.get_job_log(job_id="job-1", work_unit=work_unit)
@@ -642,7 +642,7 @@ def test_cloud_workspace_finalize_job_log_captures_post_streaming_writes(tmp_pat
     ws_b = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-b"),
+        cache_dir=str(tmp_path / "cache-b"),
     )
     paths = list(ws_b.job_log_iter(work_unit=work_unit))
     assert paths[0].read_text() == "worker output\n"
@@ -653,7 +653,7 @@ def test_cloud_workspace_finalize_job_log_captures_post_streaming_writes(tmp_pat
     ws_c = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-c"),
+        cache_dir=str(tmp_path / "cache-c"),
     )
     paths = list(ws_c.job_log_iter(work_unit=work_unit))
     assert paths[0].read_text() == "worker output\nslurm epilogue\n"
@@ -679,7 +679,7 @@ def test_cloud_workspace_finalize_job_log_is_idempotent(tmp_path) -> None:
     other = _MemoryCloudWorkspace(
         backend="s3",
         bucket="test-finalize-idem",
-        scratch_dir=str(tmp_path / "scratch-2"),
+        cache_dir=str(tmp_path / "cache-2"),
     )
     paths = list(other.job_log_iter(work_unit=work_unit))
     assert paths[0].read_text() == "content"
@@ -696,11 +696,11 @@ def test_cloud_workspace_job_log_iter_filters_by_work_unit(tmp_path) -> None:
         with workspace.streaming_job_log(log_path):
             log_path.write_text(body)
 
-    # Fresh scratch dir ensures the merge fetches everything from the bucket.
+    # Fresh cache dir ensures the merge fetches everything from the bucket.
     other = _MemoryCloudWorkspace(
         backend="s3",
         bucket="test-jli-filter",
-        scratch_dir=str(tmp_path / "scratch-2"),
+        cache_dir=str(tmp_path / "cache-2"),
     )
     a_logs = {p.read_text() for p in other.job_log_iter(work_unit=wu_a)}
     all_logs = {p.read_text() for p in other.job_log_iter()}
@@ -714,7 +714,7 @@ def test_cloud_workspace_task_log_live_streamed_to_bucket(tmp_path) -> None:
     ws_a = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-a"),
+        cache_dir=str(tmp_path / "cache-a"),
         log_flush_interval_s=0.05,
     )
     task = Task(cloud_test_task_a)
@@ -731,7 +731,7 @@ def test_cloud_workspace_task_log_live_streamed_to_bucket(tmp_path) -> None:
         ws_b = _MemoryCloudWorkspace(
             backend="s3",
             bucket=bucket,
-            scratch_dir=str(tmp_path / "scratch-b"),
+            cache_dir=str(tmp_path / "cache-b"),
             log_flush_interval_s=0.05,
         )
         ws_b.set_resolved_hash(task, ResolvedTaskHash.from_object(("live", "task")))
@@ -753,7 +753,7 @@ def test_cloud_workspace_task_log_live_streamed_to_bucket(tmp_path) -> None:
     ws_c = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-c"),
+        cache_dir=str(tmp_path / "cache-c"),
     )
     ws_c.set_resolved_hash(task, ResolvedTaskHash.from_object(("live", "task")))
     with ws_c.read_task_log(task, job_id="live-job") as f:
@@ -767,7 +767,7 @@ def test_cloud_workspace_job_log_live_streamed_to_bucket(tmp_path) -> None:
     ws_a = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-a"),
+        cache_dir=str(tmp_path / "cache-a"),
         log_flush_interval_s=0.05,
     )
     work_unit = _work_unit_for(cloud_test_task_a)
@@ -780,7 +780,7 @@ def test_cloud_workspace_job_log_live_streamed_to_bucket(tmp_path) -> None:
         ws_b = _MemoryCloudWorkspace(
             backend="s3",
             bucket=bucket,
-            scratch_dir=str(tmp_path / "scratch-b"),
+            cache_dir=str(tmp_path / "cache-b"),
         )
         paths = list(ws_b.job_log_iter(work_unit=work_unit))
         assert len(paths) == 1
@@ -796,7 +796,7 @@ def test_cloud_workspace_job_log_live_streamed_to_bucket(tmp_path) -> None:
     ws_c = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-c"),
+        cache_dir=str(tmp_path / "cache-c"),
     )
     paths = list(ws_c.job_log_iter(work_unit=work_unit))
     assert len(paths) == 1
@@ -814,11 +814,11 @@ def test_cloud_workspace_read_does_not_truncate_sibling_writer_task_log(tmp_path
     for that bug.
     """
     bucket = "test-sibling-task-log"
-    scratch = tmp_path / "scratch-shared"
+    cache = tmp_path / "cache-shared"
     writer_ws = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(scratch),
+        cache_dir=str(cache),
         log_flush_interval_s=60,  # Long; chunk + state are published manually below.
     )
     task = Task(cloud_test_task_a)
@@ -854,7 +854,7 @@ def test_cloud_workspace_read_does_not_truncate_sibling_writer_task_log(tmp_path
         fp.write("second-chunk\n")
         fp.flush()
 
-        # Reader in a separate workspace instance with the same scratch:
+        # Reader in a separate workspace instance with the same cache:
         # simulates orchestrator-vs-subprocess (LocalExecutor). The
         # orchestrator's ``_live_log_uploaders`` dict does NOT contain the
         # writer path (a different process owns it), so the in-process
@@ -862,7 +862,7 @@ def test_cloud_workspace_read_does_not_truncate_sibling_writer_task_log(tmp_path
         reader_ws = _MemoryCloudWorkspace(
             backend="s3",
             bucket=bucket,
-            scratch_dir=str(scratch),
+            cache_dir=str(cache),
         )
         reader_ws.set_resolved_hash(task, ResolvedTaskHash.from_object(("sibling", "task")))
         with reader_ws.read_task_log(task, job_id="job-sib") as f:
@@ -876,13 +876,13 @@ def test_cloud_workspace_read_does_not_truncate_sibling_writer_task_log(tmp_path
         fp.close()
         writer_ws.finalize_task_log(task=task, job_id="job-sib")
 
-    # A fresh client (no shared scratch) reads via the compacted .log blob.
+    # A fresh client (no shared cache) reads via the compacted .log blob.
     # If the read had clobbered the writer file, compact would have
     # uploaded only the truncated 12-byte chunk content.
     fresh = _MemoryCloudWorkspace(
         backend="s3",
         bucket=bucket,
-        scratch_dir=str(tmp_path / "scratch-fresh"),
+        cache_dir=str(tmp_path / "cache-fresh"),
     )
     fresh.set_resolved_hash(task, ResolvedTaskHash.from_object(("sibling", "task")))
     with fresh.read_task_log(task, job_id="job-sib") as f:
@@ -895,7 +895,7 @@ def test_cloud_workspace_close_stops_live_uploaders(tmp_path) -> None:
     workspace = _MemoryCloudWorkspace(
         backend="s3",
         bucket="test-close-stops",
-        scratch_dir=str(tmp_path / "scratch"),
+        cache_dir=str(tmp_path / "cache"),
         log_flush_interval_s=0.05,
     )
     work_unit = _work_unit_for(cloud_test_task_a)
@@ -918,52 +918,52 @@ def test_cloud_workspace_results_iter(tmp_path) -> None:
     assert iter_count == 1
 
 
-def _work_dir_remote_paths(workspace: _MemoryCloudWorkspace, task: Task) -> set[str]:
-    prefix = workspace._work_dir_remote_prefix(task) + "/"
+def _scratch_dir_remote_paths(workspace: _MemoryCloudWorkspace, task: Task) -> set[str]:
+    prefix = workspace._scratch_dir_remote_prefix(task) + "/"
     return {entry["path"] for batch in obs.list(workspace._store, prefix=prefix) for entry in batch}
 
 
-def test_cloud_workspace_work_dir_persisted_after_task(tmp_path) -> None:
-    """A cacheable task's work_dir contents land in the bucket after completion."""
+def test_cloud_workspace_scratch_dir_persisted_after_task(tmp_path) -> None:
+    """A cacheable task's scratch_dir contents land in the bucket after completion."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-persisted",
-        scratch_dir=str(tmp_path / "scratch"),
+        bucket="test-scratchdir-persisted",
+        cache_dir=str(tmp_path / "cache"),
     )
-    task = Task(cloud_test_writes_workdir, WORK_DIR, "hello")
+    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "hello")
     assert task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True) == 5
 
-    paths = _work_dir_remote_paths(workspace, task)
+    paths = _scratch_dir_remote_paths(workspace, task)
     assert any(p.endswith("/marker.txt") for p in paths)
     marker_key = next(p for p in paths if p.endswith("/marker.txt"))
     assert bytes(obs.get(workspace._store, marker_key).bytes()) == b"hello"
 
 
-def test_cloud_workspace_work_dir_restored_from_bucket(tmp_path) -> None:
-    """A pre-existing cloud snapshot is restored into the local work_dir before the task runs."""
+def test_cloud_workspace_scratch_dir_restored_from_bucket(tmp_path) -> None:
+    """A pre-existing cloud snapshot is restored into the local scratch_dir before the task runs."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-restored",
-        scratch_dir=str(tmp_path / "scratch"),
+        bucket="test-scratchdir-restored",
+        cache_dir=str(tmp_path / "cache"),
     )
-    task = Task(cloud_test_reads_workdir, WORK_DIR)
+    task = Task(cloud_test_reads_scratchdir, SCRATCH_DIR)
 
-    remote_prefix = workspace._work_dir_remote_prefix(task)
+    remote_prefix = workspace._scratch_dir_remote_prefix(task)
     obs.put(workspace._store, f"{remote_prefix}/preserved.txt", b"from-bucket", mode="overwrite")
 
     result = task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
     assert result == "from-bucket"
 
 
-def test_cloud_workspace_work_dir_synced_during_execution(tmp_path) -> None:
+def test_cloud_workspace_scratch_dir_synced_during_execution(tmp_path) -> None:
     """Files written during a long-running task land in the bucket before completion."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-during",
-        scratch_dir=str(tmp_path / "scratch"),
-        work_dir_sync_interval_s=0.05,
+        bucket="test-scratchdir-during",
+        cache_dir=str(tmp_path / "cache"),
+        scratch_dir_sync_interval_s=0.05,
     )
-    task = Task(cloud_test_pauses_in_workdir, WORK_DIR)
+    task = Task(cloud_test_pauses_in_scratchdir, SCRATCH_DIR)
     _during_exec_can_finish.clear()
     _during_exec_observed.clear()
 
@@ -982,7 +982,7 @@ def test_cloud_workspace_work_dir_synced_during_execution(tmp_path) -> None:
         # Wait long enough for at least one background sync tick to upload
         # ``early.txt`` while the task is still paused.
         time.sleep(0.3)
-        paths = _work_dir_remote_paths(workspace, task)
+        paths = _scratch_dir_remote_paths(workspace, task)
         assert any(p.endswith("/early.txt") for p in paths)
         assert not any(p.endswith("/late.txt") for p in paths)
     finally:
@@ -990,121 +990,121 @@ def test_cloud_workspace_work_dir_synced_during_execution(tmp_path) -> None:
         runner.join(timeout=10)
 
     assert not runner_error, runner_error[0]
-    paths = _work_dir_remote_paths(workspace, task)
+    paths = _scratch_dir_remote_paths(workspace, task)
     assert any(p.endswith("/early.txt") for p in paths)
     assert any(p.endswith("/late.txt") for p in paths)
 
 
-def test_cloud_workspace_work_dir_cleanup_removes_local_and_remote(tmp_path) -> None:
-    """``cleanup_work_dir=True`` deletes both the local cache and the bucket prefix."""
+def test_cloud_workspace_scratch_dir_cleanup_removes_local_and_remote(tmp_path) -> None:
+    """``cleanup_scratch_dir=True`` deletes both the local cache and the bucket prefix."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-cleanup",
-        scratch_dir=str(tmp_path / "scratch"),
+        bucket="test-scratchdir-cleanup",
+        cache_dir=str(tmp_path / "cache"),
     )
-    task = Task(cloud_test_writes_workdir_cleanup, WORK_DIR)
+    task = Task(cloud_test_writes_scratchdir_cleanup, SCRATCH_DIR)
     assert task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True) == 7
 
-    paths = _work_dir_remote_paths(workspace, task)
+    paths = _scratch_dir_remote_paths(workspace, task)
     assert paths == set()
-    local_path = workspace._scratch / "work" / task.resolved_hash(workspace=workspace).b32()
+    local_path = workspace._cache / "scratch" / task.resolved_hash(workspace=workspace).b32()
     assert not local_path.exists()
 
 
-def test_cloud_workspace_work_dir_persists_when_no_cleanup(tmp_path) -> None:
-    """Without ``cleanup_work_dir`` the local cache is preserved alongside the bucket copy."""
+def test_cloud_workspace_scratch_dir_persists_when_no_cleanup(tmp_path) -> None:
+    """Without ``cleanup_scratch_dir`` the local cache is preserved alongside the bucket copy."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-no-cleanup",
-        scratch_dir=str(tmp_path / "scratch"),
+        bucket="test-scratchdir-no-cleanup",
+        cache_dir=str(tmp_path / "cache"),
     )
-    task = Task(cloud_test_writes_workdir, WORK_DIR, "keep")
+    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "keep")
     task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
 
-    local_path = workspace._scratch / "work" / task.resolved_hash(workspace=workspace).b32()
+    local_path = workspace._cache / "scratch" / task.resolved_hash(workspace=workspace).b32()
     assert (local_path / "marker.txt").read_text() == "keep"
-    paths = _work_dir_remote_paths(workspace, task)
+    paths = _scratch_dir_remote_paths(workspace, task)
     assert any(p.endswith("/marker.txt") for p in paths)
 
 
-def test_cloud_workspace_remove_work_dir_when_idle(tmp_path) -> None:
-    """``remove_work_dir`` works when no sync session is currently active."""
+def test_cloud_workspace_remove_scratch_dir_when_idle(tmp_path) -> None:
+    """``remove_scratch_dir`` works when no sync session is currently active."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-remove-idle",
-        scratch_dir=str(tmp_path / "scratch"),
+        bucket="test-scratchdir-remove-idle",
+        cache_dir=str(tmp_path / "cache"),
     )
-    task = Task(cloud_test_writes_workdir, WORK_DIR, "data")
+    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "data")
     task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
 
-    workspace.remove_work_dir(task=task)
-    assert _work_dir_remote_paths(workspace, task) == set()
-    local_path = workspace._scratch / "work" / task.resolved_hash(workspace=workspace).b32()
+    workspace.remove_scratch_dir(task=task)
+    assert _scratch_dir_remote_paths(workspace, task) == set()
+    local_path = workspace._cache / "scratch" / task.resolved_hash(workspace=workspace).b32()
     assert not local_path.exists()
 
 
-def test_cloud_workspace_remove_work_dir_rejects_non_cacheable(tmp_path) -> None:
-    """``remove_work_dir`` refuses non-cacheable tasks."""
-    workspace = _workspace(tmp_path, "test-workdir-remove-rejects")
-    task = Task(cloud_test_writes_workdir_no_cache, WORK_DIR)
-    with pytest.raises(RuntimeError, match="cannot use workspace work_dir"):
-        workspace.remove_work_dir(task=task)
+def test_cloud_workspace_remove_scratch_dir_rejects_non_cacheable(tmp_path) -> None:
+    """``remove_scratch_dir`` refuses non-cacheable tasks."""
+    workspace = _workspace(tmp_path, "test-scratchdir-remove-rejects")
+    task = Task(cloud_test_writes_scratchdir_no_cache, SCRATCH_DIR)
+    with pytest.raises(RuntimeError, match="cannot use workspace scratch_dir"):
+        workspace.remove_scratch_dir(task=task)
 
 
-def test_cloud_workspace_work_dir_not_synced_for_non_cacheable(tmp_path) -> None:
-    """Non-cacheable tasks use ephemeral local work_dirs and never publish to the bucket."""
+def test_cloud_workspace_scratch_dir_not_synced_for_non_cacheable(tmp_path) -> None:
+    """Non-cacheable tasks use ephemeral local scratch_dirs and never publish to the bucket."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-non-cache",
-        scratch_dir=str(tmp_path / "scratch"),
+        bucket="test-scratchdir-non-cache",
+        cache_dir=str(tmp_path / "cache"),
     )
-    task = Task(cloud_test_writes_workdir_no_cache, WORK_DIR)
+    task = Task(cloud_test_writes_scratchdir_no_cache, SCRATCH_DIR)
     task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
 
-    work_dir_paths = {
+    scratch_dir_paths = {
         entry["path"]
-        for batch in obs.list(workspace._store, prefix=workspace._under("work_dirs") + "/")
+        for batch in obs.list(workspace._store, prefix=workspace._under("scratch_dirs") + "/")
         for entry in batch
     }
-    assert work_dir_paths == set()
+    assert scratch_dir_paths == set()
 
 
-def test_cloud_workspace_close_stops_work_dir_syncs(tmp_path) -> None:
-    """Closing the workspace tears down any outstanding work_dir sync threads."""
+def test_cloud_workspace_close_stops_scratch_dir_syncs(tmp_path) -> None:
+    """Closing the workspace tears down any outstanding scratch_dir sync threads."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-close",
-        scratch_dir=str(tmp_path / "scratch"),
-        work_dir_sync_interval_s=0.05,
+        bucket="test-scratchdir-close",
+        cache_dir=str(tmp_path / "cache"),
+        scratch_dir_sync_interval_s=0.05,
     )
-    task = Task(cloud_test_writes_workdir, WORK_DIR, "data")
-    workspace.start_work_dir_sync(task=task)
-    assert workspace._work_dir_syncs
+    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "data")
+    workspace.start_scratch_dir_sync(task=task)
+    assert workspace._scratch_dir_syncs
 
     workspace.close()
-    assert not workspace._work_dir_syncs
+    assert not workspace._scratch_dir_syncs
 
 
-def test_cloud_workspace_work_dir_sync_drops_deleted_files(tmp_path) -> None:
+def test_cloud_workspace_scratch_dir_sync_drops_deleted_files(tmp_path) -> None:
     """Files removed locally during execution are removed from the bucket on the next tick."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
-        bucket="test-workdir-deletion",
-        scratch_dir=str(tmp_path / "scratch"),
-        work_dir_sync_interval_s=0.05,
+        bucket="test-scratchdir-deletion",
+        cache_dir=str(tmp_path / "cache"),
+        scratch_dir_sync_interval_s=0.05,
     )
-    task = Task(cloud_test_writes_workdir, WORK_DIR, "value")
-    workspace.start_work_dir_sync(task=task)
+    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "value")
+    workspace.start_scratch_dir_sync(task=task)
     try:
-        local_dir = workspace._get_work_dir(task)
+        local_dir = workspace._get_scratch_dir(task)
         (local_dir / "transient.txt").write_text("temporary")
         time.sleep(0.25)
-        paths = _work_dir_remote_paths(workspace, task)
+        paths = _scratch_dir_remote_paths(workspace, task)
         assert any(p.endswith("/transient.txt") for p in paths)
 
         (local_dir / "transient.txt").unlink()
         time.sleep(0.25)
-        paths = _work_dir_remote_paths(workspace, task)
+        paths = _scratch_dir_remote_paths(workspace, task)
         assert not any(p.endswith("/transient.txt") for p in paths)
     finally:
-        workspace.finalize_work_dir(task=task)
+        workspace.finalize_scratch_dir(task=task)

@@ -65,7 +65,7 @@ changing cache format or lock semantics.
 
 Sentinel arguments are resolved at execution time:
 
-- `WORK_DIR`
+- `SCRATCH_DIR`
 - `ASSIGNED_RESOURCES`
 - `ASSIGNED_RESOURCES_PER_NODE`
 
