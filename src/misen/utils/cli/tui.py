@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from textual import events
 
     from misen.executor import Job
+    from misen.task_metadata import Resources
     from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
     from misen.utils.work_unit import WorkUnit
@@ -269,6 +270,37 @@ def _render_summary(jobs: list[Job], states: list[JobState]) -> Text:
     return summary
 
 
+def _format_runtime(seconds: float) -> str:
+    """Return a compact duration string like ``42s`` / ``12m03s`` / ``1h05m``."""
+    total = max(0, int(seconds))
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{sec:02d}s"
+    return f"{sec}s"
+
+
+def _format_resources(resources: Resources | None) -> Text:
+    """Return a one-line summary of a work unit's aggregated resource request."""
+    text = Text()
+    text.append("Resources: ", style="dim")
+    if resources is None:
+        text.append("(none)", style="dim italic")
+        return text
+    text.append(f"{resources['cpus']} CPU")
+    text.append(f" · {resources['memory']} GiB")
+    if resources["gpus"] > 0:
+        text.append(f" · {resources['gpus']} {resources['gpu_runtime']} GPU")
+        if resources["gpu_memory"] is not None:
+            text.append(f" ({resources['gpu_memory']} GiB)")
+    text.append(f" · {resources['time']}m")
+    if resources["nodes"] > 1:
+        text.append(f" · {resources['nodes']} nodes")
+    return text
+
+
 def _run_textual_task_monitor(
     *,
     named_tasks: Mapping[str, Task[Any]],
@@ -457,6 +489,56 @@ def _run_textual_task_monitor(
             styled_selected = Strip(styled_segments, selected_part.cell_length)
             return Strip.join([pre, styled_selected, *rest])
 
+    class _Divider(Static):
+        """Vertical 1-cell divider between the tree and log columns.
+
+        Placed twice -- once in ``#header-bar`` and once in ``#main-content``
+        -- to render a continuous green column. The instance constructed
+        with ``draggable=True`` captures mouse events and resizes the tree
+        column live as the cursor moves, keeping both rows in sync.
+        """
+
+        DEFAULT_CSS = """
+        _Divider {
+            width: 1;
+            height: 1fr;
+            background: green;
+        }
+        _Divider.-draggable:hover {
+            background: $accent;
+        }
+        """
+
+        def __init__(self, *, draggable: bool = False, **kwargs: Any) -> None:
+            super().__init__("", **kwargs)
+            self._draggable = draggable
+            self._dragging = False
+            if draggable:
+                self.add_class("-draggable")
+
+        def on_mouse_down(self, event: events.MouseDown) -> None:
+            if not self._draggable:
+                return
+            self._dragging = True
+            self.capture_mouse()
+            event.stop()
+
+        def on_mouse_up(self, event: events.MouseUp) -> None:
+            if not self._dragging:
+                return
+            self._dragging = False
+            self.release_mouse()
+            event.stop()
+
+        def on_mouse_move(self, event: events.MouseMove) -> None:
+            if not self._dragging:
+                return
+            screen_width = self.app.size.width
+            # Clamp so neither column collapses below a usable width.
+            new_width = max(20, min(int(event.screen_x), screen_width - 20))
+            for selector in ("#task-tree", "#summary"):
+                self.app.query_one(selector).styles.width = new_width
+
     class _CopyButton(Static):
         """Footer-style button that copies the current text selection.
 
@@ -526,11 +608,15 @@ def _run_textual_task_monitor(
         POST_RUN_IDLE_TIMEOUT_S = 60.0
         CSS = """
         Screen { layout: vertical; }
-        #summary { height: 1; padding: 0 1; }
+        #header-bar { height: 1; }
+        #summary { width: 1fr; min-width: 32; padding: 0 1; }
+        #log-header { width: 1fr; height: 1; }
+        #log-title { width: 1fr; padding: 0 1; color: $accent; text-style: bold; }
+        #runtime { width: auto; padding: 0 1; color: $accent; }
         #main-content { height: 1fr; }
         #task-tree { width: 1fr; min-width: 32; padding: 0 1; }
-        #log-panel { width: 1fr; border-left: solid green; }
-        #log-title { height: 1; padding: 0 1; color: $accent; text-style: bold; }
+        #log-panel { width: 1fr; }
+        #log-resources { height: 1; padding: 0 1; }
         #log-viewer { height: 1fr; padding: 0 1; }
         #footer-bar { height: 1; }
         #footer-bar Footer { width: 1fr; }
@@ -560,15 +646,29 @@ def _run_textual_task_monitor(
             self._state_poll_pending: bool = False
             """Set while a backgrounded state poll is in flight to prevent
             two overlapping polls when the controller is slow."""
+            self._job_started_at: dict[Job, float] = {}
+            self._job_ended_at: dict[Job, float] = {}
+            """Per-job runtime bookkeeping. Recorded the first time we observe
+            a job in ``running`` (start) and the first time we observe it in
+            a terminal state after we saw it running (end). Jobs that go
+            straight to ``done`` (e.g. ``CompletedJob`` from cache) never get
+            an entry, which is intentional -- there is no meaningful runtime
+            to display for them."""
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
-            yield Static(id="summary")
+            with Horizontal(id="header-bar"):
+                yield Static(id="summary")
+                yield _Divider(id="header-divider")
+                with Horizontal(id="log-header"):
+                    yield Static("Task log", id="log-title")
+                    yield Static(id="runtime")
             with Horizontal(id="main-content"):
                 yield _FilteredTree("Experiment", id="task-tree")
+                yield _Divider(id="main-divider", draggable=True)
                 with Vertical(id="log-panel"):
-                    yield Static("Task log", id="log-title")
                     yield _LogPane(id="log-viewer", highlight=True, markup=False, wrap=True)
+                    yield Static(id="log-resources")
             with Horizontal(id="footer-bar"):
                 yield Footer()
                 yield _CopyButton(id="copy-button")
@@ -585,10 +685,13 @@ def _run_textual_task_monitor(
             self._repaint_tree()
             self._render_summary_widget()
             self._update_log_title()
+            self._render_resources_line()
+            self._render_runtime()
             self._stream_log_chunk()
             self.call_after_refresh(self._post_mount_focus)
             self.set_interval(max(0.05, poll_interval_s), self._log_tick)
             self.set_interval(max(0.5, state_poll_interval_s), self._state_tick)
+            self.set_interval(1.0, self._render_runtime)
 
         def _post_mount_focus(self) -> None:
             tree = self.query_one("#task-tree", _FilteredTree)
@@ -646,6 +749,16 @@ def _run_textual_task_monitor(
 
         def _apply_states(self, states: dict[Job, JobState]) -> None:
             """Replace the cached state map and propagate it to tree entries."""
+            now = time.monotonic()
+            for job, state in states.items():
+                if state == "running" and job not in self._job_started_at:
+                    self._job_started_at[job] = now
+                elif (
+                    state in _TERMINAL_STATES
+                    and job in self._job_started_at
+                    and job not in self._job_ended_at
+                ):
+                    self._job_ended_at[job] = now
             self._job_states = states
             for entry in self._entries:
                 job = index.job_for_work_unit(entry.work_unit)
@@ -678,6 +791,24 @@ def _run_textual_task_monitor(
         def _update_log_title(self) -> None:
             title = self.query_one("#log-title", Static)
             title.update("Task log" if self._mode == "task" else "Job log")
+
+        def _render_resources_line(self) -> None:
+            widget = self.query_one("#log-resources", Static)
+            entry = self._cursor_entry
+            wu = entry.work_unit if entry is not None else None
+            widget.update(_format_resources(wu.resources if wu is not None else None))
+
+        def _render_runtime(self) -> None:
+            widget = self.query_one("#runtime", Static)
+            entry = self._cursor_entry
+            job = index.job_for_work_unit(entry.work_unit) if entry is not None else None
+            started = self._job_started_at.get(job) if job is not None else None
+            if started is None:
+                widget.update("")
+                return
+            ended = self._job_ended_at.get(job) if job is not None else None
+            elapsed = (ended if ended is not None else time.monotonic()) - started
+            widget.update(_format_runtime(elapsed))
 
         def _log_tick(self) -> None:
             """Fast tick: stream log chunks and observe user scroll activity.
@@ -787,6 +918,8 @@ def _run_textual_task_monitor(
             self._snap_cursor_to_mode_stop()
             self._reset_log()
             self._repaint_tree()
+            self._render_resources_line()
+            self._render_runtime()
             self._stream_log_chunk()
 
         def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
@@ -796,6 +929,8 @@ def _run_textual_task_monitor(
             self._cursor_entry = entry
             self._reset_log()
             self._repaint_tree()
+            self._render_resources_line()
+            self._render_runtime()
             self._stream_log_chunk()
 
         def _recompute_scrollable_lines(self) -> None:
