@@ -185,9 +185,9 @@ Declare what a task needs:
 def train(lr: float, dim: int) -> nn.Module: ...
 ```
 
-Defaults: 1 node, 1 CPU, 8 GiB RAM, 0 GPUs. Fields: `time`, `nodes`, `memory`, `cpus`, `gpus`, `gpu_memory`, `gpu_runtime` (`"cuda" | "rocm" | "xpu"`).
+Defaults: 1 CPU, 8 GiB RAM, 0 GPUs. Fields: `time`, `memory`, `cpus`, `gpus`, `gpu_memory`, `gpu_runtime` (`"cuda" | "rocm" | "xpu"`).
 
-At runtime, `misen` allocates at least the resources you request and binds them to the task process — CPU cores by affinity, GPU indices via the specified runtime (e.g. visible to `torch.cuda.device`). If you need the explicit index lists, pass `ASSIGNED_RESOURCES` or `ASSIGNED_RESOURCES_PER_NODE` as arguments.
+At runtime, `misen` allocates at least the resources you request and binds them to the task process. `LocalExecutor` masks GPUs via `CUDA_VISIBLE_DEVICES` and pins CPU affinity; `SlurmExecutor` lets SLURM's cgroups handle isolation. Either way, your task code reads the same runtime view — `os.sched_getaffinity(0)` for CPU cores, `range(torch.cuda.device_count())` for GPUs.
 
 Pass `SCRATCH_DIR: Path` as an argument for a per-task scratch directory. It persists across runs for `cache=True` tasks (useful for checkpointing against preemption) and is ephemeral otherwise.
 

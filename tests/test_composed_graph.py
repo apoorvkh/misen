@@ -2,19 +2,18 @@ import logging
 import os
 import sys
 
-from misen import ASSIGNED_RESOURCES, Experiment, Task, meta
-from misen.utils.assigned_resources import AssignedResources
+from misen import Experiment, Task, meta
 
 # logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s %(message)s")
 # logging.getLogger("misen").setLevel(logging.DEBUG)
 
 
-@meta(id="add", cache=False, exclude={"x"})
-def add(a: float, b: float, x: AssignedResources | None = None) -> float:
+@meta(id="add", cache=False)
+def add(a: float, b: float) -> float:
     print(f"Running add with {a}, {b}")
     print(f"{os.environ['MY_ENV_VAR']}")
     print(sys.executable)
-    print("Assigned Resources:", x)
+    print("Visible CPUs:", sorted(os.sched_getaffinity(0)))
     return a + b
 
 
@@ -67,8 +66,8 @@ class MyExperiment(Experiment):
         var_task = Task(variance, numbers=gen_task.T)
         mult_task = Task(multiply, a=sum_task.T, b=mean_task.T)
 
-        add_task = Task(add, a=mult_task.T, b=var_task.T, x=ASSIGNED_RESOURCES)
-        add_task_dup = Task(add, a=mult_task.T, b=var_task.T, x=ASSIGNED_RESOURCES)
+        add_task = Task(add, a=mult_task.T, b=var_task.T)
+        add_task_dup = Task(add, a=mult_task.T, b=var_task.T)
 
         final_multiply_task = Task(multiply, a=add_task.T, b=add_task_dup.T)
 
