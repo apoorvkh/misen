@@ -1,14 +1,19 @@
 """SkyPilot-backed executor implementation.
 
-Provisions one ephemeral cluster per work unit via ``sky.launch(..., down=True)``,
-ships the project source plus a :class:`~misen.utils.snapshot.CloudSnapshot`
-to the cluster, runs the worker, and lets the cluster auto-terminate.
+Dispatches each work unit as a SkyPilot **managed job**: ``sky.jobs.launch``
+hands the job to SkyPilot's managed-jobs controller, which provisions an
+ephemeral cluster, runs the worker, captures the result, and tears the
+cluster down. The controller transparently retries on spot preemption or
+transient infrastructure failure, so misen can treat compute as ephemeral
+work over the persistent :class:`~misen.workspace.Workspace` -- the only
+state that needs to survive is what the worker writes back through the
+workspace.
 
-The worker on the cluster re-opens the workspace from the cloudpickle payload
-(the orchestrator's workspace instance is serialized into the payload and
-rehydrated on the remote node), so all results, logs, and intermediate state
-flow back through the workspace's durable storage. The executor never needs
-direct filesystem access to the cluster.
+The worker on the cluster re-opens the workspace from the cloudpickle
+payload (the orchestrator's workspace instance is serialized into the
+payload and rehydrated on the remote node), so all results, logs, and
+intermediate state flow back through the workspace's durable storage.
+The executor never needs direct filesystem access to the cluster.
 """
 
 from __future__ import annotations
@@ -83,33 +88,37 @@ mkdir -p "$HOME/.misen/job_logs"
 
 
 class SkyPilotJob(Job):
-    """Job handle backed by a SkyPilot ephemeral cluster + job id.
+    """Job handle backed by a SkyPilot managed-job id.
 
-    The handle holds a Future for the ``sky.launch`` call so independent
-    work units can be provisioning concurrently. ``state()`` consults
-    the future first (pending while not yet launched, failed if the
-    launch itself raised), then ``sky.queue(cluster_name)`` for the
-    actual SkyPilot job state.
+    The handle holds a Future for the ``sky.jobs.launch`` call so
+    independent work units can be submitted to the managed-jobs
+    controller concurrently. ``state()`` consults the future first
+    (pending while not yet submitted, failed if submission itself
+    raised), then ``sky.jobs.queue()`` for the actual managed-job
+    state -- which already accounts for cluster provisioning,
+    spot recovery, retries, and final completion.
     """
 
-    __slots__ = ("_cached_state", "_launch_future", "_lock", "_sky_job_id", "cluster_name", "workspace")
+    __slots__ = ("_cached_state", "_launch_future", "_lock", "_managed_job_id", "managed_job_name", "workspace")
 
     def __init__(
         self,
         work_unit: WorkUnit,
-        cluster_name: str,
+        managed_job_name: str,
         workspace: Workspace,
     ) -> None:
-        """Initialize a pending SkyPilot job handle.
+        """Initialize a pending SkyPilot managed-job handle.
 
-        ``cluster_name`` is decided up front (a unique name per work unit)
-        so it appears on the handle even before the launch future runs.
+        ``managed_job_name`` is decided up front (a unique name per work
+        unit) so it appears on the handle even before the launch future
+        runs. The integer ``managed_job_id`` returned by SkyPilot is
+        recorded once the launch future resolves.
         """
         super().__init__(work_unit=work_unit, job_id=None, log_path=None)
-        self.cluster_name = cluster_name
+        self.managed_job_name = managed_job_name
         self.workspace = workspace
         self._launch_future: Future[int] | None = None
-        self._sky_job_id: int | None = None
+        self._managed_job_id: int | None = None
         self._cached_state: JobState = "pending"
         self._lock = threading.Lock()
 
@@ -126,17 +135,19 @@ class SkyPilotJob(Job):
     def bulk_state(cls, jobs: Sequence[Job]) -> dict[Job, JobState]:
         """Resolve states for many ``SkyPilotJob`` instances.
 
-        Each cluster is independent (one job per cluster), so we still
-        need one ``sky.queue`` call per distinct cluster — but jobs that
-        haven't reached the queue stage yet (``_launch_future`` not done,
-        or done with exception) are short-circuited without any
-        SkyPilot calls.
+        Managed jobs share one global queue, so we can answer N jobs in
+        a single ``sky.jobs.queue()`` call regardless of how many
+        clusters are involved -- a meaningful win over per-cluster
+        polling when a UI is watching dozens of jobs at once.
+
+        Jobs whose launch future hasn't resolved yet (or resolved with
+        an exception) are short-circuited without any SkyPilot calls.
         """
         if not jobs:
             return {}
         sky_jobs = cast("Sequence[SkyPilotJob]", jobs)
         result: dict[Job, JobState] = {}
-        clusters_to_query: dict[str, list[SkyPilotJob]] = {}
+        to_query: list[SkyPilotJob] = []
         for job in sky_jobs:
             with job._lock:  # noqa: SLF001
                 if job._cached_state in {"done", "failed"}:  # noqa: SLF001
@@ -151,35 +162,42 @@ class SkyPilotJob(Job):
                     job._cached_state = "failed"  # noqa: SLF001
                     result[job] = "failed"
                     continue
-                if job._sky_job_id is None:  # noqa: SLF001
-                    # Future is done, success: cache the launch result.
-                    job._sky_job_id = future.result()  # noqa: SLF001
-            clusters_to_query.setdefault(job.cluster_name, []).append(job)
+                if job._managed_job_id is None:  # noqa: SLF001
+                    job._managed_job_id = future.result()  # noqa: SLF001
+            to_query.append(job)
 
-        for cluster_name, group in clusters_to_query.items():
-            try:
-                state_by_sky_id = _query_cluster_states(cluster_name)
-            except Exception:
-                logger.exception("sky.queue failed for cluster %s.", cluster_name)
-                for job in group:
-                    result[job] = "unknown"
-                continue
-            for job in group:
-                sky_job_id = job._sky_job_id  # noqa: SLF001
-                state: JobState = (
-                    state_by_sky_id.get(sky_job_id, "unknown") if sky_job_id is not None else "unknown"
-                )
-                if state in {"done", "failed"}:
-                    with job._lock:  # noqa: SLF001
-                        job._cached_state = state  # noqa: SLF001
-                result[job] = state
+        if not to_query:
+            return result
+
+        try:
+            state_by_id = _query_managed_job_states()
+        except Exception:
+            logger.exception("sky.jobs.queue failed during bulk state query.")
+            for job in to_query:
+                result[job] = "unknown"
+            return result
+
+        for job in to_query:
+            managed_id = job._managed_job_id  # noqa: SLF001
+            state: JobState = state_by_id.get(managed_id, "unknown") if managed_id is not None else "unknown"
+            if state in {"done", "failed"}:
+                with job._lock:  # noqa: SLF001
+                    job._cached_state = state  # noqa: SLF001
+            result[job] = state
         return result
 
 
 class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
-    """Executor that runs each work unit on its own ephemeral SkyPilot cluster."""
+    """Executor that submits each work unit as a SkyPilot managed job.
 
-    cluster_name_prefix: str = "misen"
+    Each managed job runs on its own ephemeral cluster, with the
+    SkyPilot managed-jobs controller handling provisioning, spot
+    recovery, and teardown. Misen's only responsibility is to honor
+    the dependency graph (deps must reach ``done`` before a dependent
+    is submitted) and to report state back to the runtime UI.
+    """
+
+    job_name_prefix: str = "misen"
     cloud: str | None = None
     region: str | None = None
     zone: str | None = None
@@ -191,12 +209,12 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
     setup_commands: list[str] = msgspec.field(default_factory=list)
     envs: dict[str, str] = msgspec.field(default_factory=dict)
     max_concurrent_launches: int = 4
-    idle_minutes_to_autostop: int = 0
 
     def __post_init__(self) -> None:
         """Lazily load SkyPilot, validate config, build a launcher pool."""
         try:
             import sky  # noqa: F401
+            import sky.jobs  # noqa: F401
         except ImportError as exc:
             msg = (
                 "SkyPilotExecutor requires the SkyPilot package. "
@@ -206,9 +224,6 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
 
         if self.max_concurrent_launches < 1:
             msg = "max_concurrent_launches must be a positive integer."
-            raise ValueError(msg)
-        if self.idle_minutes_to_autostop < 0:
-            msg = "idle_minutes_to_autostop must be non-negative."
             raise ValueError(msg)
 
         self._launch_pool = ThreadPoolExecutor(
@@ -239,9 +254,9 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
         """Build a SkyPilot Task for the work unit and submit it to the launcher pool."""
         resources = work_unit.resources
         label = work_unit_label(work_unit)
-        cluster_name = f"{self.cluster_name_prefix}-{token_base32(4).lower()}"
+        managed_job_name = f"{self.job_name_prefix}-{token_base32(4).lower()}"
 
-        job = SkyPilotJob(work_unit=work_unit, cluster_name=cluster_name, workspace=workspace)
+        job = SkyPilotJob(work_unit=work_unit, managed_job_name=managed_job_name, workspace=workspace)
 
         # ``assigned_resources`` is fixed: the cluster is dedicated to this
         # one job, so the worker should claim everything that was requested.
@@ -275,16 +290,16 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
         future: Future[int] = self._launch_pool.submit(
             self._wait_and_launch,
             sky_task=sky_task,
-            cluster_name=cluster_name,
+            managed_job_name=managed_job_name,
             dependencies=dependencies,
             label=label,
         )
         job.attach_launch_future(future)
         logger.info(
-            "Queued SkyPilot work unit %s (job_id=%s, cluster=%s, deps=%d).",
+            "Queued SkyPilot work unit %s (job_id=%s, managed_job_name=%s, deps=%d).",
             label,
             job_id,
-            cluster_name,
+            managed_job_name,
             len(dependencies),
         )
         return job
@@ -341,7 +356,7 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
         self,
         *,
         argv: list[str],
-        sky_resources,  # noqa: ANN001
+        sky_resources: object,
         num_nodes: int,
         snapshot: CloudSnapshot,
         payload_filename: str,
@@ -384,15 +399,17 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
     def _wait_and_launch(
         self,
         *,
-        sky_task,  # noqa: ANN001
-        cluster_name: str,
+        sky_task: object,
+        managed_job_name: str,
         dependencies: set[SkyPilotJob],
         label: str,
     ) -> int:
-        """Block on dependency completion, then provision + launch on a new cluster.
+        """Block on dependency completion, then submit a managed job.
 
-        Runs in the launcher thread pool. Concurrent calls for independent
-        work units provision their clusters in parallel.
+        Runs in the launcher thread pool. Concurrent calls for
+        independent work units submit to the managed-jobs controller in
+        parallel; the controller itself parallelizes cluster
+        provisioning across submissions.
         """
         for dep in dependencies:
             dep.wait()
@@ -400,20 +417,13 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
                 msg = f"Dependency {dep.label} failed before {label} could launch."
                 raise RuntimeError(msg)
 
-        import sky
+        import sky.jobs
 
-        logger.info("sky.launch starting for %s on cluster %s.", label, cluster_name)
-        result = sky.launch(
-            sky_task,
-            cluster_name=cluster_name,
-            down=True,
-            idle_minutes_to_autostop=self.idle_minutes_to_autostop or None,
-            detach_run=True,
-            stream_logs=False,
-        )
-        sky_job_id = _extract_job_id(result)
-        logger.info("sky.launch returned job_id=%s for %s.", sky_job_id, label)
-        return sky_job_id
+        logger.info("sky.jobs.launch starting for %s (name=%s).", label, managed_job_name)
+        result = sky.jobs.launch(sky_task, name=managed_job_name, detach_run=True, stream_logs=False)
+        managed_job_id = _extract_managed_job_id(result)
+        logger.info("sky.jobs.launch returned managed_job_id=%s for %s.", managed_job_id, label)
+        return managed_job_id
 
 
 def _constant_assigned_resources(
@@ -431,15 +441,19 @@ def _constant_assigned_resources(
     return assigned
 
 
-# SkyPilot job statuses observed in the wild. ``sky.queue`` returns objects
-# with a ``status`` field that's typically a ``sky.JobStatus`` enum, whose
-# ``.value`` is the canonical string. Both shapes are handled.
-_SKY_STATE_MAP: dict[str, JobState] = {
-    "INIT": "pending",
+# Managed-job statuses reported by ``sky.jobs.queue``. A managed job
+# stays in RECOVERING / RETRYING during transient failures; misen
+# folds those into ``running`` since the controller will eventually
+# resolve them. Only terminal failures map to ``failed``.
+_MANAGED_STATE_MAP: dict[str, JobState] = {
     "PENDING": "pending",
+    "SUBMITTED": "pending",
+    "STARTING": "pending",
+    "PROVISIONING": "pending",
     "SETTING_UP": "pending",
     "RUNNING": "running",
     "RECOVERING": "running",
+    "RETRYING": "running",
     "SUCCEEDED": "done",
     "FAILED": "failed",
     "FAILED_DRIVER": "failed",
@@ -452,38 +466,39 @@ _SKY_STATE_MAP: dict[str, JobState] = {
 }
 
 
-def _query_cluster_states(cluster_name: str) -> dict[int, JobState]:
-    """Query SkyPilot for the cluster's current job states.
+def _query_managed_job_states() -> dict[int, JobState]:
+    """Snapshot every managed job's current state in one ``sky.jobs.queue`` call.
 
-    Returns a mapping of ``sky_job_id -> normalized state``. Returns an
-    empty dict if the cluster is no longer known to SkyPilot (e.g. it
-    was already torn down) — callers map this to ``"unknown"``.
+    The managed-jobs controller exposes one global queue for the user's
+    account, so we don't need a per-cluster query. Returns
+    ``managed_job_id -> normalized JobState``; callers map missing ids to
+    ``"unknown"``.
     """
-    import sky
+    import sky.jobs
 
     try:
-        rows = sky.queue(cluster_name)
+        rows = sky.jobs.queue(refresh=False)
     except (ValueError, RuntimeError):
         return {}
 
     states: dict[int, JobState] = {}
     for row in rows:
-        sky_job_id = row.get("job_id") if isinstance(row, dict) else getattr(row, "job_id", None)
+        managed_job_id = row.get("job_id") if isinstance(row, dict) else getattr(row, "job_id", None)
         raw_status = row.get("status") if isinstance(row, dict) else getattr(row, "status", None)
-        if sky_job_id is None or raw_status is None:
+        if managed_job_id is None or raw_status is None:
             continue
         status_str = getattr(raw_status, "value", None) or str(raw_status)
-        states[int(sky_job_id)] = _SKY_STATE_MAP.get(status_str.upper(), "unknown")
+        states[int(managed_job_id)] = _MANAGED_STATE_MAP.get(status_str.upper(), "unknown")
     return states
 
 
-def _extract_job_id(result: object) -> int:
-    """Pull the SkyPilot job id out of ``sky.launch``'s return value.
+def _extract_managed_job_id(result: object) -> int:
+    """Pull the managed-job id out of ``sky.jobs.launch``'s return value.
 
     SkyPilot's API has shifted shape across versions: older releases
     returned ``(job_id, handle)``, newer releases sometimes return a
-    request id or just a handle with the job id attached. We accept the
-    common shapes.
+    request id resolvable via ``sky.get`` or just the bare id. Accept
+    the common shapes.
     """
     if isinstance(result, tuple) and len(result) >= 1 and isinstance(result[0], int):
         return result[0]
@@ -492,7 +507,7 @@ def _extract_job_id(result: object) -> int:
     job_id = getattr(result, "job_id", None)
     if isinstance(job_id, int):
         return job_id
-    msg = f"Unrecognized sky.launch return shape: {result!r}"
+    msg = f"Unrecognized sky.jobs.launch return shape: {result!r}"
     raise RuntimeError(msg)
 
 
