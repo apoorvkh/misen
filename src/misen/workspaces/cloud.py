@@ -18,7 +18,7 @@ import tempfile
 import threading
 from collections.abc import Iterator, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TextIO, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Self, TextIO, TypeAlias, TypeVar, cast
 
 import msgspec
 import obstore as obs
@@ -412,6 +412,8 @@ class _LiveLogUploader:
 
 class CloudWorkspace(Workspace):
     """Workspace backed by S3, GCS, or Azure Blob via obstore."""
+
+    supports_remote_executor: ClassVar[bool] = True
 
     backend: CloudBackend
     bucket: str

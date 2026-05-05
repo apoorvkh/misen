@@ -59,6 +59,14 @@ class Workspace(Configurable):
         "memory": "misen.workspaces.memory:InMemoryWorkspace",
     }
 
+    # Capability flag: True for workspaces whose state lives in durable
+    # off-machine storage and can be re-opened on a remote node from the
+    # same configuration (e.g. cloud object stores). Remote executors that
+    # ship work to other hosts (SkyPilot, future K8s/SSH backends) check
+    # this to refuse workspaces that only exist on the orchestrator's
+    # local filesystem.
+    supports_remote_executor: ClassVar[bool] = False
+
     def _post_init(
         self,
         resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash],

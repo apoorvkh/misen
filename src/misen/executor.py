@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Executor", "Job", "JobState", "bulk_job_states"]
 
-ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
+ExecutorType: TypeAlias = Literal["local", "in_process", "slurm", "skypilot"]
 JobState: TypeAlias = Literal["pending", "running", "done", "failed", "unknown"]
 _VALID_JOB_STATES: frozenset[JobState] = frozenset({"pending", "running", "done", "failed", "unknown"})
 JobT = TypeVar("JobT", bound="Job")
@@ -64,6 +64,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
         "local": "misen.executors.local:LocalExecutor",
         "in_process": "misen.executors.in_process:InProcessExecutor",
         "slurm": "misen.executors.slurm:SlurmExecutor",
+        "skypilot": "misen.executors.skypilot:SkyPilotExecutor",
     }
 
     def submit(

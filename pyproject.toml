@@ -28,6 +28,10 @@ dependencies = [
   "tyro>=1.0.0",
 ]
 
+[project.optional-dependencies]
+# SkyPilot-backed executor for cloud / on-prem clusters via SkyPilot.
+skypilot = ["skypilot>=0.7.0"]
+
 [project.scripts]
 misen = "misen.cli:main"
 
@@ -63,7 +67,11 @@ ignore = [
 convention = "google"
 
 [[tool.ty.overrides]]
-include = ["src/misen/utils/hashing/libs/**", "src/misen/utils/serde/libs/**"]
+include = [
+  "src/misen/utils/hashing/libs/**",
+  "src/misen/utils/serde/libs/**",
+  "src/misen/executors/skypilot.py",  # `sky` is an optional dep
+]
 
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"

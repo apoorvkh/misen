@@ -22,8 +22,8 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from functools import cache
 from itertools import chain
-from pathlib import Path
-from typing import TYPE_CHECKING
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, ClassVar
 
 import cloudpickle
 import uv
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
-__all__ = ["LocalSnapshot", "NullSnapshot", "Snapshot", "apply_env_files_temporarily"]
+__all__ = ["CloudSnapshot", "LocalSnapshot", "NullSnapshot", "Snapshot", "apply_env_files_temporarily"]
 
 # CLI flag the worker entrypoint accepts (matches ``execute.execute``'s
 # ``job_log_path`` parameter). Defined here rather than in
@@ -402,6 +402,194 @@ class LocalSnapshot(Snapshot):
                     with contextlib.suppress(OSError):
                         dst.chmod(0o600)
         return env_files
+
+
+class CloudSnapshot(Snapshot):
+    """Environment snapshot for execution on a remote cloud cluster.
+
+    Unlike :class:`LocalSnapshot`, this snapshot does not pre-build a uv
+    virtual environment locally — a venv built for the orchestrator's
+    platform (e.g. macOS arm64) cannot run on a typical Linux x86_64
+    cluster. Instead, this snapshot stages just the project *manifest*
+    (``pyproject.toml`` + ``uv.lock``, optional ``pixi.toml`` +
+    ``pixi.lock``, and any ``.env`` / ``.env.local`` files) into a known
+    local layout, plus per-job cloudpickle payloads.
+
+    A remote executor (e.g. ``SkyPilotExecutor``) is responsible for
+    shipping the staged dir to the cluster (typically via SkyPilot's
+    ``file_mounts``), running ``uv sync`` there as a setup step, and
+    invoking the argv returned by :meth:`prepare_job` — which is
+    parameterized by ``REMOTE_*`` paths so the worker knows where to
+    read its payload and write its log on the cluster.
+
+    Project source code that lives outside ``pyproject.toml`` (e.g.
+    workspace member packages) is shipped separately by the executor
+    via SkyPilot's ``workdir`` so ``.gitignore`` filtering applies
+    naturally.
+    """
+
+    # Deterministic remote layout. Executors mount the matching local
+    # subdir at each path. ``~`` expands on the cluster, not on the
+    # orchestrator -- we never open these paths locally.
+    REMOTE_ROOT: ClassVar[PurePosixPath] = PurePosixPath("~/.misen")
+    REMOTE_MANIFEST_DIR: ClassVar[PurePosixPath] = REMOTE_ROOT / "manifest"
+    REMOTE_PAYLOAD_DIR: ClassVar[PurePosixPath] = REMOTE_ROOT / "payloads"
+    REMOTE_LOG_DIR: ClassVar[PurePosixPath] = REMOTE_ROOT / "job_logs"
+
+    # Manifest files copied from CWD if they exist. Order matters for
+    # ``--env-file``: later files override earlier ones, matching
+    # :func:`apply_env_files_temporarily`.
+    _MANIFEST_FILES: ClassVar[tuple[str, ...]] = (
+        "pyproject.toml",
+        "uv.lock",
+        "pixi.toml",
+        "pixi.lock",
+    )
+    _ENV_FILE_NAMES: ClassVar[tuple[str, ...]] = (".env", ".env.local")
+
+    __slots__ = (
+        "manifest_dir",
+        "payload_dir",
+        "snapshot_dir",
+        "staged_env_files",
+        "staged_pixi",
+    )
+
+    def __init__(self, snapshots_dir: Path) -> None:
+        """Stage manifest + env files into a fresh snapshot directory.
+
+        Args:
+            snapshots_dir: Parent directory where snapshots are stored.
+
+        Raises:
+            FileNotFoundError: If ``pyproject.toml`` is not present in CWD.
+            RuntimeError: If a partial pixi setup is detected (lock without
+                manifest, or pypi entries in pixi.lock).
+        """
+        self.snapshot_dir = snapshots_dir / token_base32(6)
+        self.snapshot_dir.mkdir(parents=True)
+        self.manifest_dir = self.snapshot_dir / "manifest"
+        self.manifest_dir.mkdir()
+        self.payload_dir = self.snapshot_dir / "payloads"
+        self.payload_dir.mkdir()
+
+        cwd = Path.cwd()
+        if not (cwd / "pyproject.toml").exists():
+            msg = (
+                f"CloudSnapshot requires a pyproject.toml in CWD ({cwd}), "
+                "since the remote cluster runs `uv sync` against the staged manifest."
+            )
+            raise FileNotFoundError(msg)
+
+        for name in self._MANIFEST_FILES:
+            src = cwd / name
+            if src.exists():
+                shutil.copy(src, self.manifest_dir / name)
+
+        # Validate pixi consistency, matching LocalSnapshot._snapshot_conda
+        # contract: lock without manifest, or pypi entries in lock, are
+        # configuration errors that should fail fast on the orchestrator.
+        staged_lock = self.manifest_dir / "pixi.lock"
+        staged_manifest = self.manifest_dir / "pixi.toml"
+        if staged_lock.exists() and not staged_manifest.exists():
+            msg = "Found pixi.lock but no pixi.toml next to it."
+            raise RuntimeError(msg)
+        if staged_lock.exists():
+            _check_pixi_lock_for_pypi(staged_lock)
+        self.staged_pixi = staged_lock.exists() and staged_manifest.exists()
+
+        self.staged_env_files: list[str] = []
+        for name in self._ENV_FILE_NAMES:
+            src = cwd / name
+            if not src.exists():
+                continue
+            dst = self.manifest_dir / name
+            shutil.copy(src, dst)
+            if name == ".env.local":
+                with contextlib.suppress(OSError):
+                    dst.chmod(0o600)
+            self.staged_env_files.append(name)
+
+    def cleanup(self) -> None:
+        """Remove the local snapshot directory tree."""
+        shutil.rmtree(self.snapshot_dir, ignore_errors=True)
+
+    def prepare_job(
+        self,
+        work_unit: WorkUnit,
+        workspace: Workspace,
+        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
+        gpu_runtime: GpuRuntime,
+        *,
+        bind_gpu_env: bool = True,
+    ) -> tuple[str, list[str], dict[str, str], Path]:
+        """Write a per-job payload and return a remote-targeted argv.
+
+        The returned ``argv`` references paths under :attr:`REMOTE_ROOT`
+        rather than local paths; the executor is responsible for ensuring
+        the matching local subdirectories arrive at those remote paths
+        (e.g. via SkyPilot's ``file_mounts``).
+
+        ``log_path`` is the *remote* file the worker will write to, not
+        a local file the orchestrator can open. The orchestrator reads
+        logs back through ``workspace.read_task_log`` (which fetches
+        from durable storage); this return value is informational.
+
+        Args:
+            work_unit: Work unit to execute.
+            workspace: Workspace for payload/log paths.
+            assigned_resources_getter: Callable returning runtime resources for
+                task sentinel injection and worker binding.
+            gpu_runtime: Runtime environment for GPU resources.
+            bind_gpu_env: Whether the worker should apply GPU visibility
+                environment variables from assigned resources.
+
+        Returns:
+            Tuple ``(job_id, argv, env_overrides, remote_log_path)``.
+        """
+        job_id = token_base32(6)
+
+        payload_path = self.payload_dir / f"{job_id}.pkl"
+        payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
+        encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
+
+        remote_payload = self.REMOTE_PAYLOAD_DIR / f"{job_id}.pkl"
+        log_filename = f"{work_unit.root.task_hash().b32()}_{job_id}.log"
+        remote_log_path = self.REMOTE_LOG_DIR / log_filename
+        remote_env_files = [self.REMOTE_MANIFEST_DIR / name for name in self.staged_env_files]
+
+        argv: list[str] = []
+        if self.staged_pixi:
+            argv += [
+                "pixi",
+                "run",
+                "--no-progress",
+                "--color",
+                "never",
+                "--frozen",
+                "--manifest-path",
+                str(self.REMOTE_MANIFEST_DIR / "pixi.toml"),
+                "-x",
+                "--",
+            ]
+        argv += [
+            "uv",
+            "run",
+            "--no-project",
+            *chain.from_iterable(("--env-file", str(path)) for path in remote_env_files),
+            "-m",
+            "misen.utils.execute",
+            "--payload",
+            str(remote_payload),
+            "--assigned-resources-getter",
+            encoded_getter,
+            "--gpu-runtime",
+            gpu_runtime,
+            *(["--no-bind-gpu-env"] if not bind_gpu_env else []),
+            JOB_LOG_PATH_ARG,
+            str(remote_log_path),
+        ]
+        return job_id, argv, {}, Path(str(remote_log_path))
 
 
 @contextmanager
