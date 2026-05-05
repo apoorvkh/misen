@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 from functools import cache, partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import msgspec
@@ -21,7 +22,6 @@ from misen.utils.snapshot import LocalSnapshot, NullSnapshot
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from pathlib import Path
 
     from misen.task_metadata import GpuRuntime
     from misen.utils.work_unit import WorkUnit
@@ -128,6 +128,7 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
     default_flags: dict[str, _SetValue] = msgspec.field(default_factory=dict)
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
     snapshot: bool = True
+    snapshots_dir: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize untyped config into msgspec structs."""
@@ -136,7 +137,10 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot | NullSnapshot:
         """Return a local snapshot for this workspace, or ``NullSnapshot`` when disabled."""
-        return self._make_local_snapshot(workspace=workspace) if self.snapshot else NullSnapshot()
+        if not self.snapshot:
+            return NullSnapshot()
+        snapshots_dir = Path(self.snapshots_dir) if self.snapshots_dir is not None else None
+        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir)
 
     def _dispatch(
         self,
