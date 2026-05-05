@@ -51,6 +51,7 @@ def fake_sky(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespace]
             self.kwargs = kwargs
             self.resources: object | None = None
             self.file_mounts: dict[str, str] | None = None
+            self.storage_mounts: dict[str, object] | None = None
             self.num_nodes = 1
 
         def set_resources(self, r: object) -> None:
@@ -58,6 +59,17 @@ def fake_sky(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespace]
 
         def set_file_mounts(self, m: dict[str, str]) -> None:
             self.file_mounts = dict(m)
+
+        def set_storage_mounts(self, m: dict[str, object]) -> None:
+            self.storage_mounts = dict(m)
+
+    class _Storage:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class _StorageMode:
+        MOUNT = "MOUNT"
+        COPY = "COPY"
 
     managed_launches: list[dict[str, Any]] = []
     managed_queue: list[dict[str, Any]] = []
@@ -79,6 +91,8 @@ def fake_sky(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespace]
 
     sky.Resources = _Resources  # type: ignore[attr-defined]
     sky.Task = _Task  # type: ignore[attr-defined]
+    sky.Storage = _Storage  # type: ignore[attr-defined]
+    sky.StorageMode = _StorageMode  # type: ignore[attr-defined]
     sky.clouds = types.SimpleNamespace(CLOUD_REGISTRY=_CloudRegistry())  # type: ignore[attr-defined]
     sky.jobs = sky_jobs  # type: ignore[attr-defined]
     sky_jobs.launch = _jobs_launch  # type: ignore[attr-defined]
@@ -333,6 +347,66 @@ def test_skypilot_job_bulk_state_uses_one_queue_call_for_many_jobs() -> None:
     assert states[jobs[2]] == "failed"
     assert states[jobs[3]] == "pending"
     assert states[jobs[4]] == "unknown"
+
+
+def test_persistent_caches_become_storage_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_sky: types.SimpleNamespace
+) -> None:
+    project = _stage_project(tmp_path / "project")
+    monkeypatch.chdir(project)
+
+    from misen.executors.skypilot import SkyPilotExecutor
+
+    executor = SkyPilotExecutor(
+        persistent_caches={
+            "~/.cache/huggingface": "misen-hf",
+            "~/.cache/uv": "misen-uv",
+        }
+    )
+    snap = CloudSnapshot(snapshots_dir=tmp_path / "snapshots")
+    try:
+        # Stage a payload so _build_sky_task has a file to mount.
+        (snap.payload_dir / "fake.pkl").write_bytes(b"x")
+        task = executor._build_sky_task(  # noqa: SLF001
+            argv=["echo", "hello"],
+            sky_resources=fake_sky.module.Resources(cpus="1+"),
+            num_nodes=1,
+            snapshot=snap,
+            payload_filename="fake.pkl",
+        )
+
+        assert task.storage_mounts is not None
+        assert set(task.storage_mounts) == {"~/.cache/huggingface", "~/.cache/uv"}
+        hf_storage = task.storage_mounts["~/.cache/huggingface"]
+        assert hf_storage.kwargs["name"] == "misen-hf"
+        assert hf_storage.kwargs["persistent"] is True
+        assert hf_storage.kwargs["mode"] == "MOUNT"
+    finally:
+        snap.cleanup()
+
+
+def test_no_storage_mounts_when_persistent_caches_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_sky: types.SimpleNamespace
+) -> None:
+    project = _stage_project(tmp_path / "project")
+    monkeypatch.chdir(project)
+
+    from misen.executors.skypilot import SkyPilotExecutor
+
+    executor = SkyPilotExecutor()
+    snap = CloudSnapshot(snapshots_dir=tmp_path / "snapshots")
+    try:
+        (snap.payload_dir / "fake.pkl").write_bytes(b"x")
+        task = executor._build_sky_task(  # noqa: SLF001
+            argv=["echo", "hello"],
+            sky_resources=fake_sky.module.Resources(cpus="1+"),
+            num_nodes=1,
+            snapshot=snap,
+            payload_filename="fake.pkl",
+        )
+        assert task.storage_mounts is None
+    finally:
+        snap.cleanup()
 
 
 def test_skypilot_job_state_failed_when_launch_future_raises() -> None:

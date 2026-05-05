@@ -210,11 +210,28 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
     envs: dict[str, str] = msgspec.field(default_factory=dict)
     max_concurrent_launches: int = 4
 
+    # Persistent cross-job caches: maps a path on the cluster to a SkyPilot
+    # Storage name. Each entry becomes a ``sky.Storage(name=..., persistent=True,
+    # mode=MOUNT)`` mounted at the path, so that data written by one job (model
+    # weights, wheel caches, etc.) is visible to every future job that mounts
+    # the same Storage name. Typical entries:
+    #   {"~/.cache/huggingface": "misen-hf",
+    #    "~/.cache/uv": "misen-uv"}
+    # The HF case lets jobs share downloaded models. The uv case lets ``uv
+    # sync`` skip wheel downloads on every cluster, so setup drops from minutes
+    # to seconds for cached projects -- without trying to mount the venv
+    # itself, which would be fragile across heterogeneous instance types.
+    # Storage names are namespaced per-user in SkyPilot's account; pick names
+    # that won't collide with other projects.
+    persistent_caches: dict[str, str] = msgspec.field(default_factory=dict)
+
     def __post_init__(self) -> None:
         """Lazily load SkyPilot, validate config, build a launcher pool."""
         try:
-            import sky  # noqa: F401
-            import sky.jobs  # noqa: F401
+            import sky
+            import sky.jobs
+
+            _ = (sky, sky.jobs)
         except ImportError as exc:
             msg = (
                 "SkyPilotExecutor requires the SkyPilot package. "
@@ -394,6 +411,17 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
             str(remote_payload): str(local_payload),
         }
         task.set_file_mounts(file_mounts)
+
+        # Persistent caches: each entry becomes a SkyPilot Storage that's
+        # provisioned once and re-mounted on every future cluster, so model
+        # downloads and wheel caches survive across jobs.
+        if self.persistent_caches:
+            storage_mounts = {
+                path: sky.Storage(name=name, persistent=True, mode=sky.StorageMode.MOUNT)
+                for path, name in self.persistent_caches.items()
+            }
+            task.set_storage_mounts(storage_mounts)
+
         return task
 
     def _wait_and_launch(
