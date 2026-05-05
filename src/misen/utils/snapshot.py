@@ -498,12 +498,8 @@ def _uv_execute_argv(
 
 def _indices_argv(flag: str, indices: list[int] | None) -> list[str]:
     """Render ``--<flag> i j k`` (or ``--no-<flag>`` for None / [])."""
-    if indices is None:
-        return [f"--no-{flag}"]
-    if not indices:
-        # Tyro can't disambiguate "empty list" from "flag not given", so we
-        # treat empty as "no binding" too.
-        return [f"--no-{flag}"]
+    if indices is None or len(indices) == 0:
+        return []
     return [f"--{flag}", *(str(i) for i in indices)]
 
 
