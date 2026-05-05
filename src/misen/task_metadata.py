@@ -51,7 +51,6 @@ class Resources(TypedDict, total=False):
 
     Attributes:
         time: Requested wall-clock time in minutes, if known.
-        nodes: Number of nodes required.
         memory: Memory in GiB.
         cpus: CPU cores.
         gpus: GPU count.
@@ -60,7 +59,6 @@ class Resources(TypedDict, total=False):
     """
 
     time: int
-    nodes: int
     memory: int
     cpus: int
     gpus: int
@@ -70,7 +68,6 @@ class Resources(TypedDict, total=False):
 
 _DEFAULT_RESOURCES: Resources = {
     "time": 60,
-    "nodes": 1,
     "memory": 8,
     "cpus": 1,
     "gpus": 0,
@@ -113,7 +110,6 @@ def aggregate_resources(resources: Iterable[Resources]) -> Resources:
 
     return Resources(
         time=sum(r["time"] for r in resource_list),
-        nodes=max(r["nodes"] for r in resource_list),
         memory=max(r["memory"] for r in resource_list),
         cpus=max(r["cpus"] for r in resource_list),
         gpus=max(r["gpus"] for r in resource_list),

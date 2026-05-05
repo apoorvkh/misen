@@ -8,13 +8,10 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from misen.utils.assigned_resources import select_local_assigned_resources
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from misen.task_metadata import GpuRuntime
-    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 
 __all__ = ["apply_resource_binding"]
 
@@ -42,45 +39,32 @@ _DYNAMIC_THREAD_DISABLE_ENV = {
 
 
 def apply_resource_binding(
-    assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
+    cpu_indices: list[int] | None,
+    gpu_indices: list[int] | None,
     gpu_runtime: GpuRuntime,
-    *,
-    bind_gpu_env: bool = True,
 ) -> None:
-    """Bind current process to assigned resources (CPU/GPU/threading)."""
-    local = select_local_assigned_resources(assigned_resources)
-    env_overrides = _binding_env_overrides(local=local, gpu_runtime=gpu_runtime, bind_gpu_env=bind_gpu_env)
+    """Bind current process to assigned resources.
 
-    for key, value in env_overrides.items():
+    Each resource type is bound only when the executor passes explicit indices.
+    Backends that delegate isolation to a scheduler (e.g. ``SlurmExecutor``,
+    where SLURM cgroups already mask GPUs and pin CPU affinity) pass ``None``
+    so the worker leaves the inherited environment untouched. The runtime view
+    (``CUDA_VISIBLE_DEVICES``, ``os.sched_getaffinity``) is the standardized
+    interface user code reads to discover its allotment.
+    """
+    for key, value in _DYNAMIC_THREAD_DISABLE_ENV.items():
         os.environ[key] = value
 
-    if local is not None:
-        _apply_cpu_affinity(local["cpu_indices"])
-
-
-def _binding_env_overrides(
-    local: AssignedResources | None,
-    gpu_runtime: GpuRuntime,
-    *,
-    bind_gpu_env: bool,
-) -> dict[str, str]:
-    """Compute process-environment overrides for assigned resources."""
-    env = dict(_DYNAMIC_THREAD_DISABLE_ENV)
-    if local is None:
-        return env
-
-    cpu_count = len(local["cpu_indices"])
-    if cpu_count > 0:
-        cpu_count_str = str(cpu_count)
+    if cpu_indices is not None:
+        cpu_count_str = str(len(cpu_indices))
         for key in _CPU_THREAD_CAP_VARS:
-            env[key] = cpu_count_str
+            os.environ[key] = cpu_count_str
+        _apply_cpu_affinity(cpu_indices)
 
-    if bind_gpu_env:
-        gpu_mask = ",".join(str(index) for index in local["gpu_indices"])
+    if gpu_indices is not None:
+        gpu_mask = ",".join(str(index) for index in gpu_indices)
         for key in _GPU_MASK_VARS[gpu_runtime]:
-            env[key] = gpu_mask
-
-    return env
+            os.environ[key] = gpu_mask
 
 
 def _apply_cpu_affinity(cpu_indices: list[int]) -> None:

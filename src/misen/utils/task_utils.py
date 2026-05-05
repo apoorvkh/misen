@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from rich.console import Console as RichConsole
 
 from misen.exceptions import HashError
-from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE, SCRATCH_DIR
+from misen.sentinels import SCRATCH_DIR
 from misen.task_metadata import Resources
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashing import ResultHash, TaskHash
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
     from misen.task_metadata import TaskMetadata
     from misen.tasks import Task
-    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.workspace import Workspace
 
 __all__ = [
@@ -93,7 +92,7 @@ def hash_task_arguments(
         if isinstance(value, Task):
             return cast("TaskHash | ResultHash", leaf_representation(value))
 
-        if value is ASSIGNED_RESOURCES or value is ASSIGNED_RESOURCES_PER_NODE or value is SCRATCH_DIR:
+        if value is SCRATCH_DIR:
             msg = "Resolved task arguments cannot contain sentinel values."
             raise RuntimeError(msg)
 
@@ -161,7 +160,6 @@ def _merge_task_resources(left: Resources, right: Resources) -> Resources:
 
     return Resources(
         time=None if left["time"] is None or right["time"] is None else max(left["time"], right["time"]),
-        nodes=max(left["nodes"], right["nodes"]),
         memory=max(left["memory"], right["memory"]),
         cpus=max(left["cpus"], right["cpus"]),
         gpus=max(left["gpus"], right["gpus"]),
@@ -195,7 +193,6 @@ def execute_task(
     task: Task[R],
     workspace: Workspace,
     dependency_results: dict[Task[Any], Any],
-    assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
     job_id: str,
     log_task: Task[Any] | None = None,
 ) -> tuple[R, Path | None]:
@@ -205,7 +202,6 @@ def execute_task(
         task: Task to execute.
         workspace: Workspace for logs/artifacts.
         dependency_results: Precomputed dependency results.
-        assigned_resources: Optional runtime resources for sentinel injection.
         job_id: Job id for task-log grouping.
         log_task: Task identity to use for log storage. This can differ from
             ``task`` when a work unit executes an internal copy with resolved
@@ -218,7 +214,6 @@ def execute_task(
         task=task,
         workspace=workspace,
         dependency_results=dependency_results,
-        assigned_resources=assigned_resources,
     )
 
     resolved_args = tuple(argument_resolver(value) for value in task.args)
@@ -312,7 +307,6 @@ def _build_argument_resolver(
     task: Task[Any],
     workspace: Workspace,
     dependency_results: dict[Task[Any], Any],
-    assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
 ) -> tuple[Callable[[Any], Any], Path | None]:
     """Build argument resolver for runtime task execution.
 
@@ -320,12 +314,11 @@ def _build_argument_resolver(
         task: Task being executed.
         workspace: Workspace providing scratch-dir and cached dependency access.
         dependency_results: Immediate dependency result map.
-        assigned_resources: Optional runtime resource assignment (single-node or multi-node).
 
     Returns:
         Tuple of:
         - callable mapping arbitrary nested argument structures into runtime
-          values (dependency outputs, scratch dirs, assigned resources)
+          values (dependency outputs, scratch dirs)
         - runtime scratch directory if ``SCRATCH_DIR`` is requested
     """
     from misen.tasks import Task
@@ -346,8 +339,6 @@ def _build_argument_resolver(
     def argument_resolver(value: Any) -> Any:
         if value is SCRATCH_DIR:
             return scratch_dir()
-        if value is ASSIGNED_RESOURCES or value is ASSIGNED_RESOURCES_PER_NODE:
-            return assigned_resources
         return map_nested_leaves(
             value,
             lambda leaf: dependency_results[leaf] if isinstance(leaf, Task) else leaf,

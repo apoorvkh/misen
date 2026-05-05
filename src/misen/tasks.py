@@ -21,7 +21,6 @@ executor for dependency-aware concurrent scheduling.
 
 from __future__ import annotations
 
-import itertools
 import logging
 import shutil
 from contextlib import nullcontext
@@ -29,7 +28,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, Unpack, cast
 
 from misen.exceptions import CacheError
-from misen.sentinels import ASSIGNED_RESOURCES, ASSIGNED_RESOURCES_PER_NODE
 from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object, task_function_signature
@@ -45,7 +43,6 @@ if TYPE_CHECKING:
     from types import BuiltinFunctionType, FunctionType
 
     from misen.executor import Executor, Job
-    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.graph import DependencyGraph
     from misen.utils.locks import LockLike
     from misen.workspace import Workspace
@@ -106,8 +103,6 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         self.meta: TaskMetadata = resolve_task_metadata(func)
         self.resources: Resources = self.meta.resolve_resources(*self.args, **self.kwargs)
 
-        self._validate_arguments(self.resources)
-
         self.dependencies: frozenset[Task[Any]] = collect_task_dependencies(self.args, self.kwargs)
         self._task_hash: TaskHash = self.task_hash()
 
@@ -167,8 +162,6 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         Raises:
             TypeError: If an override names a field not on :class:`Resources`.
-            ValueError: If the resulting ``resources["nodes"]`` is incompatible
-                with sentinel arguments already bound to this task.
         """
         invalid = set(overrides) - set(Resources.__annotations__)
         if invalid:
@@ -176,32 +169,12 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             raise TypeError(msg)
         new_resources = cast("Resources", {**self.resources, **overrides})
 
-        self._validate_arguments(new_resources)
-
         state = self.__getstate__()
         state["resources"] = new_resources
         state["_frozen"] = True
         new: Task[R] = object.__new__(Task)
         new.__setstate__(state)
         return new
-
-    def _validate_arguments(self, resources: Resources) -> None:
-        """Validate bound task arguments against the given :class:`Resources`.
-
-        Currently checks that ``ASSIGNED_RESOURCES*`` sentinels in the bound
-        arguments are consistent with ``resources["nodes"]``.
-
-        Raises:
-            ValueError: If a single-node sentinel is used with ``nodes > 1``
-                or a multi-node sentinel is used with ``nodes == 1``.
-        """
-        values = tuple(itertools.chain(self.args, self.kwargs.values()))
-        if resources["nodes"] > 1 and ASSIGNED_RESOURCES in values:
-            msg = "ASSIGNED_RESOURCES cannot be used when resources['nodes'] > 1; use ASSIGNED_RESOURCES_PER_NODE."
-            raise ValueError(msg)
-        if resources["nodes"] == 1 and ASSIGNED_RESOURCES_PER_NODE in values:
-            msg = "ASSIGNED_RESOURCES_PER_NODE cannot be used when resources['nodes'] == 1; use ASSIGNED_RESOURCES."
-            raise ValueError(msg)
 
     def __repr__(self) -> str:
         """Return a Python-call-like representation of the task."""
@@ -335,7 +308,6 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         compute_if_uncached: bool = False,
         compute_uncached_deps: bool = False,
         _job_id: str | None = None,
-        _assigned_resources: AssignedResources | AssignedResourcesPerNode | None = None,
         _log_task: Task[Any] | None = None,
     ) -> R:
         """Compute (or retrieve) this Task's result.
@@ -347,7 +319,6 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             compute_uncached_deps: Whether to recursively compute uncached
                 dependencies.
             _job_id: Optional executor job identifier for log grouping.
-            _assigned_resources: Optional runtime resources injected by executor.
             _log_task: Optional original task to use for runtime log identity.
 
         Returns:
@@ -412,7 +383,6 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 compute_if_uncached=True,
                 compute_uncached_deps=True,
                 _job_id=_job_id,
-                _assigned_resources=_assigned_resources,
             )
             for dependency in self.dependencies
         }
@@ -428,7 +398,6 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 task=self,
                 workspace=workspace,
                 dependency_results=dependency_results,
-                assigned_resources=_assigned_resources,
                 job_id=_job_id,
                 log_task=_log_task,
             )

@@ -137,7 +137,7 @@ def test_slurm_bulk_state_handles_empty_input() -> None:
     assert SlurmJob.bulk_state([]) == {}
 
 
-def test_slurm_dispatch_preserves_scheduler_gpu_env(monkeypatch, tmp_path) -> None:
+def test_slurm_dispatch_delegates_resource_isolation_to_slurm(monkeypatch, tmp_path) -> None:
     work_unit = WorkUnit(root=Task(_slurm_test_task, x=0), dependencies=set())
     workspace = cast("Workspace", MagicMock(spec=Workspace))
     snapshot = MagicMock()
@@ -158,7 +158,10 @@ def test_slurm_dispatch_preserves_scheduler_gpu_env(monkeypatch, tmp_path) -> No
         snapshot=snapshot,
     )
 
-    assert snapshot.prepare_job.call_args.kwargs["bind_gpu_env"] is False
+    # SLURM cgroups already mask GPUs and pin CPU affinity, so the worker
+    # leaves the inherited environment alone.
+    assert snapshot.prepare_job.call_args.kwargs["cpu_indices"] is None
+    assert snapshot.prepare_job.call_args.kwargs["gpu_indices"] is None
 
 
 @pytest.mark.parametrize(
