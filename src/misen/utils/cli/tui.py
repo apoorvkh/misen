@@ -358,6 +358,7 @@ def _run_textual_task_monitor(
                 earlier = [line for line in self.scrollable_lines if line < current]
                 target = max(earlier) if earlier else min(self.scrollable_lines)
             self.cursor_line = target
+            self.scroll_to_line(target, animate=False)
 
         async def _on_click(self, event: Any) -> None:
             # Textual dispatches ``_on_click`` along the entire MRO, so the
@@ -953,6 +954,7 @@ def _run_textual_task_monitor(
             if target is not None and target.tree_node.line >= 0:
                 tree = self.query_one("#task-tree", _FilteredTree)
                 tree.cursor_line = target.tree_node.line
+                tree.scroll_to_line(target.tree_node.line, animate=False)
 
         def _reset_log(self) -> None:
             self._log_key = None
