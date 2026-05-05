@@ -2,18 +2,13 @@
 
 import pytest
 
-from misen import ASSIGNED_RESOURCES_PER_NODE, Resources, Task, meta
+from misen import Resources, Task, meta
 from misen.utils.work_unit import build_work_graph
 
 
 @meta(id="noop_task", cache=False, resources=Resources(gpus=1, gpu_memory=16))
 def noop_task(x: int) -> int:
     return x
-
-
-@meta(id="multinode_task", cache=False, exclude={"x"}, resources={"nodes": 2, "gpus": 1})
-def multinode_task(x: object) -> None:
-    _ = x
 
 
 @meta(id="resource_override_dependency", cache=True, resources={"cpus": 1})
@@ -70,12 +65,6 @@ def test_with_resources_rejects_unknown_field() -> None:
     task = Task(noop_task, x=1)
     with pytest.raises(TypeError):
         task.with_resources(not_a_field=1)  # ty:ignore[unknown-argument]
-
-
-def test_with_resources_rejects_per_node_sentinel_when_nodes_collapse_to_one() -> None:
-    task = Task(multinode_task, x=ASSIGNED_RESOURCES_PER_NODE)
-    with pytest.raises(ValueError, match=r"ASSIGNED_RESOURCES_PER_NODE"):
-        task.with_resources(nodes=1)
 
 
 def test_dependency_collection_merges_resource_overrides_for_equal_tasks() -> None:

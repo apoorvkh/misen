@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from misen.executor import Executor, Job
-from misen.utils.assigned_resources import AssignedResources
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -479,20 +478,15 @@ class _LocalScheduler:
         return progress_made
 
     def _launch_job(self, job: LocalJob, *, cpu_indices: list[int], gpu_indices: list[int]) -> None:
-        assigned_resources = AssignedResources(
-            cpu_indices=cpu_indices,
-            gpu_indices=gpu_indices,
-            memory=job.resources["memory"],
-            gpu_memory=job.resources["gpu_memory"],
-        )
         log_fp: FileIO | None = None
         process: subprocess.Popen[bytes] | None = None
         try:
             job.job_id, argv, env_overrides, job.log_path = job.snapshot.prepare_job(
                 work_unit=job.work_unit,
                 workspace=job.workspace,
-                assigned_resources_getter=lambda r=assigned_resources: r,
                 gpu_runtime=job.resources["gpu_runtime"],
+                cpu_indices=cpu_indices,
+                gpu_indices=gpu_indices,
             )
             log_fp = job.log_path.open("ab", buffering=0)
             self._logger.debug(

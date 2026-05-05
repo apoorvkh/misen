@@ -70,7 +70,7 @@ def test_work_unit_downstream_task_log_uses_resolved_hash(tmp_path) -> None:
     sink_task = Task(log_task_sink, value=source_task.T)
     work_unit = WorkUnit(root=sink_task, dependencies=set())
 
-    WorkUnit.execute(work_unit.graph, workspace=workspace, job_id="job-live", assigned_resources=None)
+    WorkUnit.execute(work_unit.graph, workspace=workspace, job_id="job-live")
 
     key = sink_task.resolved_hash(workspace=workspace).b32()
     log_path = tmp_path / ".misen-work-unit-task-logs" / "task_logs" / key[:2] / f"{key}_job-live.log"

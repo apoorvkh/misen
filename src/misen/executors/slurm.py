@@ -4,26 +4,22 @@ from __future__ import annotations
 
 import logging
 import operator
-import os
-import re
 import shlex
 import shutil
 import subprocess
-from functools import cache, partial
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import msgspec
 
 from misen.executor import Executor, Job, JobState
-from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import LocalSnapshot, NullSnapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
-    from misen.task_metadata import GpuRuntime
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -159,10 +155,10 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
             "--parsable",
             "--job-name",
             f"misen-{work_unit.root.task_hash().short_b32()}",
+            "--nodes",
+            "1",
             "--ntasks-per-node",
             "1",
-            "--nodes",
-            str(resources["nodes"]),
             "--cpus-per-task",
             str(resources["cpus"]),
             "--mem",
@@ -206,15 +202,16 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
         if dependencies:
             sbatch_cmd.extend(["--dependency", f"afterok:{':'.join(job.slurm_job_id for job in dependencies)}"])
 
-        assigned_resources_getter = (
-            _assigned_resources_slurm_per_node if resources["nodes"] > 1 else _assigned_resources_slurm
-        )
+        # SLURM cgroups already mask GPUs and pin CPU affinity for the job
+        # step, so the worker leaves the inherited environment alone — user
+        # code reads ``CUDA_VISIBLE_DEVICES`` / ``os.sched_getaffinity`` to
+        # discover its allotment.
         job_id, argv, env_overrides, log_path = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,
-            assigned_resources_getter=partial(assigned_resources_getter, gpu_runtime=resources["gpu_runtime"]),
             gpu_runtime=resources["gpu_runtime"],
-            bind_gpu_env=False,
+            cpu_indices=None,
+            gpu_indices=None,
         )
 
         # ``argv`` already carries ``--job-log-path`` so the worker can
@@ -253,7 +250,7 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
 
 
 _State = Literal["pending", "running", "done", "failed", "unknown"]
-_ResourceKey: TypeAlias = Literal["time", "nodes", "memory", "cpus", "gpus", "gpu_memory", "gpu_runtime"]
+_ResourceKey: TypeAlias = Literal["time", "memory", "cpus", "gpus", "gpu_memory", "gpu_runtime"]
 _OperatorName: TypeAlias = Literal["eq", "ne", "lt", "le", "gt", "ge", "contains", "is_", "is_not"]
 _SetValue: TypeAlias = str | int | float | bool | None | list[str]
 
@@ -378,184 +375,3 @@ def _normalize_slurm_state(raw: str) -> JobState:
     """Strip SLURM annotations like ``"CANCELLED+"`` / ``"CANCELLED by 1"`` and map to misen state."""
     head = raw.upper().split("+", maxsplit=1)[0].split(":", maxsplit=1)[0].split(None, 1)[0]
     return _SLURM_STATE_MAP.get(head, "unknown")
-
-
-_GPU_VISIBLE_ENV_BY_RUNTIME = {
-    "cuda": ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"),
-    "rocm": ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"),
-    "xpu": ("ZE_AFFINITY_MASK",),
-}
-
-
-def _assigned_resources_slurm(
-    env: Mapping[str, str] | None = None,
-    *,
-    gpu_runtime: GpuRuntime = "cuda",
-) -> AssignedResources:
-    """Parse node-local resources from SLURM environment variables."""
-    env = os.environ if env is None else env
-
-    cpu_indices = _parse_numeric_indices(env.get("SLURM_CPU_BIND_LIST"))
-    cpu_count = None
-    for key in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE", "SLURM_JOB_CPUS_PER_NODE"):
-        if match := re.search(r"\d+", env.get(key, "")):
-            cpu_count = int(match.group(0))
-            break
-    if cpu_count is None and cpu_indices:
-        cpu_count = len(cpu_indices)
-    if not cpu_indices and cpu_count is not None:
-        cpu_indices = list(range(cpu_count))
-
-    gpu_visible = _runtime_gpu_visible_env(env=env, gpu_runtime=gpu_runtime) or next(
-        (value for key in ("SLURM_STEP_GPUS", "SLURM_JOB_GPUS") if (value := env.get(key))),
-        None,
-    )
-    gpu_indices = _parse_numeric_indices(gpu_visible)
-    gpu_count = None
-    for key in ("SLURM_GPUS_PER_TASK", "SLURM_GPUS_ON_NODE"):
-        if match := re.search(r"\d+", env.get(key, "")):
-            gpu_count = int(match.group(0))
-            break
-
-    uuid_count = sum(
-        1 for token in re.split(r"[,\s]+", (gpu_visible or "").strip()) if token.upper().startswith(("GPU-", "MIG-"))
-    )
-    if gpu_count is None:
-        gpu_count = len(gpu_indices) or uuid_count or None
-    if not gpu_indices and gpu_count is not None and uuid_count == 0:
-        gpu_indices = list(range(gpu_count))
-
-    return AssignedResources(
-        cpu_indices=cpu_indices,
-        gpu_indices=gpu_indices,
-        memory=_parse_slurm_memory_to_gib(
-            next((value for key in ("SLURM_MEM_PER_NODE", "SLURM_MEM_PER_CPU") if (value := env.get(key))), None)
-        ),
-        gpu_memory=_parse_slurm_memory_to_gib(env.get("SLURM_MEM_PER_GPU")),
-    )
-
-
-def _assigned_resources_slurm_per_node(
-    env: Mapping[str, str] | None = None,
-    *,
-    gpu_runtime: GpuRuntime = "cuda",
-) -> AssignedResourcesPerNode:
-    """Parse host -> resources from SLURM environment variables."""
-    env = os.environ if env is None else env
-    hostnames = _expand_slurm_nodelist(
-        next(
-            (
-                value
-                for key in ("SLURM_STEP_NODELIST", "SLURM_JOB_NODELIST", "SLURM_NODELIST")
-                if (value := env.get(key))
-            ),
-            None,
-        )
-    )
-    if not hostnames and (hostname := env.get("SLURMD_NODENAME")):
-        hostnames = (hostname,)
-
-    resources = _assigned_resources_slurm(env, gpu_runtime=gpu_runtime)
-    return {
-        hostname: AssignedResources(
-            cpu_indices=[*resources["cpu_indices"]],
-            gpu_indices=[*resources["gpu_indices"]],
-            memory=resources["memory"],
-            gpu_memory=resources["gpu_memory"],
-        )
-        for hostname in hostnames
-    }
-
-
-def _runtime_gpu_visible_env(env: Mapping[str, str], gpu_runtime: GpuRuntime) -> str | None:
-    """Return the scheduler-provided runtime GPU visibility mask, if present."""
-    return next((value for key in _GPU_VISIBLE_ENV_BY_RUNTIME[gpu_runtime] if (value := env.get(key))), None)
-
-
-def _parse_slurm_memory_to_gib(value: str | None) -> int | None:
-    """Parse a SLURM memory token as GiB, rounding up."""
-    if not value or not (value := value.strip().upper()):
-        return None
-
-    match = re.fullmatch(r"(\d+)\s*([KMGT]?)(?:I?B)?", value)
-    if match is None:
-        match = re.search(r"\d+", value)
-        return None if match is None else (int(match.group(0)) + 1023) // 1024
-
-    amount = int(match.group(1))
-    match match.group(2):
-        case "":
-            return (amount + 1023) // 1024
-        case "K":
-            return max(1, (amount + 1024 * 1024 - 1) // (1024 * 1024))
-        case "M":
-            return max(1, (amount + 1023) // 1024)
-        case "G":
-            return amount
-        case "T":
-            return amount * 1024
-    return None
-
-
-def _parse_numeric_indices(value: str | None) -> list[int]:
-    """Parse comma/space-delimited index tokens and ranges like ``0,2-4``."""
-    if not value:
-        return []
-
-    indices: list[int] = []
-    seen: set[int] = set()
-    for token in (token for token in re.split(r"[,\s]+", value.strip()) if token):
-        if token.upper().startswith(("GPU-", "MIG-")):
-            continue
-        for start_s, end_s in re.findall(r"(\d+)(?:-(\d+))?", token):
-            start = int(start_s)
-            end = int(end_s) if end_s else start
-            step = 1 if end >= start else -1
-            for index in range(start, end + step, step):
-                if index not in seen:
-                    seen.add(index)
-                    indices.append(index)
-    return indices
-
-
-def _expand_slurm_nodelist(nodelist: str | None) -> tuple[str, ...]:
-    """Expand a SLURM node-list expression into hostnames."""
-    if not nodelist:
-        return ()
-
-    hosts: list[str] = []
-    for token in _split_top_level_csv(nodelist):
-        match = re.fullmatch(r"([^\[\],]*)(?:\[([^\]]+)\])?([^\[\],]*)", token)
-        if match is None or match.group(2) is None:
-            hosts.append(token)
-            continue
-
-        prefix, body, suffix = match.groups()
-        for part in _split_top_level_csv(body):
-            if range_match := re.fullmatch(r"(\d+)-(\d+)", part):
-                start_s, end_s = range_match.groups()
-                width = max(len(start_s), len(end_s))
-                start, end = int(start_s), int(end_s)
-                step = 1 if end >= start else -1
-                hosts.extend(f"{prefix}{index:0{width}d}{suffix}" for index in range(start, end + step, step))
-            else:
-                hosts.append(f"{prefix}{part}{suffix}")
-    return tuple(hosts)
-
-
-def _split_top_level_csv(value: str) -> list[str]:
-    """Split CSV while respecting bracket nesting."""
-    parts: list[str] = []
-    depth = start = 0
-    for index, char in enumerate(value):
-        if char == "[":
-            depth += 1
-        elif char == "]":
-            depth = max(0, depth - 1)
-        elif char == "," and depth == 0:
-            if part := value[start:index].strip():
-                parts.append(part)
-            start = index + 1
-    if tail := value[start:].strip():
-        parts.append(tail)
-    return parts

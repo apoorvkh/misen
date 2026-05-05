@@ -185,9 +185,15 @@ Declare what a task needs:
 def train(lr: float, dim: int) -> nn.Module: ...
 ```
 
-Defaults: 1 node, 1 CPU, 8 GiB RAM, 0 GPUs. Fields: `time`, `nodes`, `memory`, `cpus`, `gpus`, `gpu_memory`, `gpu_runtime` (`"cuda" | "rocm" | "xpu"`).
+Defaults: 1 CPU, 8 GiB RAM, 0 GPUs. Fields: `time`, `memory`, `cpus`, `gpus`, `gpu_memory`, `gpu_runtime` (`"cuda" | "rocm" | "xpu"`).
 
-At runtime, `misen` allocates at least the resources you request and binds them to the task process — CPU cores by affinity, GPU indices via the specified runtime (e.g. visible to `torch.cuda.device`). If you need the explicit index lists, pass `ASSIGNED_RESOURCES` or `ASSIGNED_RESOURCES_PER_NODE` as arguments.
+At runtime, `misen` allocates at least the resources you request and binds them to the task process. `LocalExecutor` masks GPUs via `CUDA_VISIBLE_DEVICES` and pins CPU affinity; `SlurmExecutor` lets SLURM's cgroups handle isolation. Either way, your task code reads the same runtime view — `os.sched_getaffinity(0)` for CPU cores, `range(torch.cuda.device_count())` for GPUs.
+
+CPU affinity and cgroup membership are inherited by children, so subprocesses (`subprocess`, `multiprocessing`) and native threading libraries automatically stay within the allotment. Three patterns to keep in mind:
+
+- **Sizing:** `os.cpu_count()` reports the whole machine. Use `len(os.sched_getaffinity(0))` for pool sizes, `n_jobs`, DataLoader workers, etc.
+- **Native threading libs (OpenMP, MKL, OpenBLAS, …):** `LocalExecutor` exports `OMP_NUM_THREADS` and friends to match the assignment. `SlurmExecutor` touches nothing — if you want OpenMP saturation matched to your CPU request, either configure your cluster's `srun` to propagate `SLURM_CPUS_PER_TASK → OMP_NUM_THREADS`, or set it yourself early in the task: `os.environ.setdefault("OMP_NUM_THREADS", str(len(os.sched_getaffinity(0))))`.
+- **Libraries that reset affinity at import** (some MKL/NumPy builds, certain CUDA runtimes): re-pin after the offending import with `os.sched_setaffinity(0, os.sched_getaffinity(0))`.
 
 Pass `SCRATCH_DIR: Path` as an argument for a per-task scratch directory. It persists across runs for `cache=True` tasks (useful for checkpointing against preemption) and is ephemeral otherwise.
 
