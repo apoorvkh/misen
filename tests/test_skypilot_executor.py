@@ -70,6 +70,7 @@ def fake_sky(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespace]
     class _StorageMode:
         MOUNT = "MOUNT"
         COPY = "COPY"
+        MOUNT_CACHED = "MOUNT_CACHED"
 
     managed_launches: list[dict[str, Any]] = []
     managed_queue: list[dict[str, Any]] = []
@@ -380,7 +381,7 @@ def test_persistent_caches_become_storage_mounts(
         hf_storage = task.storage_mounts["~/.cache/huggingface"]
         assert hf_storage.kwargs["name"] == "misen-hf"
         assert hf_storage.kwargs["persistent"] is True
-        assert hf_storage.kwargs["mode"] == "MOUNT"
+        assert hf_storage.kwargs["mode"] == "MOUNT_CACHED"
     finally:
         snap.cleanup()
 

@@ -212,9 +212,12 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
 
     # Persistent cross-job caches: maps a path on the cluster to a SkyPilot
     # Storage name. Each entry becomes a ``sky.Storage(name=..., persistent=True,
-    # mode=MOUNT)`` mounted at the path, so that data written by one job (model
-    # weights, wheel caches, etc.) is visible to every future job that mounts
-    # the same Storage name. Typical entries:
+    # mode=MOUNT_CACHED)`` mounted at the path, so that data written by one job
+    # (model weights, wheel caches, etc.) is visible to every future job that
+    # mounts the same Storage name. ``MOUNT_CACHED`` adds a local-SSD cache
+    # layer over the FUSE mount, which materially helps the import-heavy
+    # access patterns of HF and uv caches without losing writeback.
+    # Typical entries:
     #   {"~/.cache/huggingface": "misen-hf",
     #    "~/.cache/uv": "misen-uv"}
     # The HF case lets jobs share downloaded models. The uv case lets ``uv
@@ -414,10 +417,11 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
 
         # Persistent caches: each entry becomes a SkyPilot Storage that's
         # provisioned once and re-mounted on every future cluster, so model
-        # downloads and wheel caches survive across jobs.
+        # downloads and wheel caches survive across jobs. MOUNT_CACHED layers
+        # a local-SSD cache over the FUSE mount for faster repeat reads.
         if self.persistent_caches:
             storage_mounts = {
-                path: sky.Storage(name=name, persistent=True, mode=sky.StorageMode.MOUNT)
+                path: sky.Storage(name=name, persistent=True, mode=sky.StorageMode.MOUNT_CACHED)
                 for path, name in self.persistent_caches.items()
             }
             task.set_storage_mounts(storage_mounts)
