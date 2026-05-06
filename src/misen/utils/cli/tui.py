@@ -296,8 +296,6 @@ def _format_resources(resources: Resources | None) -> Text:
         if resources["gpu_memory"] is not None:
             text.append(f" ({resources['gpu_memory']} GiB)")
     text.append(f" · {resources['time']}m")
-    if resources["nodes"] > 1:
-        text.append(f" · {resources['nodes']} nodes")
     return text
 
 

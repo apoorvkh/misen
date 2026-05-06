@@ -66,11 +66,13 @@ changing cache format or lock semantics.
 Sentinel arguments are resolved at execution time:
 
 - `SCRATCH_DIR`
-- `ASSIGNED_RESOURCES`
-- `ASSIGNED_RESOURCES_PER_NODE`
 
-The same task definition can run locally or on SLURM with backend-specific
-resource assignment.
+To discover the resources allotted to a task at runtime, read what the
+runtime sees: `os.sched_getaffinity(0)` for CPU cores and the GPU runtime's
+visibility view (e.g. `range(torch.cuda.device_count())`). The same task
+definition runs locally or on SLURM — `LocalExecutor` masks GPUs via
+`CUDA_VISIBLE_DEVICES` and pins CPU affinity, while `SlurmExecutor` lets
+SLURM's cgroups handle isolation.
 
 ## Serialization
 

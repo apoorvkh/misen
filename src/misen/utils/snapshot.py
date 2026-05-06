@@ -7,7 +7,7 @@ subprocesses or on remote schedulers:
 - optional conda prefix (installed and activated via the ``pixi`` CLI from
   ``pixi.lock`` + ``pixi.toml``)
 - copied env files
-- serialized callable payloads and assigned-resource getters
+- serialized callable payloads
 """
 
 from __future__ import annotations
@@ -25,15 +25,13 @@ from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import cloudpickle
 import uv
 from dotenv import load_dotenv
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Iterator
 
     from misen.task_metadata import GpuRuntime
-    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -63,10 +61,10 @@ class Snapshot(ABC):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
         *,
-        bind_gpu_env: bool = True,
+        cpu_indices: list[int] | None,
+        gpu_indices: list[int] | None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command and environment for one work unit.
 
@@ -79,11 +77,13 @@ class Snapshot(ABC):
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log paths.
-            assigned_resources_getter: Callable returning runtime resources for
-                sentinel injection and worker CPU/GPU binding.
             gpu_runtime: Runtime environment for GPU resources.
-            bind_gpu_env: Whether the worker should apply GPU visibility
-                environment variables from assigned resources.
+            cpu_indices: CPU logical-core indices to bind in the worker via
+                ``os.sched_setaffinity``. Pass ``None`` when the scheduler
+                already pins CPUs (e.g. SLURM).
+            gpu_indices: GPU device indices to mask in the worker via the
+                runtime's visibility environment variables. Pass ``None`` when
+                the scheduler already masks GPUs (e.g. SLURM cgroups).
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -128,21 +128,21 @@ class NullSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
         *,
-        bind_gpu_env: bool = True,
+        cpu_indices: list[int] | None,
+        gpu_indices: list[int] | None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare argv to execute the payload via ``uv run --no-project``.
 
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log paths.
-            assigned_resources_getter: Callable returning runtime resources for
-                task sentinel injection and worker binding.
             gpu_runtime: Runtime environment for GPU resources.
-            bind_gpu_env: Whether the worker should apply GPU visibility
-                environment variables from assigned resources.
+            cpu_indices: CPU logical-core indices for worker affinity, or
+                ``None`` to leave inherited affinity untouched.
+            gpu_indices: GPU device indices for worker visibility, or ``None``
+                to leave inherited visibility untouched.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -155,7 +155,6 @@ class NullSnapshot(Snapshot):
 
         payload_path = self.payload_dir / f"{token_base32(6)}.pkl"
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
-        encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
 
         log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
         argv = [
@@ -163,9 +162,9 @@ class NullSnapshot(Snapshot):
             *_uv_execute_argv(
                 _active_env_files(),
                 payload_path,
-                encoded_getter,
                 gpu_runtime,
-                bind_gpu_env=bind_gpu_env,
+                cpu_indices=cpu_indices,
+                gpu_indices=gpu_indices,
             ),
             JOB_LOG_PATH_ARG,
             str(log_path),
@@ -222,21 +221,21 @@ class LocalSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
         *,
-        bind_gpu_env: bool = True,
+        cpu_indices: list[int] | None,
+        gpu_indices: list[int] | None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute serialized payload.
 
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log paths.
-            assigned_resources_getter: Callable returning runtime resources for
-                task sentinel injection and worker binding.
             gpu_runtime: Runtime environment for GPU resources.
-            bind_gpu_env: Whether the worker should apply GPU visibility
-                environment variables from assigned resources.
+            cpu_indices: CPU logical-core indices for worker affinity, or
+                ``None`` to leave inherited affinity untouched.
+            gpu_indices: GPU device indices for worker visibility, or ``None``
+                to leave inherited visibility untouched.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -251,14 +250,13 @@ class LocalSnapshot(Snapshot):
 
         payload_path = self.payload_dir / f"{token_base32(6)}.pkl"
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
-        encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
 
         argv += _uv_execute_argv(
             self.env_files,
             payload_path,
-            encoded_getter,
             gpu_runtime,
-            bind_gpu_env=bind_gpu_env,
+            cpu_indices=cpu_indices,
+            gpu_indices=gpu_indices,
         )
 
         log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
@@ -443,11 +441,6 @@ def token_base32(nbytes: int) -> str:
     return base64.b32encode(secrets.token_bytes(nbytes)).decode("ascii").rstrip("=")
 
 
-def _encode_cli_blob(payload: bytes) -> str:
-    """Encode binary payload for safe CLI transport."""
-    return base64.urlsafe_b64encode(payload).decode("ascii")
-
-
 def _check_pixi_lock_for_pypi(lock_path: Path) -> None:
     """Raise if ``pixi.lock`` contains PyPI entries.
 
@@ -476,10 +469,10 @@ def _uv_bin() -> str:
 def _uv_execute_argv(
     env_files: list[Path] | tuple[Path, ...],
     payload_path: Path,
-    encoded_getter: str,
     gpu_runtime: GpuRuntime,
     *,
-    bind_gpu_env: bool = True,
+    cpu_indices: list[int] | None,
+    gpu_indices: list[int] | None,
 ) -> list[str]:
     """Build the ``uv run --no-project -m misen.utils.execute ...`` argv.
 
@@ -496,12 +489,18 @@ def _uv_execute_argv(
         "misen.utils.execute",
         "--payload",
         str(payload_path),
-        "--assigned-resources-getter",
-        encoded_getter,
         "--gpu-runtime",
         gpu_runtime,
-        *(["--no-bind-gpu-env"] if not bind_gpu_env else []),
+        *_indices_argv("cpu-indices", cpu_indices),
+        *_indices_argv("gpu-indices", gpu_indices),
     ]
+
+
+def _indices_argv(flag: str, indices: list[int] | None) -> list[str]:
+    """Render ``--<flag> i j k`` (or ``--no-<flag>`` for None / [])."""
+    if indices is None or len(indices) == 0:
+        return []
+    return [f"--{flag}", *(str(i) for i in indices)]
 
 
 def _pixi_run_prefix(pixi_bin: str, manifest_path: Path) -> list[str]:

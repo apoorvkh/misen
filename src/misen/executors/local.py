@@ -13,10 +13,10 @@ import threading
 import time
 from bisect import insort
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from misen.executor import Executor, Job
-from misen.utils.assigned_resources import AssignedResources
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -179,6 +179,7 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
     num_xpu_gpus: int = 0
     xpu_gpu_indices: list[int] | None = None
     snapshot: bool = True
+    snapshots_dir: str | None = None
     enforce_time_limits: bool = False
 
     def __post_init__(self) -> None:
@@ -258,7 +259,10 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
 
     def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot | NullSnapshot:
         """Return a local snapshot for this workspace, or ``NullSnapshot`` when disabled."""
-        return self._make_local_snapshot(workspace=workspace) if self.snapshot else NullSnapshot()
+        if not self.snapshot:
+            return NullSnapshot()
+        snapshots_dir = Path(self.snapshots_dir) if self.snapshots_dir is not None else None
+        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir)
 
     def _dispatch(
         self,
@@ -474,20 +478,15 @@ class _LocalScheduler:
         return progress_made
 
     def _launch_job(self, job: LocalJob, *, cpu_indices: list[int], gpu_indices: list[int]) -> None:
-        assigned_resources = AssignedResources(
-            cpu_indices=cpu_indices,
-            gpu_indices=gpu_indices,
-            memory=job.resources["memory"],
-            gpu_memory=job.resources["gpu_memory"],
-        )
         log_fp: FileIO | None = None
         process: subprocess.Popen[bytes] | None = None
         try:
             job.job_id, argv, env_overrides, job.log_path = job.snapshot.prepare_job(
                 work_unit=job.work_unit,
                 workspace=job.workspace,
-                assigned_resources_getter=lambda r=assigned_resources: r,
                 gpu_runtime=job.resources["gpu_runtime"],
+                cpu_indices=cpu_indices,
+                gpu_indices=gpu_indices,
             )
             log_fp = job.log_path.open("ab", buffering=0)
             self._logger.debug(

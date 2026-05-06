@@ -268,10 +268,19 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             A Job handle that can be queried for execution state.
         """
 
-    def _make_local_snapshot(self, workspace: Workspace) -> LocalSnapshot:
-        """Create a fresh :class:`LocalSnapshot` rooted at workspace temp dir."""
-        snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
-        return LocalSnapshot(snapshots_dir=snapshots_dir)
+    def _make_local_snapshot(self, workspace: Workspace, snapshots_dir: Path | None = None) -> LocalSnapshot:
+        """Create a fresh :class:`LocalSnapshot`.
+
+        Args:
+            workspace: Workspace used to derive the default snapshot parent
+                directory when ``snapshots_dir`` is not provided.
+            snapshots_dir: Optional override for the parent directory under
+                which the per-snapshot directory is created. When ``None``,
+                snapshots are placed under ``workspace.get_temp_dir() / "snapshots"``.
+        """
+        if snapshots_dir is None:
+            snapshots_dir = workspace.get_temp_dir() / "snapshots"
+        return LocalSnapshot(snapshots_dir=snapshots_dir.resolve())
 
 
 class Job(ABC):
