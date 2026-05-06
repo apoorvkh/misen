@@ -54,7 +54,7 @@ class InProcessExecutor(Executor[CompletedJob, NullSnapshot]):
         task_graph.remove_node_by_value(union, cmp=is_, first=True)
 
         with apply_env_files_temporarily():
-            WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id, assigned_resources=None)
+            WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id)
 
         logger.info("InProcessExecutor finished executing %d task node(s).", len(list(task_graph.node_indices())))
         return DependencyGraph(), null_snapshot

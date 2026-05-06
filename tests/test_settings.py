@@ -171,7 +171,7 @@ class TestConfigurable:
 
         ws = Workspace.auto(settings=Settings(config_file=f))
         assert isinstance(ws, DiskWorkspace)
-        assert ws.directory == "custom_dir"
+        assert ws.directory == str((tmp_path / "custom_dir").resolve())
 
     def test_executor_auto_from_toml(self, tmp_path: Path) -> None:
         f = tmp_path / "cfg.toml"
@@ -220,4 +220,4 @@ class TestConfigurable:
 
         ws = Workspace.auto(settings=Settings(config_file=f))
         assert isinstance(ws, DiskWorkspace)
-        assert ws.directory == "from_defaults"
+        assert ws.directory == str((tmp_path / "from_defaults").resolve())

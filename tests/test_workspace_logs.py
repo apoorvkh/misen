@@ -1,5 +1,6 @@
 import sys
 
+import msgspec
 import pytest
 
 from misen import Task, meta
@@ -70,11 +71,47 @@ def test_work_unit_downstream_task_log_uses_resolved_hash(tmp_path) -> None:
     sink_task = Task(log_task_sink, value=source_task.T)
     work_unit = WorkUnit(root=sink_task, dependencies=set())
 
-    WorkUnit.execute(work_unit.graph, workspace=workspace, job_id="job-live", assigned_resources=None)
+    WorkUnit.execute(work_unit.graph, workspace=workspace, job_id="job-live")
 
     key = sink_task.resolved_hash(workspace=workspace).b32()
     log_path = tmp_path / ".misen-work-unit-task-logs" / "task_logs" / key[:2] / f"{key}_job-live.log"
     assert log_path.read_text(encoding="utf-8") == "sink 1\n"
+
+
+def test_disk_workspace_anchors_relative_directory_to_construction_cwd(tmp_path, monkeypatch) -> None:
+    """A worker that decodes a serialized workspace from a different CWD must
+    still resolve the directory to the orchestrator's path.
+
+    Reproduces the SLURM scenario where the worker lands in a CWD that
+    doesn't match the orchestrator's submit dir (auto-mount timing,
+    pixi/conda activation, ``--chdir`` defaults). With a relative
+    ``directory``, the worker would silently create a sibling ``.misen``
+    tree under its own CWD and write task logs there — invisible to the
+    parent.
+    """
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+
+    relative_name = ".misen-relative-anchor-test"
+    monkeypatch.chdir(project_dir)
+    workspace = DiskWorkspace(directory=relative_name)
+    expected = str((project_dir / relative_name).absolute())
+    assert workspace.directory == expected
+
+    # Round-trip via the same encoder used by cloudpickle for Configurable
+    # structs (see ``_reconstruct_struct``). The decoded instance must point
+    # at the orchestrator's directory regardless of the worker's CWD.
+    encoded = msgspec.msgpack.encode(workspace)
+    monkeypatch.chdir(other_dir)
+    decoded = msgspec.msgpack.decode(encoded, type=DiskWorkspace)
+    try:
+        assert decoded.directory == expected
+        assert not (other_dir / relative_name).exists()
+    finally:
+        decoded.close()
+        workspace.close()
 
 
 def test_disk_workspace_close_releases_lmdb_and_blocks_further_use(tmp_path) -> None:

@@ -20,7 +20,6 @@ from misen.utils.task_utils import build_task_dependency_graph
 
 if TYPE_CHECKING:
     from misen.tasks import Task
-    from misen.utils.assigned_resources import AssignedResources, AssignedResourcesPerNode
     from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
 
@@ -87,7 +86,6 @@ class WorkUnit:
         graph: DependencyGraph[Task[Any]],
         workspace: Workspace,
         job_id: str,
-        assigned_resources: AssignedResources | AssignedResourcesPerNode | None,
     ) -> None:
         """Execute tasks in dependency order for a task graph.
 
@@ -95,7 +93,6 @@ class WorkUnit:
             graph: Task dependency graph to execute.
             workspace: Workspace used for cache/log/storage operations.
             job_id: Job identifier propagated into task log naming.
-            assigned_resources: Runtime-assigned resources for sentinel injection.
         """
         from misen.tasks import Task
 
@@ -130,7 +127,6 @@ class WorkUnit:
                 compute_if_uncached=True,
                 compute_uncached_deps=False,
                 _job_id=job_id,
-                _assigned_resources=assigned_resources,
                 _log_task=task,
             )
 
@@ -148,7 +144,7 @@ class WorkUnit:
 
         Returns:
             Cloudpickle payload bytes containing ``{"workspace": ..., "fn": ...}``
-            where ``fn`` is a callable accepting ``assigned_resources=``.
+            where ``fn`` is a zero-arg callable.
         """
         return cloudpickle.dumps({
             "workspace": workspace,
