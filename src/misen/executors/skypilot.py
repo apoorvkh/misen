@@ -22,21 +22,19 @@ import logging
 import shlex
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import msgspec
 
 from misen.executor import Executor, Job, JobState
-from misen.utils.assigned_resources import AssignedResources
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import CloudSnapshot, token_base32
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
-    from misen.task_metadata import GpuRuntime, Resources
+    from misen.task_metadata import Resources
     from misen.utils.snapshot import Snapshot
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
@@ -209,6 +207,7 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
     setup_commands: list[str] = msgspec.field(default_factory=list)
     envs: dict[str, str] = msgspec.field(default_factory=dict)
     max_concurrent_launches: int = 4
+    snapshots_dir: str | None = None
 
     # Persistent cross-job caches: maps a path on the cluster to a SkyPilot
     # Storage name. Each entry becomes a ``sky.Storage(name=..., persistent=True,
@@ -260,7 +259,9 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
                 f"`supports_remote_executor=True`."
             )
             raise RuntimeError(msg)
-        snapshots_dir = (workspace.get_temp_dir() / "snapshots").resolve()
+        snapshots_dir = (
+            Path(self.snapshots_dir) if self.snapshots_dir is not None else workspace.get_temp_dir() / "snapshots"
+        ).resolve()
         snapshots_dir.mkdir(parents=True, exist_ok=True)
         return CloudSnapshot(snapshots_dir=snapshots_dir)
 
@@ -278,22 +279,16 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
 
         job = SkyPilotJob(work_unit=work_unit, managed_job_name=managed_job_name, workspace=workspace)
 
-        # ``assigned_resources`` is fixed: the cluster is dedicated to this
-        # one job, so the worker should claim everything that was requested.
-        assigned = AssignedResources(
-            cpu_indices=list(range(resources["cpus"])),
-            gpu_indices=list(range(resources["gpus"])),
-            memory=resources["memory"],
-            gpu_memory=resources["gpu_memory"],
-        )
+        # The cluster is dedicated to this one job, so the worker should
+        # claim everything available -- pass ``None`` for both index lists
+        # so it leaves inherited CPU affinity and GPU visibility alone,
+        # matching the SLURM-on-cgroups model.
         job_id, argv, _env_overrides, log_path = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,
-            assigned_resources_getter=partial(_constant_assigned_resources, assigned=assigned),
             gpu_runtime=resources["gpu_runtime"],
-            # SkyPilot already grants the worker access to all GPUs on the
-            # cluster; emitting CUDA_VISIBLE_DEVICES on top would mask them.
-            bind_gpu_env=False,
+            cpu_indices=None,
+            gpu_indices=None,
         )
         job.job_id = job_id
         job.log_path = log_path
@@ -302,7 +297,6 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
         sky_task = self._build_sky_task(
             argv=argv,
             sky_resources=sky_resources,
-            num_nodes=resources["nodes"],
             snapshot=snapshot,
             payload_filename=f"{job_id}.pkl",
         )
@@ -377,7 +371,6 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
         *,
         argv: list[str],
         sky_resources: object,
-        num_nodes: int,
         snapshot: CloudSnapshot,
         payload_filename: str,
     ) -> object:
@@ -400,8 +393,6 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
             workdir=str(Path.cwd()),
         )
         task.set_resources(sky_resources)
-        if num_nodes > 1:
-            task.num_nodes = num_nodes
 
         # File mounts ship the orchestrator's staged manifest + per-job
         # payload to the cluster. The manifest dir is mounted as a whole;
@@ -456,21 +447,6 @@ class SkyPilotExecutor(Executor[SkyPilotJob, CloudSnapshot]):
         managed_job_id = _extract_managed_job_id(result)
         logger.info("sky.jobs.launch returned managed_job_id=%s for %s.", managed_job_id, label)
         return managed_job_id
-
-
-def _constant_assigned_resources(
-    env: Mapping[str, str] | None = None,
-    *,
-    gpu_runtime: GpuRuntime = "cuda",  # noqa: ARG001
-    assigned: AssignedResources,
-) -> AssignedResources:
-    """Picklable getter that returns a pre-computed AssignedResources.
-
-    Defined at module scope (not a lambda or nested closure) so cloudpickle
-    can serialize it cheaply for transport in the work-unit payload.
-    """
-    _ = env
-    return assigned
 
 
 # Managed-job statuses reported by ``sky.jobs.queue``. A managed job

@@ -194,9 +194,9 @@ def test_cloud_snapshot_prepare_job_emits_remote_argv(
         job_id, argv, env_overrides, log_path = snap.prepare_job(
             work_unit=work_unit,
             workspace=ws,
-            assigned_resources_getter=lambda: None,
             gpu_runtime="cuda",
-            bind_gpu_env=False,
+            cpu_indices=None,
+            gpu_indices=None,
         )
 
         # job_id surfaces as the payload filename and the suffix of log filename.
@@ -211,10 +211,11 @@ def test_cloud_snapshot_prepare_job_emits_remote_argv(
         assert str(snap.REMOTE_MANIFEST_DIR / ".env") in argv_str
         # No pixi wrap when no pixi.toml was staged.
         assert "pixi" not in argv_str
-        # Worker entry, with --no-bind-gpu-env propagated.
+        # Worker entry; no per-index flags when cpu_indices/gpu_indices are None.
         assert "--payload" in argv
         assert "misen.utils.execute" in argv
-        assert "--no-bind-gpu-env" in argv
+        assert "--cpu-indices" not in argv
+        assert "--gpu-indices" not in argv
         # Returned log_path is the *remote* path (~/.misen/job_logs/...).
         assert str(snap.REMOTE_LOG_DIR) in str(log_path)
     finally:
@@ -371,7 +372,6 @@ def test_persistent_caches_become_storage_mounts(
         task = executor._build_sky_task(  # noqa: SLF001
             argv=["echo", "hello"],
             sky_resources=fake_sky.module.Resources(cpus="1+"),
-            num_nodes=1,
             snapshot=snap,
             payload_filename="fake.pkl",
         )
@@ -401,7 +401,6 @@ def test_no_storage_mounts_when_persistent_caches_unset(
         task = executor._build_sky_task(  # noqa: SLF001
             argv=["echo", "hello"],
             sky_resources=fake_sky.module.Resources(cpus="1+"),
-            num_nodes=1,
             snapshot=snap,
             payload_filename="fake.pkl",
         )

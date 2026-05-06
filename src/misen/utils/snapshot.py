@@ -516,10 +516,10 @@ class CloudSnapshot(Snapshot):
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        assigned_resources_getter: Callable[[], AssignedResources | AssignedResourcesPerNode | None],
         gpu_runtime: GpuRuntime,
         *,
-        bind_gpu_env: bool = True,
+        cpu_indices: list[int] | None,
+        gpu_indices: list[int] | None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Write a per-job payload and return a remote-targeted argv.
 
@@ -536,11 +536,13 @@ class CloudSnapshot(Snapshot):
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log paths.
-            assigned_resources_getter: Callable returning runtime resources for
-                task sentinel injection and worker binding.
             gpu_runtime: Runtime environment for GPU resources.
-            bind_gpu_env: Whether the worker should apply GPU visibility
-                environment variables from assigned resources.
+            cpu_indices: CPU logical-core indices for worker affinity, or
+                ``None`` to leave inherited affinity untouched. Pass ``None``
+                from a SkyPilot-style backend where the cluster is dedicated
+                to one job and the worker should claim everything.
+            gpu_indices: GPU device indices for worker visibility, or
+                ``None`` to leave inherited visibility untouched.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, remote_log_path)``.
@@ -549,7 +551,6 @@ class CloudSnapshot(Snapshot):
 
         payload_path = self.payload_dir / f"{job_id}.pkl"
         payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
-        encoded_getter = _encode_cli_blob(cloudpickle.dumps(assigned_resources_getter))
 
         remote_payload = self.REMOTE_PAYLOAD_DIR / f"{job_id}.pkl"
         log_filename = f"{work_unit.root.task_hash().b32()}_{job_id}.log"
@@ -579,11 +580,10 @@ class CloudSnapshot(Snapshot):
             "misen.utils.execute",
             "--payload",
             str(remote_payload),
-            "--assigned-resources-getter",
-            encoded_getter,
             "--gpu-runtime",
             gpu_runtime,
-            *(["--no-bind-gpu-env"] if not bind_gpu_env else []),
+            *_indices_argv("cpu-indices", cpu_indices),
+            *_indices_argv("gpu-indices", gpu_indices),
             JOB_LOG_PATH_ARG,
             str(remote_log_path),
         ]
