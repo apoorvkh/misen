@@ -274,21 +274,30 @@ class DiskWorkspace(Workspace):
 
     def __post_init__(self) -> None:
         """Create directory layout and initialize persistent caches."""
-        self._directory = Path(self.directory)
-        self._directory.mkdir(exist_ok=True)
+        # Lock to the absolute path at construction time so the msgpack-encoded
+        # field carries this CWD's resolution. Workers (esp. SLURM) decode in a
+        # CWD that doesn't always match the orchestrator's, so a relative
+        # directory would resolve to a different tree on the worker.
+        self.directory = str(Path(self.directory).absolute())
+        self._directory_path = Path(self.directory)
+        self._directory_path.mkdir(exist_ok=True)
         self.get_temp_dir().mkdir(parents=True, exist_ok=True)
-        (self._directory / "scratch").mkdir(parents=True, exist_ok=True)
-        (self._directory / "task_logs").mkdir(parents=True, exist_ok=True)
-        (self._directory / "job_logs").mkdir(parents=True, exist_ok=True)
+        (self._directory_path / "scratch").mkdir(parents=True, exist_ok=True)
+        (self._directory_path / "task_logs").mkdir(parents=True, exist_ok=True)
+        (self._directory_path / "job_logs").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
         (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
 
         super()._post_init(
-            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](self._directory / "resolved_hash_cache.mdb"),
-            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self._directory / "result_hash_cache.mdb"),
-            result_store=DiskResultStore(self._directory / "results"),
+            resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](
+                self._directory_path / "resolved_hash_cache.mdb"
+            ),
+            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](
+                self._directory_path / "result_hash_cache.mdb"
+            ),
+            result_store=DiskResultStore(self._directory_path / "results"),
         )
-        logger.info("Initialized DiskWorkspace at %s.", self._directory.resolve())
+        logger.info("Initialized DiskWorkspace at %s.", self._directory_path)
 
     def close(self) -> None:
         """Release LMDB environments backing the workspace caches.
@@ -325,7 +334,7 @@ class DiskWorkspace(Workspace):
 
     def get_temp_dir(self) -> Path:
         """Return workspace temporary directory path."""
-        return Path(self._directory) / "tmp"
+        return self._directory_path / "tmp"
 
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task.
@@ -337,7 +346,7 @@ class DiskWorkspace(Workspace):
             Per-task directory path keyed by resolved hash.
         """
         key_str = task.resolved_hash(workspace=self).b32()
-        d = Path(self._directory) / "scratch" / key_str[:2] / f"{key_str}"
+        d = self._directory_path / "scratch" / key_str[:2] / f"{key_str}"
         d.mkdir(parents=True, exist_ok=True)
         logger.debug("Resolved scratch dir for task %s: %s.", task, d)
         return d
@@ -349,7 +358,7 @@ class DiskWorkspace(Workspace):
         # cached; callers that may invoke this before deps complete should
         # expect ``CacheError``.
         key_str = task.resolved_hash(workspace=self).b32()
-        log_dir = Path(self._directory) / "task_logs" / key_str[:2]
+        log_dir = self._directory_path / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str
 
