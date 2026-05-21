@@ -159,7 +159,7 @@ def _merge_task_resources(left: Resources, right: Resources) -> Resources:
             raise ValueError(msg)
 
     return Resources(
-        time=None if left["time"] is None or right["time"] is None else max(left["time"], right["time"]),
+        time=max(left["time"], right["time"]),
         memory=max(left["memory"], right["memory"]),
         cpus=max(left["cpus"], right["cpus"]),
         gpus=max(left["gpus"], right["gpus"]),

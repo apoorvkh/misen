@@ -21,8 +21,8 @@ def _time_limited_task() -> int:
     return 1
 
 
-@meta(id="no_time_limit_local_task", cache=False)
-def _no_time_limit_task() -> int:
+@meta(id="default_resources_local_task", cache=False)
+def _default_resources_task() -> int:
     return 1
 
 
@@ -65,11 +65,11 @@ def test_local_executor_propagates_enforce_time_limits_to_scheduler() -> None:
     assert executor._scheduler.enforce_time_limits is True  # noqa: SLF001
 
 
-def test_time_limit_exceeded_returns_false_without_a_time_limit(tmp_path: Path) -> None:
-    job = _make_local_job(_no_time_limit_task, tmp_path)
+def test_time_limit_exceeded_applies_default_60min_limit_to_unannotated_task(tmp_path: Path) -> None:
+    job = _make_local_job(_default_resources_task, tmp_path)
     job._cached_state = "running"  # noqa: SLF001
-    job._started_at = time.monotonic() - 1_000_000  # noqa: SLF001
-    assert job.time_limit_exceeded() is False
+    job._started_at = time.monotonic() - 3601  # 60-minute default, 1s past  # noqa: SLF001
+    assert job.time_limit_exceeded() is True
 
 
 def test_time_limit_exceeded_returns_false_before_start(tmp_path: Path) -> None:
@@ -133,10 +133,10 @@ def test_scheduler_does_not_terminate_running_job_within_time_limit(tmp_path: Pa
     assert fake_process.terminate_calls == 0
 
 
-def test_scheduler_does_not_terminate_job_without_time_limit(tmp_path: Path) -> None:
+def test_scheduler_terminates_unannotated_task_past_default_60min_limit(tmp_path: Path) -> None:
     executor = LocalExecutor(enforce_time_limits=True)
-    job = _make_local_job(_no_time_limit_task, tmp_path)
-    job._started_at = time.monotonic() - 1_000_000  # noqa: SLF001
+    job = _make_local_job(_default_resources_task, tmp_path)
+    job._started_at = time.monotonic() - 3601  # 60-minute default, 1s past  # noqa: SLF001
     fake_process = _FakeProcess()
     _stage_running_job(executor, job, fake_process=fake_process)
 
@@ -145,4 +145,4 @@ def test_scheduler_does_not_terminate_job_without_time_limit(tmp_path: Path) -> 
         executor._scheduler._terminate_timed_out_locked()  # noqa: SLF001
         executor._scheduler._running.discard(job)  # noqa: SLF001
 
-    assert fake_process.terminate_calls == 0
+    assert fake_process.terminate_calls == 1

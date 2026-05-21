@@ -164,8 +164,7 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
             "--mem",
             f"{resources['memory']}G",
         ]
-        if resources["time"] is not None:
-            sbatch_cmd.extend(["--time", str(resources["time"])])
+        sbatch_cmd.extend(["--time", str(resources["time"])])
 
         flags = dict(self.default_flags)
         flags.update(

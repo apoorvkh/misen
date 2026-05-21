@@ -126,13 +126,10 @@ class LocalJob(Job):
 
     def time_limit_exceeded(self) -> bool:
         """Return True if a running job has exceeded its requested time limit."""
-        time_limit = self.resources["time"]
-        if time_limit is None:
-            return False
         with self._lock:
             if self._started_at is None or self._cached_state != "running":
                 return False
-            return time.monotonic() - self._started_at > time_limit * 60
+            return time.monotonic() - self._started_at > self.resources["time"] * 60
 
     def mark_failed(self) -> None:
         """Mark a pending/running job failed and close local handles."""

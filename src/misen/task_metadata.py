@@ -50,7 +50,7 @@ class Resources(TypedDict, total=False):
     """Resource requirements for executing a task.
 
     Attributes:
-        time: Requested wall-clock time in minutes, if known.
+        time: Requested wall-clock time in minutes.
         memory: Memory in GiB.
         cpus: CPU cores.
         gpus: GPU count.
@@ -79,9 +79,8 @@ _DEFAULT_RESOURCES: Resources = {
 def aggregate_resources(resources: Iterable[Resources]) -> Resources:
     """Combine multiple resource requests into one conservative request.
 
-    CPU/memory/GPU counts use ``max`` (pick the largest request), finite
-    runtimes are summed (``None`` if any request is unbounded), and
-    ``gpu_runtime`` must agree across GPU-using requests.
+    CPU/memory/GPU counts use ``max`` (pick the largest request), runtimes
+    are summed, and ``gpu_runtime`` must agree across GPU-using requests.
 
     Args:
         resources: Iterable of fully-populated :class:`Resources` to merge.
