@@ -401,9 +401,8 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 job_id=_job_id,
                 log_task=_log_task,
             )
-
-        save_task_result(task=self, result=result, workspace=workspace)
-        logger.debug("Persisted task result metadata for %s.", self)
+            save_task_result(task=self, result=result, workspace=workspace)
+            logger.debug("Persisted task result metadata for %s.", self)
         if scratch_dir is not None:
             if not self.meta.cache:
                 if scratch_dir.exists():

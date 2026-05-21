@@ -153,6 +153,9 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
                 txn.put(_key, _value)
+            # Force commit + meta-page flush
+            # Writer on another host cannot observe stale meta page after acquiring lock
+            self.env.sync(force=True)
 
     def __delitem__(self, key: KT) -> None:
         """Remove a key/value pair.
@@ -165,6 +168,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
                 success = txn.delete(_key)
+            self.env.sync(force=True)
         if not success:
             raise KeyError(key)
 
@@ -175,6 +179,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             with self.env.begin(write=True) as txn:
                 for _k, _ in txn.cursor():
                     txn.delete(_k)
+            self.env.sync(force=True)
 
 
 class DiskResultStore(MutableMapping[ResultHash, Path]):
@@ -292,9 +297,7 @@ class DiskWorkspace(Workspace):
             resolved_hash_cache=LMDBMapping[TaskHash, ResolvedTaskHash](
                 self._directory_path / "resolved_hash_cache.mdb"
             ),
-            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](
-                self._directory_path / "result_hash_cache.mdb"
-            ),
+            result_hash_cache=LMDBMapping[ResolvedTaskHash, ResultHash](self._directory_path / "result_hash_cache.mdb"),
             result_store=DiskResultStore(self._directory_path / "results"),
         )
         logger.info("Initialized DiskWorkspace at %s.", self._directory_path)
