@@ -33,7 +33,10 @@ misen = "misen.cli:main"
 
 [dependency-groups]
 dev = ["pytest==9.0.3", "ruff==0.15.10", "ty==0.0.31"]
-docs = ["mkdocstrings-python==2.0.1", "zensical==0.0.17"]
+docs = [
+    "mkdocstrings-python==2.0.1",
+    "zensical==0.0.43",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12"]
