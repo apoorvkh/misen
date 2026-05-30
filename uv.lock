@@ -411,7 +411,7 @@ requires-dist = [
     { name = "textual", specifier = ">=0.78.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "tyro", specifier = ">=1.0.0" },
-    { name = "uv", specifier = ">=0.11.6" },
+    { name = "uv", specifier = ">=0.11.15" },
     { name = "xxhash", specifier = ">=3.0.0" },
 ]
 
