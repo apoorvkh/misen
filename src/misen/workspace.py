@@ -76,7 +76,7 @@ class Workspace(Configurable):
         self._resolved_hashes: dict[TaskHash, ResolvedTaskHash] = {}
         self._result_hashes: dict[TaskHash, ResultHash] = {}
 
-        # Persistent caches/stores are backend-specific (e.g., LMDB + disk).
+        # Persistent caches/stores are backend-specific (e.g., sharded files on disk, cloud objects).
         self._resolved_hash_cache: MutableMapping[TaskHash, ResolvedTaskHash] = resolved_hash_cache
         self._result_hash_cache: MutableMapping[ResolvedTaskHash, ResultHash] = result_hash_cache
         self._result_map = ResultMap(result_store=result_store, workspace=self)

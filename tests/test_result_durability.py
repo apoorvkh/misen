@@ -1,6 +1,6 @@
 """Crash-safety tests for the result-commit ordering on :class:`DiskWorkspace`.
 
-Durability invariant: a ``resolved_hash -> result_hash`` mapping (the LMDB
+Durability invariant: a ``resolved_hash -> result_hash`` mapping (the durable
 pointer) may exist only if its payload is durably present. ``save_task_result``
 enforces this by committing the payload (atomic ``os.rename`` + parent fsync)
 *before* writing the pointer, so a ``scancel`` / SIGKILL at any instant leaves
@@ -38,7 +38,7 @@ def _consume(v: int) -> int:
 
 
 def _raise_setitem(self: Any, key: Any, value: Any) -> None:  # noqa: ARG001  -- matches __setitem__ shape
-    """Stand-in for the LMDB pointer write that dies mid-commit."""
+    """Stand-in for the durable pointer write that dies mid-commit."""
     msg = "simulated crash: interrupted before the pointer was durably written"
     raise RuntimeError(msg)
 
@@ -122,6 +122,30 @@ def test_disk_result_store_publishes_atomically(tmp_path: Path) -> None:
     (src2 / "data.bin").write_bytes(b"overwrite-me")
     store[key] = src2
     assert (store[key] / "data.bin").read_bytes() == b"hello"
+
+
+def test_disk_result_store_iterates_stored_results(tmp_path: Path) -> None:
+    """``__iter__``/``__len__`` round-trip the base32-named payload dirs and skip noise."""
+    store = DiskResultStore(tmp_path / "results")
+    keys = {ResultHash(0xABCDEF), ResultHash(0x1234), ResultHash(0xFFFFFFFFFFFFFFFF)}
+    for i, key in enumerate(sorted(keys)):
+        src = tmp_path / f"payload_{i}"
+        src.mkdir()
+        (src / "data.bin").write_bytes(b"x")
+        store[key] = src
+
+    # Noise that must be ignored, not yielded or counted:
+    sample = ResultHash(0x1234).b32()
+    # (1) a leftover ``.trash`` dir from an interrupted delete -- dots and
+    #     length put it outside the glob;
+    (store.directory / sample[:2] / f"{sample}.deadbeef.trash").mkdir()
+    # (2) a canonically-named dir under the wrong shard -- caught by the
+    #     shard-prefix check (a broken check would inflate ``len``).
+    (store.directory / "ZZ").mkdir()
+    (store.directory / "ZZ" / sample).mkdir()
+
+    assert set(store) == keys
+    assert len(store) == len(keys)
 
 
 def test_dependency_chain_leaves_no_dangling_mapping(tmp_path: Path) -> None:

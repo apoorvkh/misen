@@ -16,7 +16,6 @@ dependencies = [
   "xxhash>=3.0.0",
   # disk workspace
   "flufl-lock>=9.1.0",
-  "lmdb>=1.7.5",
   # cloud workspace
   "obstore>=0.9.4",
   # in-process executor

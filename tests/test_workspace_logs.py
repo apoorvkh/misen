@@ -5,9 +5,9 @@ import pytest
 
 from misen import Task, meta
 from misen.exceptions import CacheError
-from misen.utils.hashing import TaskHash
+from misen.utils.hashing import ResolvedTaskHash, TaskHash
 from misen.utils.work_unit import WorkUnit
-from misen.workspaces.disk import DiskWorkspace, LMDBMapping
+from misen.workspaces.disk import DiskWorkspace, FileKVMapping
 
 
 @meta(id="log_task_a", cache=True)
@@ -114,17 +114,24 @@ def test_disk_workspace_anchors_relative_directory_to_construction_cwd(tmp_path,
         workspace.close()
 
 
-def test_disk_workspace_close_releases_lmdb_and_blocks_further_use(tmp_path) -> None:
+def test_disk_workspace_close_is_idempotent_and_leaves_caches_readable(tmp_path) -> None:
+    """``close()`` is a no-op for the file backend: it never loses a handle or lock.
+
+    The file-backed caches hold nothing to release, so closing (repeatedly) must
+    not raise and the caches must still read afterward.
+    """
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen-close"))
     cache = workspace._resolved_hash_cache  # noqa: SLF001
-    assert isinstance(cache, LMDBMapping)
+    assert isinstance(cache, FileKVMapping)
+
+    sample_key = TaskHash.from_object(("close-test",))
+    cache[sample_key] = ResolvedTaskHash(0x1234)
 
     workspace.close()
     # Idempotent.
     workspace.close()
 
-    sample_key = TaskHash.from_object(("close-test",))
-    with pytest.raises(RuntimeError, match="closed"):
-        _ = sample_key in cache
-    with pytest.raises(RuntimeError, match="closed"):
-        _ = len(cache)
+    # Nothing was released, so reads still succeed after close.
+    assert sample_key in cache
+    assert cache[sample_key] == ResolvedTaskHash(0x1234)
+    assert len(cache) == 1
