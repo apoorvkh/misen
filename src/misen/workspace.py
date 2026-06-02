@@ -429,23 +429,42 @@ class ResultMap(MutableMapping[Task[Any], Any]):
     def __setitem__(self, key: Task[R], value: R, /) -> None:
         """Persist result for the given task.
 
+        Derives the content-addressed ``result_hash`` from the task's stored
+        pointer. Prefer :meth:`store` on the write path where the hash is
+        already known, so the payload can be committed before the pointer.
+
         Args:
             key: Task key.
             value: Computed result value.
         """
-        result_hash = key.result_hash(workspace=self.workspace)
+        self.store(key, value, key.result_hash(workspace=self.workspace))
+
+    def store(self, task: Task[R], value: R, result_hash: ResultHash) -> None:
+        """Persist ``value`` at the content-addressed location for ``result_hash``.
+
+        ``result_hash`` is supplied explicitly rather than read back from the
+        workspace pointer so the payload can be committed *before* the durable
+        ``resolved_hash -> result_hash`` pointer exists. This is what lets
+        :func:`misen.utils.task_utils.save_task_result` order the payload ahead
+        of the pointer and so never strand a pointer without its payload.
+
+        Args:
+            task: Task whose serializer materializes the payload.
+            value: Computed result value.
+            result_hash: Content-addressed identity the payload is stored under.
+        """
         with self.workspace.lock(namespace="result", key=result_hash.b32()).context(blocking=True, timeout=None):
             if result_hash in self.result_store:
-                logger.debug("Result store already has payload for task %s.", key)
+                logger.debug("Result store already has payload for task %s.", task)
                 return
             tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
             tmp_dir.mkdir(parents=True, exist_ok=True)
             try:
-                serde.save(value, tmp_dir, ser_cls=key.meta.serializer)
+                serde.save(value, tmp_dir, ser_cls=task.meta.serializer)
                 # ``result_store[...] = tmp_dir`` moves the directory into the
                 # store; tmp_dir is consumed on success.
                 self.result_store[result_hash] = tmp_dir
-                logger.debug("Stored cached result for task %s at %s.", key, tmp_dir)
+                logger.debug("Stored cached result for task %s at %s.", task, tmp_dir)
             finally:
                 # Always sweep the temp dir. Normally it has already been moved
                 # into the store (``FileNotFoundError`` -- suppressed below),

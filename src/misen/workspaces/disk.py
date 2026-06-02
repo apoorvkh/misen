@@ -155,7 +155,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
                 txn.put(_key, _value)
             # Force commit + meta-page flush
             # Writer on another host cannot observe stale meta page after acquiring lock
-            self.env.sync(force=True)
+            self.env.sync(True)  # noqa: FBT003  -- lmdb's C method only takes positional
 
     def __delitem__(self, key: KT) -> None:
         """Remove a key/value pair.
@@ -168,7 +168,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         with self.lock.context(blocking=True):
             with self.env.begin(write=True) as txn:
                 success = txn.delete(_key)
-            self.env.sync(force=True)
+            self.env.sync(True)  # noqa: FBT003  -- lmdb's C method only takes positional
         if not success:
             raise KeyError(key)
 
@@ -179,7 +179,7 @@ class LMDBMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             with self.env.begin(write=True) as txn:
                 for _k, _ in txn.cursor():
                     txn.delete(_k)
-            self.env.sync(force=True)
+            self.env.sync(True)  # noqa: FBT003  -- lmdb's C method only takes positional
 
 
 class DiskResultStore(MutableMapping[ResultHash, Path]):
@@ -218,16 +218,29 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         return result_dir_path
 
     def __setitem__(self, key: ResultHash, value: Path) -> None:
-        """Persist result directory if key is not already present.
+        """Atomically publish a serialized payload directory.
+
+        The payload directory is moved into its final, content-addressed
+        location with a single ``os.rename`` -- atomic within one filesystem --
+        so a concurrent reader observes either no directory or the fully
+        populated one, never a partially-written payload. The parent directory
+        is then fsync'd so the rename survives a crash, which lets
+        :func:`misen.utils.task_utils.save_task_result` treat the payload as
+        durably present before it writes the ``result_hash`` pointer.
+
+        ``value`` is the workspace temp dir and the store both live under the
+        workspace root (one filesystem), so the rename never silently falls back
+        to a non-atomic copy; an ``OSError`` here surfaces a genuine
+        misconfiguration rather than degrading the atomicity guarantee.
 
         Args:
             key: Result hash.
-            value: Temporary directory containing serialized payload.
+            value: Temporary directory containing the serialized payload.
         """
         result_dir_path = self._result_dir_path(key)
         if not result_dir_path.exists():
             result_dir_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(value, result_dir_path)
+            os.rename(value, result_dir_path)  # noqa: PTH104  -- explicit atomic rename, no copy fallback
             self._fsync_dir(result_dir_path.parent)
 
     def __delitem__(self, key: ResultHash) -> None:

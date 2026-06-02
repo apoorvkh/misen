@@ -11,7 +11,6 @@ Generic nested-structure traversal lives in :mod:`misen.utils.nested`.
 
 from __future__ import annotations
 
-import contextlib
 import itertools
 import logging
 import tempfile
@@ -275,6 +274,25 @@ def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[s
 def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:
     """Persist task result metadata and optional cached payload.
 
+    Durability/crash-safety invariant: a ``resolved_hash -> result_hash``
+    mapping may exist only if its payload is durably present. So for cacheable
+    tasks the payload is committed *before* the pointer -- ``ResultMap`` /
+    ``DiskResultStore`` serialize into a temp dir, ``os.rename`` it into place
+    (atomic within one filesystem), and fsync the parent -- and only then is the
+    ``result_hash`` pointer written to the workspace cache (LMDB on disk). A
+    crash (``scancel`` / SIGKILL) at any instant therefore leaves either
+    (no payload, no pointer) or (orphan payload, no pointer); both recompute
+    cleanly, while the dangling (pointer, no payload) state -- which makes a
+    dependent job hard-fail -- is never produced.
+
+    The previous ordering wrote the pointer first and relied on an in-process
+    ``except`` rollback to undo it if the payload write failed; a SIGKILL
+    between the two writes bypasses the rollback entirely and strands the
+    pointer. Ordering the durable writes correctly removes that window at the
+    source, so no rollback is needed: if the payload write raises, the pointer
+    was never written; if the pointer write raises, the payload is a harmless
+    content-addressed orphan that a later run reuses or overwrites.
+
     Args:
         task: Executed task.
         result: Computed result.
@@ -289,18 +307,14 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
 
     logger.debug("Persisting result hash for %s using index_mode=%s.", task, index_mode)
 
-    workspace.set_result_hash(task, result_hash)
-
+    # Payload before pointer (see invariant above). Non-cacheable tasks have no
+    # payload, so only the pointer is recorded. ``store`` takes the already
+    # computed ``result_hash`` because the pointer it would otherwise be read
+    # from does not exist yet.
     if task.meta.cache:
-        try:
-            workspace.results[task] = result
-        except Exception:
-            logger.exception("Failed while persisting cached result payload for %s; rolling back hash metadata.", task)
-            with contextlib.suppress(Exception):
-                del workspace.results[task]
-            with contextlib.suppress(Exception):
-                workspace.clear_result_hash(task=task)
-            raise
+        workspace.results.store(task, result, result_hash)
+
+    workspace.set_result_hash(task, result_hash)
 
 
 def _build_argument_resolver(
