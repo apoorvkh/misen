@@ -21,6 +21,7 @@ from misen.exceptions import (
 )
 from misen.executor import Executor
 from misen.experiment import Experiment
+from misen.file_map import FileMap
 from misen.sentinels import SCRATCH_DIR
 from misen.task_metadata import Resources, meta
 from misen.tasks import Task
@@ -41,6 +42,7 @@ __all__ = [
     "ConfigError",
     "Executor",
     "Experiment",
+    "FileMap",
     "HashError",
     "MisenError",
     "Resources",

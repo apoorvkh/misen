@@ -49,6 +49,7 @@ from misen.utils.serde.libs.catboost import catboost_serializers, catboost_seria
 from misen.utils.serde.libs.dask import dask_serializers, dask_serializers_by_type
 from misen.utils.serde.libs.dataclass import dataclass_serializers, dataclass_serializers_by_type
 from misen.utils.serde.libs.faiss import faiss_serializers, faiss_serializers_by_type
+from misen.utils.serde.libs.file_map import file_map_serializers, file_map_serializers_by_type
 from misen.utils.serde.libs.geopandas import geopandas_serializers, geopandas_serializers_by_type
 from misen.utils.serde.libs.h5py import h5py_serializers, h5py_serializers_by_type
 from misen.utils.serde.libs.hf_datasets import hf_datasets_serializers, hf_datasets_serializers_by_type
@@ -110,6 +111,8 @@ all_serializers: list[type[BaseSerializer]] = [
     *pydantic_serializers,
     *attrs_serializers,
     *dataclass_serializers,
+    # Misen-native primitives.
+    *file_map_serializers,
     # Scientific / multidimensional.
     *xarray_serializers,
     *sympy_serializers,
@@ -160,6 +163,7 @@ all_serializers_by_type: dict[str, type[BaseSerializer]] = {
     **pydantic_serializers_by_type,
     **attrs_serializers_by_type,
     **dataclass_serializers_by_type,
+    **file_map_serializers_by_type,
     **xarray_serializers_by_type,
     **sympy_serializers_by_type,
     **jax_serializers_by_type,

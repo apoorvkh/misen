@@ -21,13 +21,17 @@ executor for dependency-aware concurrent scheduling.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import shutil
+import tempfile
 from contextlib import nullcontext
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, Unpack, cast
 
 from misen.exceptions import CacheError
+from misen.sentinels import SCRATCH_DIR
 from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object, task_function_signature
@@ -39,7 +43,6 @@ from misen.utils.task_utils import collect_task_dependencies, execute_task, hash
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
     from inspect import Signature
-    from pathlib import Path
     from types import BuiltinFunctionType, FunctionType
 
     from misen.executor import Executor, Job
@@ -333,9 +336,11 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             For a given workspace/resolved task identity, this enforces a
             single active runtime. Non-cacheable tasks skip runtime locking and
             can run concurrently.
-            Upon successful completion, non-cacheable task scratch dirs are
-            cleaned up; cacheable task scratch dirs are cleaned up when
-            ``@meta(cleanup_scratch_dir=True)`` is set.
+            Scratch directories (when ``SCRATCH_DIR`` is requested) are always
+            cleaned up on successful completion. On failure, only non-cacheable
+            tasks have their scratch directory removed — cacheable tasks keep
+            theirs so a re-run can resume from any preemption-safe checkpoints
+            written during the failed attempt.
             Logs are captured to task logs and optionally mirrored to stdout.
         """
         from misen.workspace import Workspace
@@ -393,26 +398,54 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         if self.meta.cache:
             logger.debug("Acquiring runtime lock for %s.", self)
-        with lock_context:
-            result, scratch_dir = execute_task(
-                task=self,
-                workspace=workspace,
-                dependency_results=dependency_results,
-                job_id=_job_id,
-                log_task=_log_task,
-            )
-            save_task_result(task=self, result=result, workspace=workspace)
-            logger.debug("Persisted task result metadata for %s.", self)
+
+        # Create the scratch directory eagerly (before the lock) so both the
+        # success and failure paths can see it for cleanup. The lifecycle is:
+        #   - cacheable + success: workspace.remove_scratch_dir (local + durable)
+        #   - cacheable + failure: preserve (preemption-resume affordance)
+        #   - non-cacheable + success: rmtree (ephemeral tempdir)
+        #   - non-cacheable + failure: rmtree
+        scratch_dir = self._create_scratch_dir(workspace=workspace) if self._requests_scratch_dir() else None
+
+        try:
+            with lock_context:
+                result = execute_task(
+                    task=self,
+                    workspace=workspace,
+                    dependency_results=dependency_results,
+                    job_id=_job_id,
+                    log_task=_log_task,
+                    scratch_dir=scratch_dir,
+                )
+                save_task_result(task=self, result=result, workspace=workspace)
+                logger.debug("Persisted task result metadata for %s.", self)
+        except BaseException:
+            if scratch_dir is not None and not self.meta.cache and scratch_dir.exists():
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                logger.debug("Removed scratch directory after failure for %s at %s.", self, scratch_dir)
+            raise
+
         if scratch_dir is not None:
-            if not self.meta.cache:
-                if scratch_dir.exists():
-                    shutil.rmtree(scratch_dir)
-                    logger.debug("Removed ephemeral scratch directory for %s at %s.", self, scratch_dir)
-            elif self.meta.cleanup_scratch_dir:
+            if self.meta.cache:
                 workspace.remove_scratch_dir(task=self)
                 logger.debug("Removed scratch directory (local + durable) for %s.", self)
+            else:
+                if scratch_dir.exists():
+                    shutil.rmtree(scratch_dir)
+                logger.debug("Removed ephemeral scratch directory for %s at %s.", self, scratch_dir)
 
         return result
+
+    def _requests_scratch_dir(self) -> bool:
+        """Return whether this task's bound arguments include the SCRATCH_DIR sentinel."""
+        return SCRATCH_DIR in itertools.chain(self.args, self.kwargs.values())
+
+    def _create_scratch_dir(self, workspace: Workspace) -> Path:
+        """Return a fresh scratch directory: workspace-backed for cacheable tasks, tempdir otherwise."""
+        if self.meta.cache:
+            return workspace.get_scratch_dir(task=self)
+        resolved = self.resolved_hash(workspace=workspace).b32()
+        return Path(tempfile.mkdtemp(prefix=f"misen-scratch-{resolved}-"))
 
     def submit(
         self,

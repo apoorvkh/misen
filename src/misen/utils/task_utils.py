@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import itertools
 import logging
-import tempfile
 import time
 from functools import cache
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 from rich.console import Console as RichConsole
@@ -33,6 +31,7 @@ from misen.utils.runtime_events import runtime_event, task_label
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from inspect import Signature
+    from pathlib import Path
 
     from misen.task_metadata import TaskMetadata
     from misen.tasks import Task
@@ -194,7 +193,9 @@ def execute_task(
     dependency_results: dict[Task[Any], Any],
     job_id: str,
     log_task: Task[Any] | None = None,
-) -> tuple[R, Path | None]:
+    *,
+    scratch_dir: Path | None = None,
+) -> R:
     """Execute task function under log capture.
 
     Args:
@@ -205,14 +206,17 @@ def execute_task(
         log_task: Task identity to use for log storage. This can differ from
             ``task`` when a work unit executes an internal copy with resolved
             non-cacheable dependencies.
+        scratch_dir: Pre-created scratch directory for this run, or ``None``
+            if the task does not request one. The caller owns lifecycle:
+            cleanup on success and (for non-cacheable tasks) on failure
+            happens in :meth:`misen.tasks.Task.result`.
 
     Returns:
-        Task result value plus the runtime scratch directory used (if any).
+        The task's result value.
     """
-    argument_resolver, scratch_directory = _build_argument_resolver(
-        task=task,
-        workspace=workspace,
+    argument_resolver = _build_argument_resolver(
         dependency_results=dependency_results,
+        scratch_dir=scratch_dir,
     )
 
     resolved_args = tuple(argument_resolver(value) for value in task.args)
@@ -226,7 +230,7 @@ def execute_task(
 
     log_identity = log_task or task
     log_path = workspace.get_task_log(task=log_identity, job_id=job_id)
-    sync_scratch_dir = task.meta.cache and scratch_directory is not None
+    sync_scratch_dir = task.meta.cache and scratch_dir is not None
     if sync_scratch_dir:
         workspace.start_scratch_dir_sync(task=task)
     try:
@@ -249,7 +253,7 @@ def execute_task(
 
     logger.info("Task finished: %s in %.2fs.", debug_name, time.perf_counter() - started_at)
     runtime_event(f"Task finished: {display} in {(time.perf_counter() - started_at):.2f}s", style="green")
-    return cast("R", result), scratch_directory
+    return cast("R", result)
 
 
 def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -318,50 +322,35 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
 
 
 def _build_argument_resolver(
-    task: Task[Any],
-    workspace: Workspace,
     dependency_results: dict[Task[Any], Any],
-) -> tuple[Callable[[Any], Any], Path | None]:
+    *,
+    scratch_dir: Path | None,
+) -> Callable[[Any], Any]:
     """Build argument resolver for runtime task execution.
 
     Args:
-        task: Task being executed.
-        workspace: Workspace providing scratch-dir and cached dependency access.
         dependency_results: Immediate dependency result map.
+        scratch_dir: Pre-created scratch directory if the task requested
+            one via ``SCRATCH_DIR``; ``None`` otherwise.
 
     Returns:
-        Tuple of:
-        - callable mapping arbitrary nested argument structures into runtime
-          values (dependency outputs, scratch dirs)
-        - runtime scratch directory if ``SCRATCH_DIR`` is requested
+        Callable mapping arbitrary nested argument structures into runtime
+        values (dependency outputs, scratch dirs).
     """
     from misen.tasks import Task
 
-    scratch_directory: Path | None = None
-
-    def scratch_dir() -> Path:
-        """Return cache-backed or temporary scratch directory for this execution."""
-        nonlocal scratch_directory
-        if scratch_directory is None:
-            if task.meta.cache:
-                scratch_directory = workspace.get_scratch_dir(task=task)
-            else:
-                resolved = task.resolved_hash(workspace=workspace).b32()
-                scratch_directory = Path(tempfile.mkdtemp(prefix=f"misen-scratch-{resolved}-"))
-        return scratch_directory
-
     def argument_resolver(value: Any) -> Any:
         if value is SCRATCH_DIR:
-            return scratch_dir()
+            if scratch_dir is None:
+                msg = "SCRATCH_DIR sentinel resolved but no scratch directory was provided to execute_task."
+                raise RuntimeError(msg)
+            return scratch_dir
         return map_nested_leaves(
             value,
             lambda leaf: dependency_results[leaf] if isinstance(leaf, Task) else leaf,
         )
 
-    if SCRATCH_DIR in itertools.chain(task.args, task.kwargs.values()):
-        scratch_dir()
-
-    return argument_resolver, scratch_directory
+    return argument_resolver
 
 
 def build_task_dependency_graph(

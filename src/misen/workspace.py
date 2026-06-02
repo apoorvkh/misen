@@ -252,10 +252,10 @@ class Workspace(Configurable):
     def remove_scratch_dir(self, task: Task) -> None:
         """Remove durable + local copies of a cacheable task's scratch_dir.
 
-        Called when ``@meta(cleanup_scratch_dir=True)`` after a successful
-        run. The default implementation removes only the local
-        directory; backends with off-machine durable storage override
-        to also delete remote objects.
+        Called by :meth:`misen.tasks.Task.result` after a successful run.
+        The default implementation removes only the local directory;
+        backends with off-machine durable storage override to also delete
+        remote objects.
 
         Args:
             task: Cacheable task whose scratch_dir should be removed.
