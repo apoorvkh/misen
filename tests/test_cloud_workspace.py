@@ -79,9 +79,9 @@ def cloud_test_reads_scratchdir(scratch_dir: Path) -> str:
     return "fresh"
 
 
-@meta(id="cloud_test_writes_scratchdir_cleanup", cache=True, cleanup_scratch_dir=True, exclude={"scratch_dir"})
+@meta(id="cloud_test_writes_scratchdir_cleanup", cache=True, exclude={"scratch_dir"})
 def cloud_test_writes_scratchdir_cleanup(scratch_dir: Path) -> int:
-    """Write to scratch_dir; the runtime will clean it up after the task succeeds."""
+    """Write to scratch_dir; the runtime cleans it up after the task succeeds."""
     (scratch_dir / "to_remove.txt").write_text("bye")
     return 7
 
@@ -923,22 +923,6 @@ def _scratch_dir_remote_paths(workspace: _MemoryCloudWorkspace, task: Task) -> s
     return {entry["path"] for batch in obs.list(workspace._store, prefix=prefix) for entry in batch}
 
 
-def test_cloud_workspace_scratch_dir_persisted_after_task(tmp_path) -> None:
-    """A cacheable task's scratch_dir contents land in the bucket after completion."""
-    workspace = _MemoryCloudWorkspace(
-        backend="s3",
-        bucket="test-scratchdir-persisted",
-        cache_dir=str(tmp_path / "cache"),
-    )
-    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "hello")
-    assert task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True) == 5
-
-    paths = _scratch_dir_remote_paths(workspace, task)
-    assert any(p.endswith("/marker.txt") for p in paths)
-    marker_key = next(p for p in paths if p.endswith("/marker.txt"))
-    assert bytes(obs.get(workspace._store, marker_key).bytes()) == b"hello"
-
-
 def test_cloud_workspace_scratch_dir_restored_from_bucket(tmp_path) -> None:
     """A pre-existing cloud snapshot is restored into the local scratch_dir before the task runs."""
     workspace = _MemoryCloudWorkspace(
@@ -990,13 +974,13 @@ def test_cloud_workspace_scratch_dir_synced_during_execution(tmp_path) -> None:
         runner.join(timeout=10)
 
     assert not runner_error, runner_error[0]
-    paths = _scratch_dir_remote_paths(workspace, task)
-    assert any(p.endswith("/early.txt") for p in paths)
-    assert any(p.endswith("/late.txt") for p in paths)
+    # After successful completion the runtime cleans up scratch_dir
+    # (local + bucket), so all synced files are gone.
+    assert _scratch_dir_remote_paths(workspace, task) == set()
 
 
 def test_cloud_workspace_scratch_dir_cleanup_removes_local_and_remote(tmp_path) -> None:
-    """``cleanup_scratch_dir=True`` deletes both the local cache and the bucket prefix."""
+    """A successful cacheable task's scratch_dir is removed from both local cache and bucket."""
     workspace = _MemoryCloudWorkspace(
         backend="s3",
         bucket="test-scratchdir-cleanup",
@@ -1009,22 +993,6 @@ def test_cloud_workspace_scratch_dir_cleanup_removes_local_and_remote(tmp_path) 
     assert paths == set()
     local_path = workspace._cache / "scratch" / task.resolved_hash(workspace=workspace).b32()
     assert not local_path.exists()
-
-
-def test_cloud_workspace_scratch_dir_persists_when_no_cleanup(tmp_path) -> None:
-    """Without ``cleanup_scratch_dir`` the local cache is preserved alongside the bucket copy."""
-    workspace = _MemoryCloudWorkspace(
-        backend="s3",
-        bucket="test-scratchdir-no-cleanup",
-        cache_dir=str(tmp_path / "cache"),
-    )
-    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "keep")
-    task.result(workspace=workspace, compute_if_uncached=True, compute_uncached_deps=True)
-
-    local_path = workspace._cache / "scratch" / task.resolved_hash(workspace=workspace).b32()
-    assert (local_path / "marker.txt").read_text() == "keep"
-    paths = _scratch_dir_remote_paths(workspace, task)
-    assert any(p.endswith("/marker.txt") for p in paths)
 
 
 def test_cloud_workspace_remove_scratch_dir_when_idle(tmp_path) -> None:

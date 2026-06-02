@@ -195,7 +195,30 @@ CPU affinity and cgroup membership are inherited by children, so subprocesses (`
 - **Native threading libs (OpenMP, MKL, OpenBLAS, …):** `LocalExecutor` exports `OMP_NUM_THREADS` and friends to match the assignment. `SlurmExecutor` touches nothing — if you want OpenMP saturation matched to your CPU request, either configure your cluster's `srun` to propagate `SLURM_CPUS_PER_TASK → OMP_NUM_THREADS`, or set it yourself early in the task: `os.environ.setdefault("OMP_NUM_THREADS", str(len(os.sched_getaffinity(0))))`.
 - **Libraries that reset affinity at import** (some MKL/NumPy builds, certain CUDA runtimes): re-pin after the offending import with `os.sched_setaffinity(0, os.sched_getaffinity(0))`.
 
-Pass `SCRATCH_DIR: Path` as an argument for a per-task scratch directory. It persists across runs for `cache=True` tasks (useful for checkpointing against preemption) and is ephemeral otherwise.
+Pass `SCRATCH_DIR: Path` as an argument for a per-task scratch directory. Use it freely as working space — including for preemption-safe checkpointing during long runs. It's cleaned up automatically on successful completion (and on failure for non-cacheable tasks); for cacheable tasks, a failed run keeps its scratch_dir so a re-run can resume from the latest checkpoint.
+
+To flow files written into `SCRATCH_DIR` (model checkpoints, generated images, training logs) into downstream tasks without round-tripping their contents through memory, return a `FileMap` — a `Mapping[K, Path]` of keyed files. Build it with chainable `include_glob` / `include_tree` / `include` (and `exclude_glob` / `exclude`); the serializer moves each file into the result's cache before scratch_dir is cleaned up, preserving its relative layout. Downstream tasks see paths that resolve into the local workspace.
+
+```python
+from misen import FileMap, SCRATCH_DIR, meta
+
+@meta(cache=True, resources={"gpus": 1})
+def train(scratch_dir: Path = SCRATCH_DIR) -> FileMap:
+    # training loop writes ckpt_<step>.pt and tb_logs/ into scratch_dir
+    return (FileMap()
+            .include_glob(scratch_dir, "ckpt_*.pt", key=lambda p: int(p.stem.split("_")[1]))
+            .include_tree(scratch_dir / "tb_logs")
+            .exclude_glob("*.tmp"))
+
+@meta(cache=True)
+def analyze_at(files: FileMap, step: int) -> dict[str, float]:
+    state = torch.load(files[step], weights_only=True)  # one file loaded on demand
+    ...
+```
+
+Keys may be `str`, `int`, `float`, `bool`, or `None`. Exclusions apply eagerly (each `exclude_*` filters what's been included so far). `FileMap.from_glob(...)` / `FileMap.from_tree(...)` are one-liner shortcuts for the single-source case. After a `FileMap` is fetched from a result, `.root` gives the single directory holding every file — hand it to a directory-consuming tool, e.g. `tensorboard --logdir <files.root>`. A `FileMap` loaded from a workspace is read-only.
+
+**Selective access and granularity.** A `FileMap` is *one* cached result holding all its files. On a shared filesystem (`DiskWorkspace` on NFS), reading a single entry (`files[step]`) touches just that one file — loading a `FileMap` reads only its manifest, never the file contents — so accessing one checkpoint out of many is cheap. On `CloudWorkspace`, a result is fetched as a unit, so the first access materializes *all* of a `FileMap`'s files. If you have many large checkpoints and a downstream task on another machine needs only one, give each checkpoint its own cached task (so each is an independently-fetched result) rather than bundling them into one `FileMap` — this is a DAG-shaping choice, not a property of the type. (Per-entry lazy fetch on cloud would be a general `CloudWorkspace` improvement, independent of `FileMap`.)
 
 The **Executor** decides where tasks run:
 
