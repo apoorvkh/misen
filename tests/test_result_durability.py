@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from misen import Task, meta
 from misen.utils.hashing import ResultHash
 from misen.utils.task_utils import save_task_result
+from misen.workspaces import disk as disk_mod
 from misen.workspaces.disk import DiskResultStore, DiskWorkspace
 
 if TYPE_CHECKING:
@@ -121,6 +122,53 @@ def test_disk_result_store_publishes_atomically(tmp_path: Path) -> None:
     src2.mkdir()
     (src2 / "data.bin").write_bytes(b"overwrite-me")
     store[key] = src2
+    assert (store[key] / "data.bin").read_bytes() == b"hello"
+
+
+def test_disk_result_store_fsyncs_payload_before_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every payload file is fsync'd before the publish rename, not just the dir entry.
+
+    Serializer backends only close-flush their files, so without an explicit
+    contents fsync a crash could publish a directory whose files are empty or
+    partial on NFS. Verify each regular file in the payload tree is fsync'd and
+    that all those fsyncs precede the atomic ``os.rename`` that publishes it.
+    """
+    store = DiskResultStore(tmp_path / "results")
+    key = ResultHash(0x123456)
+
+    # A nested payload shaped like serde output (manifest + leaves subtree).
+    src = tmp_path / "tmp_payload"
+    (src / "leaves" / "ndarray").mkdir(parents=True)
+    (src / "manifest.json").write_text("{}", encoding="utf-8")
+    (src / "data.bin").write_bytes(b"hello")
+    (src / "leaves" / "ndarray" / "blob.npy").write_bytes(b"arraybytes")
+    payload_files = {p.resolve() for p in src.rglob("*") if p.is_file()}
+
+    events: list[tuple[str, Path]] = []
+    real_fsync_file = disk_mod._fsync_file
+    real_rename = disk_mod.os.rename
+
+    def _recording_fsync_file(path: Path) -> None:
+        events.append(("fsync", path.resolve()))
+        real_fsync_file(path)
+
+    def _recording_rename(src_path: Path, dst_path: Path) -> None:
+        events.append(("rename", src_path.resolve()))
+        real_rename(src_path, dst_path)
+
+    monkeypatch.setattr(disk_mod, "_fsync_file", _recording_fsync_file)
+    monkeypatch.setattr(disk_mod.os, "rename", _recording_rename)
+
+    store[key] = src
+
+    fsynced = {path for kind, path in events if kind == "fsync"}
+    assert payload_files <= fsynced  # every file in the tree was fsync'd
+    rename_idx = next(i for i, (kind, _) in enumerate(events) if kind == "rename")
+    last_fsync_idx = max(i for i, (kind, _) in enumerate(events) if kind == "fsync")
+    assert last_fsync_idx < rename_idx  # all fsyncs happened before the publish rename
     assert (store[key] / "data.bin").read_bytes() == b"hello"
 
 

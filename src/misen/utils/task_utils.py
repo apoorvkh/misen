@@ -281,9 +281,10 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
     Durability/crash-safety invariant: a ``resolved_hash -> result_hash``
     mapping may exist only if its payload is durably present. So for cacheable
     tasks the payload is committed *before* the pointer -- ``ResultMap`` /
-    ``DiskResultStore`` serialize into a temp dir, ``os.rename`` it into place
-    (atomic within one filesystem), and fsync the parent -- and only then is the
-    ``result_hash`` pointer written to the workspace cache. A
+    ``DiskResultStore`` serialize into a temp dir, fsync the payload contents,
+    ``os.rename`` it into place (atomic within one filesystem), and fsync the
+    parent -- and only then is the ``result_hash`` pointer written to the
+    workspace cache. A
     crash (``scancel`` / SIGKILL) at any instant therefore leaves either
     (no payload, no pointer) or (orphan payload, no pointer); both recompute
     cleanly, while the dangling (pointer, no payload) state -- which makes a

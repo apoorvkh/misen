@@ -48,6 +48,48 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _fsync_file(path: Path) -> None:
+    """Fsync a regular file's contents so they reach durable storage.
+
+    Args:
+        path: File whose contents should be flushed.
+    """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Fsync every file and directory under ``root`` so the whole tree is durable.
+
+    Serializer backends (parquet, numpy, torch, ...) and ``manifest.json`` only
+    flush their bytes to the kernel on close. On NFS that reaches the server
+    (so close-to-open readers see it) but is not COMMITted to stable storage,
+    and a freshly created file's directory entry is likewise not yet durable.
+    Without this, a crash could publish a result directory whose files are
+    empty/partial or whose entries are missing -- the dangling-payload state
+    :func:`misen.utils.task_utils.save_task_result` is built to avoid.
+
+    The walk is bottom-up so each file's contents and each child directory's
+    entries are made durable before the parent directory that names them. This
+    costs one COMMIT per file and per directory, paid once at result-commit
+    time (not in any hot loop), in exchange for a crash-consistent payload.
+
+    Args:
+        root: Directory whose entire contents should be made durable.
+    """
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
+        base = Path(dirpath)
+        for name in filenames:
+            file_path = base / name
+            if file_path.is_symlink() or not file_path.is_file():
+                continue
+            _fsync_file(file_path)
+        _fsync_dir(base)
+
+
 # Both stores shard keys by the first two chars of ``Hash.b32`` (see hash_types).
 # The ``[A-Z2-7]`` charset is exactly the unpadded base32 alphabet, so the glob
 # matches only canonical key names and skips the leading-dot temp/trash entries
@@ -252,12 +294,16 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
     def __setitem__(self, key: ResultHash, value: Path) -> None:
         """Atomically publish a serialized payload directory.
 
-        The payload directory is moved into its final, content-addressed
-        location with a single ``os.rename`` -- atomic within one filesystem --
-        so a concurrent reader observes either no directory or the fully
-        populated one, never a partially-written payload. The parent directory
-        is then fsync'd so the rename survives a crash, which lets
-        :func:`misen.utils.task_utils.save_task_result` treat the payload as
+        The payload tree is fsync'd in full (:func:`_fsync_tree`) and then moved
+        into its final, content-addressed location with a single ``os.rename`` --
+        atomic within one filesystem -- so a concurrent reader observes either no
+        directory or the fully populated one, never a partially-written payload.
+        The contents fsync matters because serializer backends only flush their
+        files to the kernel on close (which on NFS reaches the server but is not
+        COMMITted to stable storage); fsyncing first closes the window where a
+        crash could publish a directory full of empty or partial files. The
+        parent directory is then fsync'd so the rename survives a crash, which
+        lets :func:`misen.utils.task_utils.save_task_result` treat the payload as
         durably present before it writes the ``result_hash`` pointer.
 
         ``value`` is the workspace temp dir and the store both live under the
@@ -272,6 +318,7 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         result_dir_path = self._result_dir_path(key)
         if not result_dir_path.exists():
             result_dir_path.parent.mkdir(parents=True, exist_ok=True)
+            _fsync_tree(value)  # flush payload contents+entries before the publish rename
             os.rename(value, result_dir_path)  # noqa: PTH104  -- explicit atomic rename, no copy fallback
             _fsync_dir(result_dir_path.parent)
 
