@@ -100,6 +100,57 @@ def test_nfs_lock_timeout_surfaces_as_lock_unavailable(tmp_path: Path) -> None:
             contender.acquire(timeout=0)
 
 
+def test_nfs_lock_holder_identity(tmp_path: Path) -> None:
+    path = tmp_path / "who.lock"
+    holder = NFSLock(path, lifetime=30)
+    observer = NFSLock(path, lifetime=30)
+    assert observer.holder() is None
+    with holder.context():
+        held_by = observer.holder()
+        assert held_by is not None
+        hostname, pid = held_by
+        assert hostname
+        assert pid == os.getpid()
+    assert observer.holder() is None
+
+
+def test_refresh_loop_survives_transient_oserror(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # A flaky NFS op during refresh must not kill the refresh thread —
+    # a silently dead loop would let the lease expire under a live holder.
+    lock = NFSLock(tmp_path / "flaky.lock", lifetime=30, refresh_interval=1)
+    real_refresh = lock._lock.refresh
+    calls: list[int] = []
+
+    def flaky_refresh(*args: object, **kwargs: object) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            msg = "transient NFS hiccup"
+            raise OSError(msg)
+        real_refresh(*args, **kwargs)
+
+    with patch.object(lock._lock, "refresh", side_effect=flaky_refresh):
+        with caplog.at_level("WARNING", logger="misen.utils.locks"), lock.context():
+            deadline = time.monotonic() + 10
+            while len(calls) < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+    assert len(calls) >= 2, "refresh thread died after a transient OSError"
+    assert any("Could not refresh" in r.message for r in caplog.records)
+
+
+def test_refresh_loop_warns_and_stops_on_lost_lease(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    import flufl.lock._lockfile as flufl
+
+    lock = NFSLock(tmp_path / "stolen.lock", lifetime=30, refresh_interval=1)
+    with patch.object(lock._lock, "refresh", side_effect=flufl.NotLockedError("stolen")):
+        with caplog.at_level("WARNING", logger="misen.utils.locks"), lock.context():
+            deadline = time.monotonic() + 10
+            while lock._thread is not None and lock._thread.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert lock._thread is not None
+            assert not lock._thread.is_alive()
+    assert any("Lost lease" in r.message for r in caplog.records)
+
+
 def test_nfs_lock_non_blocking_breaks_stale_lock(tmp_path: Path) -> None:
     # Regression: flufl.lock's stale-break check sits after its timeout
     # check, so timeout=0 never breaks expired lockfiles. NFSLock must

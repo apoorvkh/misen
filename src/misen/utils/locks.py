@@ -169,12 +169,23 @@ class NFSLock:
             self._thread = None
 
     def _refresh_loop(self) -> None:
-        """Refresh lock lease until stop event is set."""
-        try:
-            while not self._stop.wait(self._refresh_interval):
+        """Refresh lock lease until stop event is set.
+
+        A transient ``OSError`` (e.g. an NFS hiccup) must not kill the
+        thread — a silently dead refresh loop lets the lease expire under
+        a live holder, so we log and retry on the next interval. Losing
+        the lease itself (``NotLockedError``: another process broke the
+        lock as stale) is terminal for the loop and logged so the holder's
+        log explains any downstream failure.
+        """
+        while not self._stop.wait(self._refresh_interval):
+            try:
                 self._lock.refresh()
-        except flufl.NotLockedError:
-            pass
+            except flufl.NotLockedError:
+                logger.warning("Lost lease on lock %s during refresh.", self._lock.lockfile)
+                return
+            except OSError as e:
+                logger.warning("Could not refresh lock %s (%s); retrying.", self._lock.lockfile, e)
 
     def acquire(self, *, blocking: bool = True, timeout: int | None = None) -> None:
         """Acquire lock, optionally waiting up to timeout.
@@ -248,6 +259,19 @@ class NFSLock:
     def is_locked(self) -> bool:
         """Return whether underlying lock is held."""
         return self._lock.is_locked
+
+    def holder(self) -> tuple[str, int] | None:
+        """Return ``(hostname, pid)`` of whoever currently holds the lockfile.
+
+        Works whether or not this instance is the holder — flufl parses the
+        claim-file name recorded in the shared lockfile. Returns ``None``
+        when the lock is free or the lockfile is unreadable/corrupt.
+        """
+        try:
+            hostname, pid, _ = self._lock.details
+        except (flufl.NotLockedError, OSError, ValueError):
+            return None
+        return hostname, pid
 
 
 def _owner_id() -> str:

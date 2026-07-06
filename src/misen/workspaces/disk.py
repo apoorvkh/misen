@@ -23,6 +23,8 @@ from collections.abc import Iterator, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic, Literal, Self, TextIO, TypeVar, cast
 
+from misen.utils.fsync import fsync_dir as _fsync_dir
+from misen.utils.fsync import fsync_file as _fsync_file
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, NFSLock
 from misen.workspace import Workspace
@@ -33,32 +35,6 @@ if TYPE_CHECKING:
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
 logger = logging.getLogger(__name__)
-
-
-def _fsync_dir(path: Path) -> None:
-    """Fsync a directory entry so a contained rename or unlink is durable.
-
-    Args:
-        path: Directory to fsync.
-    """
-    fd = os.open(path, os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _fsync_file(path: Path) -> None:
-    """Fsync a regular file's contents so they reach durable storage.
-
-    Args:
-        path: File whose contents should be flushed.
-    """
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def _fsync_tree(root: Path) -> None:
