@@ -89,14 +89,14 @@ def test_local_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: pyte
     snapshots_dir = tmp_path / "snapshots"
     snapshot = LocalSnapshot(snapshots_dir=snapshots_dir)
     try:
-        # Snapshot has a staged manifest and a cached pixi bin.
+        # Snapshot has a staged manifest (in the shared store) and a cached pixi bin.
         assert snapshot.conda_manifest_path is not None
         assert snapshot.conda_manifest_path.is_file()
-        assert snapshot.conda_manifest_path.is_relative_to(snapshot.snapshot_dir)
+        assert snapshot.conda_manifest_path.is_relative_to(snapshots_dir / ".shared" / "conda-envs")
         assert snapshot.pixi_bin is not None
 
-        # pixi install ran already, so the env exists under snapshot_dir.
-        prefix_dir = snapshot.snapshot_dir / ".pixi" / "envs" / "default"
+        # pixi install ran already, so the env exists beside the staged manifest.
+        prefix_dir = snapshot.conda_manifest_path.parent / ".pixi" / "envs" / "default"
         assert prefix_dir.is_dir()
         xz_bin = prefix_dir / "bin" / "xz"
         assert xz_bin.is_file() and os.access(xz_bin, os.X_OK)
@@ -124,9 +124,43 @@ def test_local_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: pyte
         conda_prefix, path_value, *_ = result.stdout.splitlines()
         assert Path(conda_prefix).resolve() == prefix_dir.resolve()
         assert path_value.split(":")[0] == str(prefix_dir / "bin")
+
+        # A second snapshot reuses the shared conda env instead of reinstalling.
+        second = LocalSnapshot(snapshots_dir=snapshots_dir)
+        try:
+            assert second.conda_manifest_path == snapshot.conda_manifest_path
+        finally:
+            second.cleanup()
     finally:
         snapshot.cleanup()
 
+    assert not snapshot.snapshot_dir.exists()
+    # Cleanup removes only the snapshot dir; the shared conda env survives.
+    assert prefix_dir.is_dir()
+    store = snapshots_dir / ".shared" / "conda-envs"
+    key = snapshot.conda_manifest_path.parent.name
+    assert (store / f"{key}.complete").is_file()
+
+
+def test_local_snapshot_env_cache_false_installs_in_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env_cache=False restores the fully self-contained snapshot layout."""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    _stage_uv_project(project_root)
+    shutil.copy(ZLIB_XZ_MANIFEST, project_root / "pixi.toml")
+    shutil.copy(ZLIB_XZ_LOCK, project_root / "pixi.lock")
+    monkeypatch.chdir(project_root)
+
+    snapshot = LocalSnapshot(snapshots_dir=tmp_path / "snapshots", env_cache=False)
+    try:
+        assert snapshot.conda_manifest_path is not None
+        assert snapshot.conda_manifest_path.is_relative_to(snapshot.snapshot_dir)
+        assert (snapshot.snapshot_dir / ".pixi" / "envs" / "default").is_dir()
+        assert not (tmp_path / "snapshots" / ".shared").exists()
+    finally:
+        snapshot.cleanup()
     assert not snapshot.snapshot_dir.exists()
 
 

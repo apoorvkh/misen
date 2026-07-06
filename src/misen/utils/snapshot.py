@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
 import logging
 import os
 import platform
@@ -202,8 +203,9 @@ class LocalSnapshot(Snapshot):
 
     Always contains a uv-built virtual environment and copied env files.
     If a ``pixi.lock`` + ``pixi.toml`` pair sits next to the caller's
-    CWD, a parallel conda env is installed under the same snapshot
-    directory via ``pixi install --frozen``. Jobs are then wrapped in
+    CWD, a parallel conda env is installed via ``pixi install --frozen``
+    (into the shared store, or under the snapshot directory when
+    ``env_cache=False``). Jobs are then wrapped in
     ``pixi run --frozen -x -- <uv run ...>`` so activation (``CONDA_PREFIX``,
     ``PATH``, ``LD_LIBRARY_PATH``, plus anything ``activate.d`` scripts
     inject like ``CUDA_HOME``) happens at job spawn. The conda prefix
@@ -248,7 +250,7 @@ class LocalSnapshot(Snapshot):
         self.overlay_site_dir: Path | None = None
         self.python_env_dir = self._snapshot_python_env(env_cache=env_cache)
         self.pixi_bin = None
-        self.conda_manifest_path = self._snapshot_conda(self.snapshot_dir)
+        self.conda_manifest_path = self._snapshot_conda(env_cache=env_cache)
         self.env_files = self._snapshot_env_files(self.snapshot_dir)
 
     def cleanup(self) -> None:
@@ -464,23 +466,24 @@ class LocalSnapshot(Snapshot):
         self.overlay_site_dir = overlay_site
         return venv_dir
 
-    def _snapshot_conda(self, snapshot_dir: Path) -> Path | None:
+    def _snapshot_conda(self, *, env_cache: bool) -> Path | None:
         """Install an optional conda env from ``pixi.lock`` via the pixi CLI.
 
-        Stages ``pixi.toml`` + ``pixi.lock`` from CWD into ``snapshot_dir``
-        and pre-installs the env via ``pixi install --frozen``. Pixi
-        writes the env into ``snapshot_dir/.pixi/envs/default``, so the
-        whole snapshot (python env + conda env) is still a single-
-        ``rmtree`` on cleanup. Activation is deferred to job-spawn time:
-        :meth:`prepare_job` wraps ``argv`` in ``pixi run --frozen -x -- ...``
-        so each job starts inside a fresh activation that runs
-        ``etc/conda/activate.d/*.sh`` against live env. Any conda
-        ``python`` record is installed as-is; the python env still owns
-        the interpreter at runtime because ``uv run`` prepends
-        ``<python_env_dir>/bin`` ahead of the conda prefix on ``PATH``.
+        Stages ``pixi.toml`` + ``pixi.lock`` from CWD next to the installed
+        env (pixi writes it to ``.pixi/envs/default`` beside its manifest).
+        With ``env_cache`` the staging target is a shared store entry keyed
+        by the manifest + lockfile contents, reused across snapshots;
+        otherwise it is the snapshot directory itself, removed on cleanup.
+        Activation is deferred to job-spawn time: :meth:`prepare_job` wraps
+        ``argv`` in ``pixi run --frozen -x -- ...`` so each job starts
+        inside a fresh activation that runs ``etc/conda/activate.d/*.sh``
+        against live env. Any conda ``python`` record is installed as-is;
+        the python env still owns the interpreter at runtime because
+        ``uv run`` prepends ``<python_env_dir>/bin`` ahead of the conda
+        prefix on ``PATH``.
 
         Args:
-            snapshot_dir: Snapshot root directory.
+            env_cache: Whether the conda env may come from the shared store.
 
         Returns:
             Path to the staged ``pixi.toml`` (pixi's manifest-path flag
@@ -511,33 +514,37 @@ class LocalSnapshot(Snapshot):
             )
             raise RuntimeError(msg)
 
-        staged_manifest = snapshot_dir / "pixi.toml"
-        staged_lock = snapshot_dir / "pixi.lock"
-        shutil.copy(manifest_path, staged_manifest)
-        shutil.copy(lock_path, staged_lock)
+        pixi_bin = self.pixi_bin
 
-        try:
-            subprocess.run(  # noqa: S603
-                [
-                    self.pixi_bin,
-                    "--no-progress",
-                    "--color",
-                    "never",
-                    "install",
-                    "--frozen",
-                    "--manifest-path",
-                    str(staged_manifest),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
+        if not env_cache:
+            return _stage_and_install_conda(
+                pixi_bin, self.snapshot_dir, manifest_path, lock_path, cache_env={}
             )
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or exc.stdout or "").strip()
-            msg = f"pixi install failed for {lock_path}: {stderr}"
-            raise RuntimeError(msg) from None
 
-        return staged_manifest
+        store_root = self.snapshot_dir.parent / _SHARED_STORE_NAME
+        key = _store_key(
+            (
+                _ENV_STORE_SCHEMA,
+                manifest_path.read_bytes(),
+                lock_path.read_bytes(),
+                sys.platform,
+                platform.machine(),
+            )
+        )
+        cache_env = _pixi_cache_env(store_root)
+
+        def build(entry_dir: Path) -> None:
+            entry_dir.mkdir(parents=True)
+            _stage_and_install_conda(pixi_bin, entry_dir, manifest_path, lock_path, cache_env=cache_env)
+
+        entry_dir = _ensure_shared_entry(
+            store=store_root / "conda-envs",
+            key=key,
+            build=build,
+            sanity_path=".pixi/envs/default",
+            label="conda env",
+        )
+        return entry_dir / "pixi.toml"
 
     def _snapshot_env_files(self, snapshot_dir: Path) -> list[Path]:
         """Copy supported env files into snapshot directory.
@@ -896,6 +903,97 @@ def _publish_marker(store: Path, marker: Path) -> None:
     finally:
         Path(tmp).unlink(missing_ok=True)
     fsync_dir(store)
+
+
+@cache
+def _pixi_cache_env(store_root: Path) -> dict[str, str]:
+    """Return env additions implementing the pixi cache-dir policy.
+
+    Mirrors :func:`_uv_cache_env`: explicit cache env vars are respected, a
+    same-filesystem effective cache is left alone, and only a
+    cross-filesystem cache is replaced with one co-located in the store (so
+    conda package materialization links instead of copying).
+    """
+    for var in ("PIXI_CACHE_DIR", "RATTLER_CACHE_DIR"):
+        if var in os.environ:
+            explicit = Path(os.environ[var])
+            if not _same_filesystem(explicit, store_root):
+                logger.info(
+                    "%s=%s is on a different filesystem than the snapshot env store %s; "
+                    "conda env materialization will copy files instead of linking.",
+                    var,
+                    explicit,
+                    store_root,
+                )
+            return {}
+
+    effective: Path | None = None
+    pixi_bin = shutil.which("pixi")
+    if pixi_bin is not None:
+        try:
+            result = subprocess.run(  # noqa: S603
+                [pixi_bin, "info", "--json"], check=True, capture_output=True, text=True
+            )
+            cache_dir = json.loads(result.stdout).get("cache_dir")
+            effective = Path(cache_dir) if cache_dir else None
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            effective = None
+    if effective is not None and _same_filesystem(effective, store_root):
+        return {}
+
+    co_located = store_root / "pixi-cache"
+    logger.info(
+        "pixi cache (%s) is on a different filesystem than the snapshot env store; using a "
+        "co-located cache at %s so conda envs link instead of copy "
+        "(export PIXI_CACHE_DIR to override).",
+        effective if effective is not None else "unresolved",
+        co_located,
+    )
+    return {"PIXI_CACHE_DIR": str(co_located)}
+
+
+def _stage_and_install_conda(
+    pixi_bin: str, target_dir: Path, manifest_path: Path, lock_path: Path, *, cache_env: dict[str, str]
+) -> Path:
+    """Stage the pixi manifest + lockfile into ``target_dir`` and install.
+
+    Pixi writes the env prefix to ``target_dir/.pixi/envs/default``, beside
+    the staged manifest that job-spawn activation points at.
+
+    Args:
+        pixi_bin: Resolved pixi CLI path.
+        target_dir: Directory receiving the staged files and the env prefix.
+        manifest_path: Source ``pixi.toml``.
+        lock_path: Source ``pixi.lock``.
+        cache_env: Extra environment for the pixi subprocess (cache-dir
+            policy overrides).
+
+    Returns:
+        Path to the staged ``pixi.toml``.
+
+    Raises:
+        RuntimeError: If ``pixi install`` fails.
+    """
+    staged_manifest = target_dir / "pixi.toml"
+    staged_lock = target_dir / "pixi.lock"
+    shutil.copy(manifest_path, staged_manifest)
+    shutil.copy(lock_path, staged_lock)
+
+    _run_tool(
+        [
+            pixi_bin,
+            "--no-progress",
+            "--color",
+            "never",
+            "install",
+            "--frozen",
+            "--manifest-path",
+            str(staged_manifest),
+        ],
+        env=os.environ.copy() | cache_env,
+        error_msg=f"pixi install failed for {lock_path}",
+    )
+    return staged_manifest
 
 
 def _local_package_paths(lock_path: Path) -> list[Path]:
