@@ -234,7 +234,14 @@ python -m my_project.experiments.training --executor-type slurm
 
 For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`, `qos`, `constraint`, plus any `default_flags`). For GPUs on a local machine, declare what's available to the executor via `num_cuda_gpus` / `cuda_gpu_indices` (same for `rocm` and `xpu`).
 
-Before dispatching, `misen` takes a **snapshot** of your project — a frozen copy of your source tree, `uv.lock`, `pixi.lock`, and env files. Remote jobs run against the snapshot, so you can keep editing code locally while queued SLURM jobs stay pinned to the version you submitted.
+Before dispatching, `misen` takes a **snapshot** of your project — a frozen environment built from your source tree, `uv.lock`, `pixi.lock`, and env files. Remote jobs run against the snapshot, so you can keep editing code locally while queued SLURM jobs stay pinned to the version you submitted.
+
+Snapshots are cheap to take because the expensive part is shared: locked dependencies are materialized once per `uv.lock` state into an immutable **env store** (`<snapshots>/.shared/`, next to the per-submission snapshot dirs) and reused by every later submission — including concurrent ones from other machines on a shared filesystem, coordinated with NFS-safe locking. Each snapshot itself only rebuilds your own packages (the project, workspace members, and path dependencies) into a small overlay venv, so a source-only change snapshots in seconds instead of rebuilding a multi-gigabyte environment. The same store is used for pixi conda envs, keyed by `pixi.toml` + `pixi.lock`. Notes:
+
+- When the default uv/pixi caches sit on a different filesystem than the workspace (typical on clusters: home vs. data disk), `misen` points the build at a cache co-located with the store so environments hardlink instead of copying gigabytes. An explicitly set `UV_CACHE_DIR` / `PIXI_CACHE_DIR` is always respected.
+- The store keeps one env per distinct lockfile state and is never pruned automatically (a reused entry's `.complete` marker mtime is touched, so age-based pruning can be added later). It is safe to delete `<snapshots>/.shared/` whenever no jobs are queued or running; the next submission rebuilds it. Running `uv cache prune` is also safe — envs hold hardlinks, so their files survive cache pruning.
+- Multi-user stores on a shared workspace need group-writable directories *without* the sticky bit (stale-lock recovery must be able to remove another user's lock files).
+- Set `env_cache = false` on the executor to opt out and build fully standalone per-snapshot environments (the pre-store behavior).
 
 The **Workspace** (default: `DiskWorkspace` under `.misen/`) stores cached results, task/job logs, and runtime locks. Cacheable tasks with the same identity are mutually exclusive per Workspace — a concurrent duplicate submission fails fast rather than running twice, and any later submission returns the cached result. A few `Task` methods are useful for scripting around the Workspace: `task.is_cached(...)`, `task.done(...)`, `task.is_running(...)`, and `task.scratch_dir(...)`.
 
