@@ -177,6 +177,7 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
     xpu_gpu_indices: list[int] | None = None
     snapshot: bool = True
     snapshots_dir: str | None = None
+    env_cache: bool = True
     enforce_time_limits: bool = False
 
     def __post_init__(self) -> None:
@@ -259,7 +260,7 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
         if not self.snapshot:
             return NullSnapshot()
         snapshots_dir = Path(self.snapshots_dir) if self.snapshots_dir is not None else None
-        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir)
+        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir, env_cache=self.env_cache)
 
     def _dispatch(
         self,

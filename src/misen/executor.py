@@ -268,7 +268,9 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             A Job handle that can be queried for execution state.
         """
 
-    def _make_local_snapshot(self, workspace: Workspace, snapshots_dir: Path | None = None) -> LocalSnapshot:
+    def _make_local_snapshot(
+        self, workspace: Workspace, snapshots_dir: Path | None = None, *, env_cache: bool = True
+    ) -> LocalSnapshot:
         """Create a fresh :class:`LocalSnapshot`.
 
         Args:
@@ -277,10 +279,13 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             snapshots_dir: Optional override for the parent directory under
                 which the per-snapshot directory is created. When ``None``,
                 snapshots are placed under ``workspace.get_temp_dir() / "snapshots"``.
+            env_cache: Whether environments may come from the shared env
+                store under the snapshots directory (see
+                :class:`~misen.utils.snapshot.LocalSnapshot`).
         """
         if snapshots_dir is None:
             snapshots_dir = workspace.get_temp_dir() / "snapshots"
-        return LocalSnapshot(snapshots_dir=snapshots_dir.resolve())
+        return LocalSnapshot(snapshots_dir=snapshots_dir.resolve(), env_cache=env_cache)
 
 
 class Job(ABC):

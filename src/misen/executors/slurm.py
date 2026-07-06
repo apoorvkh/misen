@@ -125,6 +125,7 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
     snapshot: bool = True
     snapshots_dir: str | None = None
+    env_cache: bool = True
 
     def __post_init__(self) -> None:
         """Normalize untyped config into msgspec structs."""
@@ -136,7 +137,7 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
         if not self.snapshot:
             return NullSnapshot()
         snapshots_dir = Path(self.snapshots_dir) if self.snapshots_dir is not None else None
-        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir)
+        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir, env_cache=self.env_cache)
 
     def _dispatch(
         self,

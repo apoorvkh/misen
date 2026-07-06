@@ -200,8 +200,9 @@ def test_make_local_snapshot_returns_fresh_snapshot(monkeypatch, tmp_path) -> No
     created: list[object] = []
 
     class FakeLocalSnapshot:
-        def __init__(self, snapshots_dir: object) -> None:
+        def __init__(self, snapshots_dir: object, *, env_cache: bool = True) -> None:
             self.snapshots_dir = snapshots_dir
+            self.env_cache = env_cache
             created.append(self)
 
     monkeypatch.setattr(executor_module, "LocalSnapshot", FakeLocalSnapshot)

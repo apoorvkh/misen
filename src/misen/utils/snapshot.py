@@ -8,16 +8,32 @@ subprocesses or on remote schedulers:
   ``pixi.lock`` + ``pixi.toml``)
 - copied env files
 - serialized callable payloads
+
+Environments are the expensive part (a locked ML stack is gigabytes across
+tens of thousands of files, and workspaces often live on NFS), so by default
+they come from a *shared store* next to the snapshots directory: one
+immutable, content-keyed entry per distinct lockfile state, built once and
+reused by every subsequent snapshot. Each snapshot then only builds a small
+overlay venv holding the project's local packages — the part that actually
+changes between submissions. See :func:`_ensure_shared_entry` for the
+crash-safe publication protocol.
 """
 
 from __future__ import annotations
 
 import base64
 import contextlib
+import logging
 import os
+import platform
 import secrets
 import shutil
+import socket
 import subprocess
+import sys
+import tempfile
+import time
+import tomllib
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from functools import cache
@@ -28,14 +44,22 @@ from typing import TYPE_CHECKING
 import uv
 from dotenv import load_dotenv
 
+from misen.exceptions import LockUnavailableError
+from misen.utils.fsync import fsync_dir
+from misen.utils.hashing.base import hash_values
+from misen.utils.locks import NFSLock
+from misen.utils.runtime_events import runtime_event
+
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from misen.task_metadata import GpuRuntime
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
 __all__ = ["LocalSnapshot", "NullSnapshot", "Snapshot", "apply_env_files_temporarily"]
+
+logger = logging.getLogger(__name__)
 
 # CLI flag the worker entrypoint accepts (matches ``execute.execute``'s
 # ``job_log_path`` parameter). Defined here rather than in
@@ -185,22 +209,34 @@ class LocalSnapshot(Snapshot):
     inject like ``CUDA_HOME``) happens at job spawn. The conda prefix
     supplies native / system libraries while Python and every PyPI
     package stay in the python env.
+
+    With ``env_cache`` (the default), locked dependencies live in a shared
+    content-keyed environment under ``<snapshots_dir>/.shared`` that is
+    reused across snapshots and submissions; the snapshot itself only holds
+    a small overlay venv with the project's local packages. Setting
+    ``env_cache=False`` restores fully standalone per-snapshot environments.
     """
 
     __slots__ = (
         "conda_manifest_path",
         "env_files",
+        "overlay_site_dir",
         "payload_dir",
         "pixi_bin",
         "python_env_dir",
+        "shared_env_dir",
         "snapshot_dir",
     )
 
-    def __init__(self, snapshots_dir: Path) -> None:
+    def __init__(self, snapshots_dir: Path, *, env_cache: bool = True) -> None:
         """Create snapshot directory and materialize environment state.
 
         Args:
             snapshots_dir: Parent directory where snapshots are stored.
+            env_cache: Whether locked dependencies may come from the shared
+                env store under ``snapshots_dir / ".shared"`` (built once per
+                lockfile state, reused across snapshots). When ``False``,
+                every environment is built standalone inside the snapshot.
         """
         self.snapshot_dir = snapshots_dir / f"{token_base32(6)}"
         self.snapshot_dir.mkdir(parents=True)
@@ -208,7 +244,9 @@ class LocalSnapshot(Snapshot):
         self.payload_dir = self.snapshot_dir / "payloads"
         self.payload_dir.mkdir(exist_ok=True)
 
-        self.python_env_dir = self._snapshot_python_env(self.snapshot_dir / "python-env")
+        self.shared_env_dir: Path | None = None
+        self.overlay_site_dir: Path | None = None
+        self.python_env_dir = self._snapshot_python_env(env_cache=env_cache)
         self.pixi_bin = None
         self.conda_manifest_path = self._snapshot_conda(self.snapshot_dir)
         self.env_files = self._snapshot_env_files(self.snapshot_dir)
@@ -263,11 +301,81 @@ class LocalSnapshot(Snapshot):
         argv += [JOB_LOG_PATH_ARG, str(log_path)]
 
         env_overrides: dict[str, str] = {"VIRTUAL_ENV": str(self.python_env_dir)}
+        if self.shared_env_dir is not None and self.overlay_site_dir is not None:
+            # ``uv run`` only prepends the overlay's bin; the shared env's bin
+            # (dependency console scripts like torchrun) must be added here.
+            path_value = str(self.shared_env_dir / "bin")
+            if os.environ.get("PATH"):
+                path_value += os.pathsep + os.environ["PATH"]
+            env_overrides["PATH"] = path_value
+            # Safety net for children of shared-env scripts: their shebangs
+            # point at the shared python, which never reads the overlay's
+            # ``.pth`` — the inherited PYTHONPATH keeps local packages
+            # importable there.
+            pythonpath = str(self.overlay_site_dir)
+            if os.environ.get("PYTHONPATH"):
+                pythonpath += os.pathsep + os.environ["PYTHONPATH"]
+            env_overrides["PYTHONPATH"] = pythonpath
 
         return job_id, argv, env_overrides, log_path
 
-    def _snapshot_python_env(self, python_env_dir: Path) -> Path:
-        """Install a frozen dependency snapshot into virtual environment.
+    def _snapshot_python_env(self, *, env_cache: bool) -> Path:
+        """Materialize the snapshot's python environment.
+
+        Default path: refresh the lockfile (matching the auto-lock behavior
+        of a bare ``uv sync``), resolve the project interpreter, ensure the
+        shared dependency env for the resulting content key exists, and build
+        the per-snapshot overlay venv on top of it. Falls back to a
+        standalone in-snapshot environment when ``env_cache`` is off or the
+        interpreter cannot be resolved yet (e.g. a pinned python that uv has
+        not installed — the standalone build auto-installs it, so the shared
+        store takes over from the next snapshot on).
+
+        Returns:
+            The venv directory jobs should activate (``VIRTUAL_ENV``).
+
+        Raises:
+            RuntimeError: If any uv invocation fails.
+        """
+        if not env_cache:
+            return self._snapshot_python_env_standalone(self.snapshot_dir / "python-env")
+
+        _run_tool([_uv_bin(), "lock"], error_msg="Lockfile resolution (uv lock) failed")
+        python = _uv_python_find()
+        if python is None:
+            logger.warning(
+                "Could not resolve the project interpreter via `uv python find`; "
+                "building a standalone snapshot environment instead of using the shared env store."
+            )
+            return self._snapshot_python_env_standalone(self.snapshot_dir / "python-env")
+
+        store_root = self.snapshot_dir.parent / _SHARED_STORE_NAME
+        cache_env = _uv_cache_env(store_root)
+
+        def build(env_dir: Path) -> None:
+            env = os.environ.copy() | cache_env | {"UV_PROJECT_ENVIRONMENT": str(env_dir)}
+            _run_tool(
+                [_uv_bin(), "sync", "--frozen", "--no-install-local", "--compile-bytecode"],
+                env=env,
+                error_msg="Shared virtual environment creation failed",
+            )
+
+        self.shared_env_dir = _ensure_shared_entry(
+            store=store_root / "python-envs",
+            key=_python_env_key(python),
+            build=build,
+            sanity_path="pyvenv.cfg",
+            label="python env",
+        )
+        return self._snapshot_overlay_venv(self.shared_env_dir)
+
+    def _snapshot_python_env_standalone(self, python_env_dir: Path) -> Path:
+        """Install a frozen dependency snapshot into a standalone virtual env.
+
+        The pre-shared-store build: everything (locked dependencies *and*
+        the project's local packages, installed non-editably) goes into one
+        venv inside the snapshot directory. Used when ``env_cache=False`` or
+        the shared store is unavailable.
 
         Args:
             python_env_dir: Target virtual environment directory.
@@ -284,26 +392,77 @@ class LocalSnapshot(Snapshot):
         # 1) install non-workspace dependencies (cacheable)
         # 2) install workspace members non-editably without cache
         uv_bin = _uv_bin()
-        try:
-            subprocess.run(  # noqa: S603
-                [uv_bin, "sync", "--no-install-workspace"],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            subprocess.run(  # noqa: S603
-                [uv_bin, "sync", "--no-editable", "--no-cache"],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-        except subprocess.CalledProcessError as e:
-            msg = f"Virtual environment creation failed: {(e.stderr or e.stdout or '').strip()}"
-            raise RuntimeError(msg) from None
-
+        _run_tool(
+            [uv_bin, "sync", "--no-install-workspace"],
+            env=env,
+            error_msg="Virtual environment creation failed",
+        )
+        _run_tool(
+            [uv_bin, "sync", "--no-editable", "--no-cache"],
+            env=env,
+            error_msg="Virtual environment creation failed",
+        )
         return python_env_dir
+
+    def _snapshot_overlay_venv(self, shared_env_dir: Path) -> Path:
+        """Build the per-snapshot overlay venv chained to the shared env.
+
+        The overlay is what jobs activate. It holds only the project's local
+        packages (root, workspace members, path dependencies), each built
+        fresh from the working tree and installed non-editably, plus a
+        ``.pth`` entry extending ``sys.path`` into the shared env's
+        site-packages. Local packages therefore shadow the shared env, any
+        runtime installs land in the throwaway overlay rather than the
+        shared env, and entry-point scripts of local packages get real
+        launchers in ``<overlay>/bin``.
+
+        Args:
+            shared_env_dir: Completed shared env store entry to chain to.
+
+        Returns:
+            The overlay venv directory.
+
+        Raises:
+            RuntimeError: If any uv invocation fails.
+        """
+        venv_dir = self.snapshot_dir / "venv"
+        _run_tool(
+            # Resolves to the shared env's *base* interpreter (uv reads the
+            # venv's pyvenv.cfg), so both envs run the identical python.
+            [_uv_bin(), "venv", str(venv_dir), "--python", str(shared_env_dir / "bin" / "python")],
+            error_msg="Overlay virtual environment creation failed",
+        )
+        result = _run_tool(
+            [
+                str(venv_dir / "bin" / "python"),
+                "-c",
+                "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+            ],
+            error_msg="Overlay site-packages resolution failed",
+        )
+        overlay_site = Path(result.stdout.strip())
+        shared_site = shared_env_dir / overlay_site.relative_to(venv_dir)
+        overlay_site.mkdir(parents=True, exist_ok=True)
+        (overlay_site / "_misen_shared_env.pth").write_text(f"{shared_site}\n")
+
+        local_packages = _local_package_paths(Path.cwd() / "uv.lock")
+        if local_packages:
+            _run_tool(
+                [
+                    _uv_bin(),
+                    "pip",
+                    "install",
+                    "--python",
+                    str(venv_dir / "bin" / "python"),
+                    "--no-deps",
+                    "--no-cache",
+                    "--compile-bytecode",
+                    *(str(p) for p in local_packages),
+                ],
+                error_msg="Local package installation failed",
+            )
+        self.overlay_site_dir = overlay_site
+        return venv_dir
 
     def _snapshot_conda(self, snapshot_dir: Path) -> Path | None:
         """Install an optional conda env from ``pixi.lock`` via the pixi CLI.
@@ -439,6 +598,341 @@ def token_base32(nbytes: int) -> str:
         Base32 token without padding.
     """
     return base64.b32encode(secrets.token_bytes(nbytes)).decode("ascii").rstrip("=")
+
+
+# --------------------------------------------------------------------------
+# Shared env store
+#
+# One immutable directory per content key under ``<snapshots_dir>/.shared``
+# (``token_base32`` snapshot names use only A-Z2-7, so ``.shared`` can never
+# collide). Entries are published with a payload-before-pointer protocol:
+# the ``<key>.complete`` marker file beside the entry is the commit point,
+# written only after a successful build, so an entry without a marker is
+# always crashed-builder residue.
+# --------------------------------------------------------------------------
+
+_SHARED_STORE_NAME = ".shared"
+# Bump to invalidate every shared-store key (layout or build-flag changes).
+_ENV_STORE_SCHEMA = 1
+# Lock parameters for multi-minute builds. Waiters on other NFS clients read
+# the lockfile mtime through their attribute cache (commonly up to 60s
+# stale), so the lifetime/refresh headroom must exceed that staleness or a
+# waiter could break a live builder's lease mid-build.
+_BUILD_LOCK_LIFETIME_S = 120
+_BUILD_LOCK_REFRESH_S = 30
+
+
+def _run_tool(
+    argv: list[str], *, env: dict[str, str] | None = None, error_msg: str
+) -> subprocess.CompletedProcess[str]:
+    """Run a CLI tool, wrapping failures in a ``RuntimeError`` with its output."""
+    try:
+        return subprocess.run(argv, check=True, capture_output=True, text=True, env=env)  # noqa: S603
+    except subprocess.CalledProcessError as e:
+        msg = f"{error_msg}: {(e.stderr or e.stdout or '').strip()}"
+        raise RuntimeError(msg) from None
+
+
+def _uv_python_find() -> str | None:
+    """Return the resolved project interpreter path, or ``None`` if unresolved.
+
+    ``--resolve-links`` yields the concrete interpreter installation (uv's
+    symlink targets encode version, platform, and install root), which is
+    exactly what the shared-env key must capture: two users pinning the same
+    version but resolving different interpreter installs must not share.
+    """
+    try:
+        result = subprocess.run(  # noqa: S603
+            [_uv_bin(), "python", "find", "--resolve-links"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _store_key(parts: tuple[object, ...]) -> str:
+    """Hash a tuple of key components to an unpadded-base32 store key."""
+    digest = hash_values(parts)
+    return base64.b32encode(digest.to_bytes(8, "big")).decode("ascii").rstrip("=")
+
+
+def _python_env_key(python: str) -> str:
+    """Content key of the shared python env for the project in CWD.
+
+    Captures everything that determines the built env: the full dependency
+    resolution (``uv.lock`` bytes), the interpreter identity (resolved path
+    plus the ``.python-version`` pin, which can select differently once more
+    interpreters are installed), and the build platform.
+    """
+    project_root = Path.cwd()
+    pin = project_root / ".python-version"
+    return _store_key(
+        (
+            _ENV_STORE_SCHEMA,
+            (project_root / "uv.lock").read_bytes(),
+            pin.read_bytes() if pin.exists() else None,
+            python,
+            sys.platform,
+            platform.machine(),
+        )
+    )
+
+
+def _existing_ancestor(path: Path) -> Path:
+    """Return ``path`` or its nearest existing ancestor."""
+    path = path.absolute()
+    while not path.exists():
+        if path.parent == path:
+            break
+        path = path.parent
+    return path
+
+
+def _same_filesystem(a: Path, b: Path) -> bool:
+    """Whether two paths (or their nearest existing ancestors) share a device."""
+    try:
+        return _existing_ancestor(a).stat().st_dev == _existing_ancestor(b).stat().st_dev
+    except OSError:
+        return False
+
+
+@cache
+def _uv_cache_env(store_root: Path) -> dict[str, str]:
+    """Return env additions implementing the uv cache-dir policy.
+
+    uv hardlinks wheels from its cache into environments only when both sit
+    on one filesystem; otherwise it silently falls back to copying every
+    file — the dominant cost of env materialization on NFS workspaces. The
+    policy: an explicit ``UV_CACHE_DIR`` is always respected; an effective
+    cache (env default or uv config file) already on the store's filesystem
+    is left alone (it is warm); only a cross-filesystem effective cache is
+    replaced with one co-located in the store.
+    """
+    if "UV_CACHE_DIR" in os.environ:
+        explicit = Path(os.environ["UV_CACHE_DIR"])
+        if not _same_filesystem(explicit, store_root):
+            logger.info(
+                "UV_CACHE_DIR=%s is on a different filesystem than the snapshot env store %s; "
+                "environment materialization will copy files instead of hardlinking.",
+                explicit,
+                store_root,
+            )
+        return {}
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            [_uv_bin(), "cache", "dir"], check=True, capture_output=True, text=True
+        )
+        effective = Path(result.stdout.strip())
+    except (OSError, subprocess.CalledProcessError):
+        effective = None
+    if effective is not None and _same_filesystem(effective, store_root):
+        return {}
+
+    co_located = store_root / "uv-cache"
+    logger.info(
+        "uv cache (%s) is on a different filesystem than the snapshot env store; using a "
+        "co-located cache at %s so environments hardlink instead of copy "
+        "(export UV_CACHE_DIR to override).",
+        effective if effective is not None else "unresolved",
+        co_located,
+    )
+    return {"UV_CACHE_DIR": str(co_located)}
+
+
+def _ensure_shared_entry(
+    *,
+    store: Path,
+    key: str,
+    build: Callable[[Path], None],
+    sanity_path: str,
+    label: str,
+) -> Path:
+    """Return the shared store entry for ``key``, building it if necessary.
+
+    Entries are immutable once published and are built *in place* at their
+    final path (venvs bake absolute paths into scripts, so build-then-rename
+    is not an option). Same-key builders across hosts are serialized by an
+    :class:`NFSLock`; the completion marker is written only after ``build``
+    succeeds and only while the lease is still held, so readers can trust
+    ``marker ⇒ complete entry`` and treat an unmarked entry as removable
+    residue. Dependence on build ordering is safe because executors dispatch
+    jobs only after snapshot creation returns — no job ever references an
+    entry whose builder crashed before publishing.
+
+    Args:
+        store: Store directory holding entries, markers, and lock files.
+        key: Content key naming the entry directory.
+        build: Callback that materializes the entry at the given path.
+        sanity_path: Entry-relative path that must exist for the entry to be
+            considered usable (guards against a durable marker outliving an
+            entry lost to an NFS-server crash).
+        label: Human-readable entry kind for logs.
+
+    Returns:
+        The entry directory.
+
+    Raises:
+        RuntimeError: If the build fails or the build lock is lost mid-build.
+    """
+    entry_dir = store / key
+    marker = store / f"{key}.complete"
+    store.mkdir(parents=True, exist_ok=True)
+
+    if marker.exists() and (entry_dir / sanity_path).exists():
+        with contextlib.suppress(OSError):
+            os.utime(marker)  # reuse breadcrumb for a future age-based prune
+        logger.info("Reusing shared %s %s.", label, entry_dir)
+        return entry_dir
+
+    lock = NFSLock(
+        lockfile=store / f"{key}.lock",
+        lifetime=_BUILD_LOCK_LIFETIME_S,
+        refresh_interval=_BUILD_LOCK_REFRESH_S,
+    )
+    try:
+        lock.acquire(blocking=False)
+    except LockUnavailableError:
+        holder = lock.holder()
+        held_by = f"{holder[0]} (pid {holder[1]})" if holder is not None else "another process"
+        logger.info("Shared %s %s is being built by %s; waiting.", label, key, held_by)
+        runtime_event(f"Waiting for a {label} build in progress on {held_by}", style="yellow")
+        lock.acquire(blocking=True, timeout=None)
+    try:
+        _freshness_probe(store)
+        if marker.exists():
+            if (entry_dir / sanity_path).exists():
+                with contextlib.suppress(OSError):
+                    os.utime(marker)
+                logger.info("Reusing shared %s %s (completed while waiting).", label, entry_dir)
+                return entry_dir
+            logger.warning(
+                "Shared %s marker %s exists without a usable entry; rebuilding.", label, marker
+            )
+            marker.unlink()
+            fsync_dir(store)
+        if entry_dir.exists():
+            logger.warning(
+                "Removing incomplete shared %s %s left by an interrupted build.", label, entry_dir
+            )
+            _rmtree_with_retry(entry_dir)
+        logger.info("Building shared %s %s.", label, entry_dir)
+        build(entry_dir)
+        if not lock.is_locked():
+            # Lease stolen mid-build (extreme stall): a thief may already be
+            # rebuilding this entry, so publishing our marker could bless a
+            # half-built directory. Discard instead.
+            msg = f"Lost the build lock for shared {label} {key}; discarding this build."
+            raise RuntimeError(msg)
+        _publish_marker(store, marker)
+        return entry_dir
+    finally:
+        lock.release()
+
+
+def _freshness_probe(directory: Path) -> None:
+    """Create and unlink a temp file to force dentry revalidation in ``directory``.
+
+    An NFS client's own directory mutation updates the cached change
+    attribute, so the marker/entry re-checks made under the build lock don't
+    act on stale (possibly negative) dentries — which could otherwise rmtree
+    a complete entry as "residue".
+    """
+    with contextlib.suppress(OSError):
+        fd, probe = tempfile.mkstemp(dir=directory, prefix=".misen.freshprobe.", suffix=".tmp")
+        os.close(fd)
+        Path(probe).unlink()
+
+
+def _rmtree_with_retry(path: Path, attempts: int = 3) -> None:
+    """``rmtree`` tolerating concurrent writes from an orphaned builder.
+
+    A SIGKILLed builder can leave a uv/pixi child still writing into the
+    entry; rmtree then races file creation and fails (e.g. ENOTEMPTY).
+    Retry with backoff until the orphan exits or attempts run out.
+    """
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(2**attempt)
+        else:
+            return
+
+
+def _publish_marker(store: Path, marker: Path) -> None:
+    """Atomically publish a completion marker (payload-before-pointer commit).
+
+    The entry's file *data* is already at the NFS server via close-to-open
+    semantics when the builder's tool exits; per-file COMMITs over tens of
+    thousands of files would defeat the store's purpose, so instead a single
+    ``syncfs`` (where available) commits the mount's dirty pages, and the
+    marker itself is fsync'd through the same mkstemp → fsync → rename →
+    fsync-dir sequence used for hash-index writes.
+    """
+    if hasattr(os, "syncfs"):  # Linux
+        with contextlib.suppress(OSError):
+            fd = os.open(store, os.O_RDONLY)
+            try:
+                os.syncfs(fd)
+            finally:
+                os.close(fd)
+    content = (
+        f"host={socket.gethostname()} pid={os.getpid()} "
+        f"time={time.time():.0f} schema={_ENV_STORE_SCHEMA}\n"
+    )
+    fd, tmp = tempfile.mkstemp(dir=store, prefix=f".{marker.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, marker)  # noqa: PTH105  -- atomic overwrite; Path has no equivalent
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    fsync_dir(store)
+
+
+def _local_package_paths(lock_path: Path) -> list[Path]:
+    """Return local package paths recorded in ``uv.lock``, in lock order.
+
+    These are exactly the packages ``uv sync --no-install-local`` skips when
+    building the shared env: the root project, workspace members
+    (``editable``), path dependencies (``directory``), and local
+    wheel/sdist files (``path``). Their contents change with the working
+    tree without changing the lockfile, so they belong to the per-snapshot
+    overlay. ``virtual`` sources are never installed (only their
+    dependencies are). Unrecognized source kinds fail loudly rather than
+    risk baking stale code into a shared entry.
+
+    Raises:
+        RuntimeError: On an unsupported lockfile version or source kind.
+    """
+    lock = tomllib.loads(lock_path.read_text())
+    lock_version = lock.get("version")
+    if lock_version != 1:
+        msg = f"Unsupported uv.lock version {lock_version!r} in {lock_path}; expected 1."
+        raise RuntimeError(msg)
+    paths: dict[Path, None] = {}
+    for package in lock.get("package", []):
+        source = package.get("source", {})
+        local_kind = next((k for k in ("editable", "directory", "path") if k in source), None)
+        if local_kind is not None:
+            raw = Path(source[local_kind])
+            resolved = raw if raw.is_absolute() else lock_path.parent / raw
+            paths.setdefault(resolved.resolve(), None)
+        elif not any(k in source for k in ("virtual", "registry", "git", "url")):
+            msg = (
+                f"Unrecognized source {source!r} for package {package.get('name')!r} in "
+                f"{lock_path}; cannot classify it as local or remote."
+            )
+            raise RuntimeError(msg)
+    return list(paths)
 
 
 def _check_pixi_lock_for_pypi(lock_path: Path) -> None:

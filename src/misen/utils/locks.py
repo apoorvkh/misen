@@ -218,7 +218,13 @@ class NFSLock:
             self._thread.start()
 
     def release(self) -> None:
-        """Release lock and stop refresh thread if active."""
+        """Release lock and stop refresh thread if active.
+
+        Idempotent (matching :meth:`ObjectStoreLock.release`): releasing a
+        lock whose lease was stolen — e.g. broken as stale by a waiter while
+        the holder was stalled — must not raise, the holder has already
+        lost it.
+        """
         if self._refresh_interval is not None:
             self._stop.set()
             thread = self._thread
@@ -237,7 +243,7 @@ class NFSLock:
                     )
             self._thread = None
 
-        self._lock.unlock()
+        self._lock.unlock(unconditionally=True)
 
     @contextmanager
     def context(self, *, blocking: bool = True, timeout: int | None = None) -> Iterator[Self]:
