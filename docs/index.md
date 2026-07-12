@@ -63,9 +63,20 @@ changing cache format or lock semantics.
 
 ## Runtime Argument Injection
 
-Sentinel arguments are resolved at execution time:
+Sentinels are bound as top-level `Task(...)` arguments and resolved at
+execution time:
 
-- `SCRATCH_DIR`
+- `SCRATCH_DIR` -> per-task scratch directory
+
+Function signatures stay misen-agnostic: the parameter is a plain `Path`,
+and the sentinel is bound at task construction —
+`Task(train, scratch_dir=SCRATCH_DIR)`. Sentinel-valued arguments are
+excluded from task identity automatically (the injected path varies per
+workspace/machine). Misuse fails at graph-build time: a sentinel left as an
+unbound function-signature default, or nested inside a container argument,
+raises `TypeError` when the `Task` is constructed — signature defaults are
+applied by Python at call time and would bypass the argument resolver,
+leaking the raw sentinel object into the function body.
 
 To discover the resources allotted to a task at runtime, read what the
 runtime sees: `os.sched_getaffinity(0)` for CPU cores and the GPU runtime's

@@ -38,7 +38,13 @@ from misen.utils.function_introspection import is_function_object, task_function
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.snapshot import token_base32
 from misen.utils.task_operators import TaskOperatorsMixin
-from misen.utils.task_utils import collect_task_dependencies, execute_task, hash_task_arguments, save_task_result
+from misen.utils.task_utils import (
+    collect_task_dependencies,
+    execute_task,
+    hash_task_arguments,
+    save_task_result,
+    validate_task_sentinels,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -91,14 +97,19 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         Raises:
             TypeError: If ``func`` is not a Python function or C builtin
-                function, or if ``func`` is a builtin whose signature cannot
-                be introspected.
+                function, if ``func`` is a builtin whose signature cannot
+                be introspected, or if a runtime sentinel (e.g.
+                ``SCRATCH_DIR``) is misused — left as an unbound
+                function-signature default or nested inside a container
+                argument instead of bound as a top-level ``Task(...)``
+                argument.
         """
         if not is_function_object(func):
             msg = "Task func must be a Python function or C builtin function."
             raise TypeError(msg)
 
         self._signature: Signature = task_function_signature(func)
+        validate_task_sentinels(signature=self._signature, args=args, kwargs=kwargs, func=func)
         self.func: FunctionType | BuiltinFunctionType = func
         self.args: tuple[Any, ...] = args
         self.kwargs: Mapping[str, Any] = MappingProxyType(kwargs)

@@ -1,9 +1,17 @@
 """Sentinel objects used for runtime argument injection.
 
-These markers can be used as task arguments and are resolved at execution time
-inside :func:`misen.utils.task_utils.execute_task`:
+These markers are bound as top-level ``Task(...)`` arguments and resolved at
+execution time inside :func:`misen.utils.task_utils.execute_task`:
 
 - ``SCRATCH_DIR`` -> per-task scratch directory path
+
+Sentinel-valued arguments are excluded from task identity automatically (the
+injected value varies per workspace/machine). Misuse is rejected when the
+``Task`` is constructed: a sentinel left as an unbound function-signature
+default would bypass the argument resolver entirely (Python applies signature
+defaults at call time), and a sentinel nested inside a container argument
+cannot be resolved — both raise ``TypeError`` at graph-build time instead of
+leaking the raw sentinel object into the function body mid-run.
 """
 
 from __future__ import annotations
@@ -14,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-__all__ = ["SCRATCH_DIR"]
+__all__ = ["SCRATCH_DIR", "is_runtime_sentinel"]
 
 
 class _RuntimeSentinel:
@@ -42,6 +50,11 @@ class _RuntimeSentinel:
 
 def _runtime_sentinel(name: str) -> _RuntimeSentinel:
     return _RuntimeSentinel(name)
+
+
+def is_runtime_sentinel(value: object) -> bool:
+    """Return whether ``value`` is a runtime-injection sentinel (e.g. ``SCRATCH_DIR``)."""
+    return isinstance(value, _RuntimeSentinel)
 
 
 SCRATCH_DIR = cast("Path", _RuntimeSentinel("SCRATCH_DIR"))
