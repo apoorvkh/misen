@@ -40,15 +40,20 @@ Split each environment by rate of change, and co-locate caches:
 - **Shared python env** (`uv sync --frozen --no-install-local
   --compile-bytecode`): all locked *remote* deps (registry/git/url), no
   local packages. Keyed by `(schema const, uv.lock bytes, .python-version
-  bytes-or-absent, resolved interpreter from "uv python find
-  --resolve-links", sys.platform, machine)`. `--no-install-local` rather
-  than enumerating exclusions: if classification ever missed a local
-  package, exclusion-by-list would silently bake stale code into a shared
-  entry; `--no-install-local` omits it and the gap surfaces as a loud
-  ImportError. `--compile-bytecode` pre-compiles once at build time so
-  many concurrent readers don't race `__pycache__` writes into the shared
-  env over NFS. `uv lock` runs before keying, preserving the auto-relock
-  semantics of the bare `uv sync` this replaced.
+  bytes-or-absent, UV_PYTHON, sys.platform, machine)`. Interpreter
+  identity is keyed by its *selection inputs* rather than a resolved
+  path: an interpreter upgrade satisfying the same pin keeps the key (the
+  entry stays self-consistent on its original interpreter), and if that
+  interpreter is ever uninstalled, the `bin/python` reuse check — an
+  `exists()` that follows symlinks — fails and the entry rebuilds.
+  `--no-install-local` rather than enumerating exclusions: if
+  classification ever missed a local package, exclusion-by-list would
+  silently bake stale code into a shared entry; `--no-install-local`
+  omits it and the gap surfaces as a loud ImportError.
+  `--compile-bytecode` pre-compiles once at build time so many concurrent
+  readers don't race `__pycache__` writes into the shared env over NFS.
+  `uv lock` runs before keying, preserving the auto-relock semantics of
+  the bare `uv sync` this replaced.
 - **Per-snapshot overlay venv**: local packages only — the root project,
   workspace members, and path deps, classified from `uv.lock` `source`
   tables (`editable` / `directory` / `path`; `virtual` is never
@@ -75,10 +80,9 @@ Split each environment by rate of change, and co-locate caches:
 
 A submission with only source edits now builds: one tiny venv, a wheel per
 local package, pickled payloads. Seconds, not minutes. `env_cache=False`
-on `LocalExecutor` / `SlurmExecutor` restores the old standalone builds
-(also the automatic fallback when `uv python find` cannot resolve an
-interpreter yet — the standalone build auto-installs it, and the store
-takes over from the next snapshot).
+on `LocalExecutor` / `SlurmExecutor` runs the same machinery with the
+store rooted *inside* the snapshot directory — nothing shared between
+snapshots, everything removed on cleanup.
 
 ## Publication protocol (NFS crash-safety)
 
@@ -99,10 +103,10 @@ pointer:
    needs lifetime − refresh headroom above that staleness or a live
    builder's lease could be broken. A blocked waiter logs who holds the
    lock (flufl records host + pid).
-3. Under the lock: a `mkstemp`+unlink **freshness probe** in the store
-   directory (the client's own mutation invalidates cached dentries)
-   before re-checking, so a stale negative dentry can't trigger a
-   destructive recovery. Then:
+3. Under the lock — acquiring it wrote flufl claim files into the store
+   directory, and that same-directory mutation refreshes the client's
+   cached (possibly negative) dentries, so the re-checks below can't act
+   on stale state and trigger a destructive recovery:
    - marker present + entry sane → reuse (built while waiting);
    - marker present, entry gutted → unlink marker, rebuild (heals the
      double-failure case: NFS server lost async writes *and* the builder
@@ -119,8 +123,8 @@ pointer:
    stall), a thief may already be rebuilding the entry, so publishing
    would bless a half-built directory; raise instead.
 6. Publish the marker with the hash-index write mechanics: `mkstemp` in
-   the store → write forensic content (host, pid, time, schema) → fsync
-   → `os.replace` → fsync the directory.
+   the store → write forensic content (host, pid, time) → fsync →
+   `os.replace` → fsync the directory.
 
 Safety of residue removal: executors dispatch jobs only after snapshot
 creation returns, so an entry whose builder never published was never

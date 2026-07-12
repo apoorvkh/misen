@@ -1,13 +1,13 @@
 # Design: optional conda environment in `LocalSnapshot`
 
 > **Update:** the staging/install target described below has since moved.
-> By default the staged `pixi.toml` + `pixi.lock` and the installed
-> `.pixi/envs/default` prefix now live in a shared, content-keyed store
-> entry under `<snapshots_dir>/.shared/conda-envs/` (reused across
-> snapshots) rather than inside each snapshot directory; the layout below
-> still applies verbatim under `env_cache=False`. Everything else —
-> opt-in via `pixi.lock`, pypi rejection, `pixi run` activation wrapping,
-> env-var layering — is unchanged. See
+> The staged `pixi.toml` + `pixi.lock` and the installed
+> `.pixi/envs/default` prefix now form a content-keyed env-store entry —
+> under `<snapshots_dir>/.shared/conda-envs/` by default (reused across
+> snapshots), or nested inside the snapshot directory with
+> `env_cache=False` (removed on cleanup). Everything else — opt-in via
+> `pixi.lock`, pypi rejection, `pixi run` activation wrapping, env-var
+> layering — is unchanged. See
 > [design_shared_env_store.md](design_shared_env_store.md).
 
 ## Goal

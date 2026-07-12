@@ -1,6 +1,6 @@
 """Tests for the shared env store and overlay venvs of ``LocalSnapshot``.
 
-Protocol tests exercise ``_ensure_shared_entry`` with synthetic build
+Protocol tests exercise ``_ensure_store_entry`` with synthetic build
 functions (no uv); integration tests run real uv against a tiny generated
 workspace project (one root package, one workspace member with a console
 script, one non-workspace path dependency, one registry dependency).
@@ -25,7 +25,7 @@ from misen.utils import snapshot as snapshot_mod
 from misen.utils.locks import NFSLock
 from misen.utils.snapshot import (
     LocalSnapshot,
-    _ensure_shared_entry,
+    _ensure_store_entry,
     _local_package_paths,
     _uv_cache_env,
 )
@@ -81,7 +81,7 @@ def _write_project(root: Path) -> None:
     )
     (pathdep_dir / "src" / "pathdep" / "__init__.py").write_text("Y = 2\n")
 
-    subprocess.run(["uv", "lock"], cwd=root, check=True, capture_output=True)  # noqa: S603, S607
+    subprocess.run(["uv", "lock"], cwd=root, check=True, capture_output=True)
 
 
 @pytest.fixture(scope="module")
@@ -130,13 +130,13 @@ def _synthetic_build(calls: list[int], delay: float = 0.0) -> Callable[[Path], N
     return build
 
 
-def test_ensure_shared_entry_builds_then_reuses(tmp_path: Path) -> None:
+def test_ensure_store_entry_builds_then_reuses(tmp_path: Path) -> None:
     store = tmp_path / "store"
     calls: list[int] = []
-    first = _ensure_shared_entry(
+    first = _ensure_store_entry(
         store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
     )
-    second = _ensure_shared_entry(
+    second = _ensure_store_entry(
         store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
     )
     assert first == second == store / "KEY"
@@ -151,7 +151,7 @@ def test_residue_without_marker_rebuilt(tmp_path: Path) -> None:
     residue.touch()
 
     calls: list[int] = []
-    entry = _ensure_shared_entry(
+    entry = _ensure_store_entry(
         store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
     )
     assert calls == [1]
@@ -166,7 +166,7 @@ def test_marker_without_entry_heals(tmp_path: Path) -> None:
     (store / "KEY.complete").write_text("stale marker\n")
 
     calls: list[int] = []
-    entry = _ensure_shared_entry(
+    entry = _ensure_store_entry(
         store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
     )
     assert calls == [1]
@@ -184,11 +184,11 @@ def test_concurrent_same_key_single_build(tmp_path: Path) -> None:
     def worker() -> None:
         try:
             results.append(
-                _ensure_shared_entry(
+                _ensure_store_entry(
                     store=store, key="KEY", build=build, sanity_path="sane", label="test env"
                 )
             )
-        except BaseException as e:  # noqa: BLE001
+        except BaseException as e:
             errors.append(e)
 
     threads = [threading.Thread(target=worker) for _ in range(2)]
@@ -217,7 +217,7 @@ def test_lost_lease_blocks_marker(tmp_path: Path) -> None:
         thief.release()
 
     with pytest.raises(RuntimeError, match="Lost the build lock"):
-        _ensure_shared_entry(store=store, key="KEY", build=build, sanity_path="sane", label="test env")
+        _ensure_store_entry(store=store, key="KEY", build=build, sanity_path="sane", label="test env")
     assert not (store / "KEY.complete").exists()
 
 
@@ -230,14 +230,14 @@ def test_failed_build_leaves_no_marker(tmp_path: Path) -> None:
         raise RuntimeError(msg)
 
     with pytest.raises(RuntimeError, match="boom"):
-        _ensure_shared_entry(
+        _ensure_store_entry(
             store=store, key="KEY", build=failing_build, sanity_path="sane", label="test env"
         )
     assert not (store / "KEY.complete").exists()
 
     # Next attempt treats the leftovers as residue and succeeds.
     calls: list[int] = []
-    _ensure_shared_entry(
+    _ensure_store_entry(
         store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
     )
     assert calls == [1]
@@ -371,13 +371,13 @@ def test_overlay_contents(built_snapshot: LocalSnapshot) -> None:
         "import sys\n"
         f"assert any(p.startswith({str(venv_dir)!r}) for p in sys.path if 'site-packages' in p)\n"
     )
-    subprocess.run([str(venv_dir / "bin" / "python"), "-c", check], check=True)  # noqa: S603
+    subprocess.run([str(venv_dir / "bin" / "python"), "-c", check], check=True)
 
     # Entry-point scripts of local packages get real launchers in the overlay.
     member_cli = venv_dir / "bin" / "member-cli"
     assert member_cli.is_file()
     assert os.access(member_cli, os.X_OK)
-    result = subprocess.run([str(member_cli)], check=True, capture_output=True, text=True)  # noqa: S603
+    result = subprocess.run([str(member_cli)], check=True, capture_output=True, text=True)
     assert result.stdout.strip() == "member-cli ok"
 
     # The shared env stays free of local packages.
@@ -391,11 +391,11 @@ def test_overlay_contents(built_snapshot: LocalSnapshot) -> None:
 
 def test_env_overrides_composition(built_snapshot: LocalSnapshot, tmp_path: Path) -> None:
     class _StubWorkUnit:
-        def as_payload(self, *, workspace: object, job_id: str) -> bytes:  # noqa: ARG002
+        def as_payload(self, *, workspace: object, job_id: str) -> bytes:
             return b"payload"
 
     class _StubWorkspace:
-        def get_job_log(self, *, job_id: str, work_unit: object) -> Path:  # noqa: ARG002
+        def get_job_log(self, *, job_id: str, work_unit: object) -> Path:
             return tmp_path / f"{job_id}.log"
 
     _, _, env_overrides, _ = built_snapshot.prepare_job(
@@ -427,43 +427,36 @@ def test_cleanup_preserves_shared_store(tmp_path: Path) -> None:
 
 
 @pytest.mark.usefixtures("in_project")
-def test_env_cache_false_standalone(tmp_path: Path, counted_run: list[list[str]]) -> None:
+def test_env_cache_false_private_store(tmp_path: Path, counted_run: list[list[str]]) -> None:
     snapshot = LocalSnapshot(snapshots_dir=tmp_path / "snapshots", env_cache=False)
     try:
-        assert snapshot.shared_env_dir is None
-        assert snapshot.overlay_site_dir is None
-        assert snapshot.python_env_dir == snapshot.snapshot_dir / "python-env"
+        # Same machinery, but the store is private to the snapshot: nothing
+        # is shared, and cleanup removes everything.
+        assert snapshot.shared_env_dir.is_relative_to(snapshot.snapshot_dir / "envs")
+        assert snapshot.python_env_dir == snapshot.snapshot_dir / "venv"
         assert not (tmp_path / "snapshots" / ".shared").exists()
-        assert len(_sync_calls(counted_run)) == 2  # the standalone two-step sync
-        # Standalone envs are self-contained: local packages import directly.
+        assert len(_sync_calls(counted_run)) == 1
         python = snapshot.python_env_dir / "bin" / "python"
-        subprocess.run([str(python), "-c", "import iniconfig, mainpkg, member, pathdep"], check=True)  # noqa: S603
+        subprocess.run([str(python), "-c", "import iniconfig, mainpkg, member, pathdep"], check=True)
     finally:
         snapshot.cleanup()
+    assert not snapshot.snapshot_dir.exists()
 
 
-@pytest.mark.usefixtures("in_project")
-def test_interpreter_resolution_failure_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(snapshot_mod, "_uv_python_find", lambda: None)
-    snapshot = LocalSnapshot(snapshots_dir=tmp_path / "snapshots")
-    try:
-        assert snapshot.shared_env_dir is None
-        assert snapshot.python_env_dir == snapshot.snapshot_dir / "python-env"
-        assert not (tmp_path / "snapshots" / ".shared" / "python-envs").exists()
-    finally:
-        snapshot.cleanup()
+def test_python_env_key_components(in_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("UV_PYTHON", raising=False)
+    base = snapshot_mod._python_env_key()
+    assert base == snapshot_mod._python_env_key()  # deterministic
 
-
-def test_python_env_key_components(in_project: Path) -> None:
-    base = snapshot_mod._python_env_key("/opt/python3.11")
-    assert base == snapshot_mod._python_env_key("/opt/python3.11")  # deterministic
-    assert base != snapshot_mod._python_env_key("/opt/python3.12")  # interpreter identity
+    monkeypatch.setenv("UV_PYTHON", "3.12")
+    assert base != snapshot_mod._python_env_key()  # interpreter selection
+    monkeypatch.delenv("UV_PYTHON")
 
     lock_path = in_project / "uv.lock"
     original = lock_path.read_bytes()
     try:
         lock_path.write_bytes(original + b"\n# perturbed\n")
-        assert base != snapshot_mod._python_env_key("/opt/python3.11")  # lock content
+        assert base != snapshot_mod._python_env_key()  # lock content
     finally:
         lock_path.write_bytes(original)
 
@@ -473,7 +466,7 @@ def test_store_ignores_foreign_entries(tmp_path: Path) -> None:
     """Lock/claim files, probes, and marker temps never match residue checks."""
     store = tmp_path / "store"
     calls: list[int] = []
-    _ensure_shared_entry(
+    _ensure_store_entry(
         store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
     )
     # Foreign files that legitimately appear in a busy store.
@@ -481,7 +474,7 @@ def test_store_ignores_foreign_entries(tmp_path: Path) -> None:
     (store / ".misen.freshprobe.left.tmp").touch()
     (store / ".KEY.complete.stray.tmp").touch()
 
-    _ensure_shared_entry(
+    _ensure_store_entry(
         store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
     )
     assert calls == [1]  # still a pure reuse

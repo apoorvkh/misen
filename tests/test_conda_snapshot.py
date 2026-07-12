@@ -145,7 +145,7 @@ def test_local_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: pyte
 def test_local_snapshot_env_cache_false_installs_in_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """env_cache=False restores the fully self-contained snapshot layout."""
+    """env_cache=False keeps the whole conda env inside the snapshot dir."""
     project_root = tmp_path / "project"
     project_root.mkdir()
     _stage_uv_project(project_root)
@@ -157,7 +157,7 @@ def test_local_snapshot_env_cache_false_installs_in_snapshot(
     try:
         assert snapshot.conda_manifest_path is not None
         assert snapshot.conda_manifest_path.is_relative_to(snapshot.snapshot_dir)
-        assert (snapshot.snapshot_dir / ".pixi" / "envs" / "default").is_dir()
+        assert (snapshot.conda_manifest_path.parent / ".pixi" / "envs" / "default").is_dir()
         assert not (tmp_path / "snapshots" / ".shared").exists()
     finally:
         snapshot.cleanup()
