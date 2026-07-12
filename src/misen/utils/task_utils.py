@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from rich.console import Console as RichConsole
 
 from misen.exceptions import HashError
-from misen.sentinels import SCRATCH_DIR
+from misen.sentinels import SCRATCH_DIR, is_runtime_sentinel
 from misen.task_metadata import Resources
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashing import ResultHash, TaskHash
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from inspect import Signature
     from pathlib import Path
+    from types import BuiltinFunctionType, FunctionType
 
     from misen.task_metadata import TaskMetadata
     from misen.tasks import Task
@@ -43,6 +44,7 @@ __all__ = [
     "execute_task",
     "hash_task_arguments",
     "save_task_result",
+    "validate_task_sentinels",
 ]
 
 R = TypeVar("R")
@@ -72,9 +74,15 @@ def hash_task_arguments(
     Returns:
         Mapping ``argument_name -> (hash_value, version)``.
 
+    Notes:
+        Arguments bound to runtime sentinels (e.g. ``SCRATCH_DIR``) are
+        excluded from the result: the injected value varies per
+        workspace/machine and must not contribute to task identity.
+
     Raises:
-        RuntimeError: If sentinel values appear in arguments during hash
-            calculation.
+        RuntimeError: If a sentinel value reaches hash calculation anyway
+            (internal invariant; sentinel misuse is rejected at ``Task``
+            construction by :func:`validate_task_sentinels`).
     """
     from misen.tasks import Task
 
@@ -90,13 +98,17 @@ def hash_task_arguments(
         if isinstance(value, Task):
             return cast("TaskHash | ResultHash", leaf_representation(value))
 
-        if value is SCRATCH_DIR:
-            msg = "Resolved task arguments cannot contain sentinel values."
+        if is_runtime_sentinel(value):
+            msg = f"Sentinel {value!r} unexpectedly reached argument hashing; sentinels never contribute to identity."
             raise RuntimeError(msg)
 
         return ResultHash.from_object(map_nested_leaves(value, leaf_representation))
 
     def include_argument(name: str, value: Any) -> bool:
+        # Runtime-injected values (e.g. SCRATCH_DIR) never contribute to task
+        # identity: the injected value varies per workspace/machine.
+        if is_runtime_sentinel(value):
+            return False
         return name not in meta.exclude and (name not in meta.defaults or meta.defaults[name] != value)
 
     hashed_arguments: dict[str, tuple[TaskHash | ResultHash, int]] = {}
@@ -125,6 +137,67 @@ def hash_task_arguments(
         hashed_arguments[name] = (arg_hash, version)
 
     return hashed_arguments
+
+
+def validate_task_sentinels(
+    *,
+    signature: Signature,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    func: FunctionType | BuiltinFunctionType,
+) -> None:
+    """Reject runtime-sentinel misuse when a task is constructed.
+
+    Sentinels (e.g. ``SCRATCH_DIR``) are resolved by mapping over a task's
+    bound ``args``/``kwargs`` at execution time, so they are only supported as
+    top-level ``Task(...)`` arguments. Two misuses would otherwise leak the
+    raw sentinel object into the function body mid-run:
+
+    - a sentinel used as a *function-signature default* that is not explicitly
+      bound at ``Task(...)`` — Python applies signature defaults at call time,
+      after argument resolution, so the resolver never sees it
+    - a sentinel *nested inside a container* argument — the resolver replaces
+      only top-level values
+
+    Args:
+        signature: Task function signature.
+        args: Positional arguments bound at ``Task(...)``.
+        kwargs: Keyword arguments bound at ``Task(...)``.
+        func: Task function, used for error messages.
+
+    Raises:
+        TypeError: If an unbound parameter has a sentinel signature default,
+            or a sentinel appears nested inside a container argument.
+    """
+    bound_names = set(signature.bind_partial(*args, **kwargs).arguments)
+    for name, parameter in signature.parameters.items():
+        if name in bound_names or not is_runtime_sentinel(parameter.default):
+            continue
+        msg = (
+            f"{parameter.default!r} cannot be a function-signature default (parameter '{name}' of "
+            f"{func.__name__}): Python applies signature defaults at call time, bypassing misen's "
+            f"argument resolver, so the raw sentinel object would reach the function body. Keep the "
+            f"signature misen-agnostic (e.g. '{name}: Path') and bind the sentinel when constructing "
+            f"the task: Task({func.__name__}, {name}={parameter.default!r})."
+        )
+        raise TypeError(msg)
+
+    named_values = itertools.chain(
+        ((f"positional argument {index}", value) for index, value in enumerate(args)),
+        ((f"argument '{name}'", value) for name, value in kwargs.items()),
+    )
+    for location, value in named_values:
+        if is_runtime_sentinel(value):
+            continue
+        nested = next((leaf for leaf in iter_nested_leaves(value) if is_runtime_sentinel(leaf)), None)
+        if nested is not None:
+            msg = (
+                f"{nested!r} must be a top-level Task(...) argument, but it is nested inside "
+                f"{location} of {func.__name__}. Nested sentinels are not resolved at runtime; "
+                f"pass the sentinel directly instead, e.g. Task({func.__name__}, ..., "
+                f"my_param={nested!r})."
+            )
+            raise TypeError(msg)
 
 
 def collect_task_dependencies(args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> frozenset[Task[Any]]:
