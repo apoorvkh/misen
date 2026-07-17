@@ -77,7 +77,7 @@ class TaskIdFiller(cst.CSTTransformer):
 
     @override
     def leave_Decorator(self, original_node: cst.Decorator, updated_node: cst.Decorator) -> cst.Decorator:
-        """Rewrite task decorators missing an ``id`` or using ``id=None``."""
+        """Rewrite task decorators missing an ``id`` or using a placeholder (``id=None`` or ``id=""``)."""
         del original_node
         decorator = updated_node.decorator
         if _is_task_reference(decorator):
@@ -93,7 +93,7 @@ class TaskIdFiller(cst.CSTTransformer):
         for index, arg in enumerate(args):
             if arg.keyword is None or arg.keyword.value != "id":
                 continue
-            if m.matches(arg.value, m.Name("None")):
+            if _is_placeholder_id(arg.value):
                 args[index] = arg.with_changes(
                     equal=_id_assign_equal(),
                     value=_make_id_string(self._uuid_factory()),
@@ -415,6 +415,13 @@ def _as_str_list(value: object) -> list[str]:
 
 def _is_task_reference(expression: cst.BaseExpression) -> bool:
     return m.matches(expression, m.Name("meta")) or m.matches(expression, m.Attribute(attr=m.Name("meta")))
+
+
+def _is_placeholder_id(value: cst.BaseExpression) -> bool:
+    """Return whether an ``id`` value is a placeholder: ``None`` or an empty string literal."""
+    if m.matches(value, m.Name("None")):
+        return True
+    return isinstance(value, cst.SimpleString) and value.evaluated_value == ""
 
 
 def _insert_id_arg(args: list[cst.Arg], id_arg: cst.Arg) -> list[cst.Arg]:

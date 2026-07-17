@@ -151,7 +151,7 @@ class TaskMetadata(Struct, frozen=True):
 
 def meta(
     *,
-    id: str | None = None,  # noqa: A002
+    id: str = "",  # noqa: A002
     cache: bool = False,
     exclude: set[str] | None = None,
     defaults: dict[str, Any] | None = None,
@@ -176,9 +176,9 @@ def meta(
         A decorator that annotates the target function.
 
     Raises:
-        ValueError: If ``id`` is not provided.
+        ValueError: If ``id`` is not provided or is empty.
     """
-    if id is None:
+    if not id:
         msg = "id must be provided."
         raise ValueError(msg)
 
