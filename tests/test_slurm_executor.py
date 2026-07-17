@@ -179,3 +179,101 @@ def test_slurm_dispatch_delegates_resource_isolation_to_slurm(monkeypatch, tmp_p
 )
 def test_normalize_slurm_state_strips_annotations(raw: str, expected: str) -> None:
     assert slurm_module._normalize_slurm_state(raw) == expected  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("raw", "in_queue", "expected"),
+    [
+        # Still tracked by the controller (seen via squeue): a preempted job on a
+        # PreemptMode=REQUEUE cluster is mid-requeue, not a terminal failure.
+        ("PREEMPTED", True, "pending"),
+        ("PREEMPTED+", True, "pending"),
+        ("PREEMPTED by 1234", True, "pending"),
+        # Left the queue (answered only by sacct): the preemption was terminal.
+        ("PREEMPTED", False, "failed"),
+        ("PREEMPTED+", False, "failed"),
+    ],
+)
+def test_normalize_slurm_state_preempted_depends_on_queue_membership(raw: str, in_queue: bool, expected: str) -> None:
+    assert slurm_module._normalize_slurm_state(raw, in_queue=in_queue) == expected  # noqa: SLF001
+
+
+def test_slurm_bulk_state_preempted_in_queue_is_pending_without_sacct(monkeypatch) -> None:
+    """A PREEMPTED job still in squeue is pending and needs no sacct lookup.
+
+    On a PreemptMode=REQUEUE cluster a preempted job transiently reports
+    PREEMPTED in squeue before being requeued under the same id. Because the
+    controller still tracks it, its state must be resolved from squeue alone --
+    consulting sacct (which would report the terminal PREEMPTED) and finalizing
+    the log would wrongly abandon a job SLURM is going to rerun.
+    """
+    job = _make_slurm_job(slurm_id="7", x=0)
+    # sacct *would* report the terminal PREEMPTED, but it must never be reached.
+    recorder = _RunRecorder({"squeue": "7 PREEMPTED\n", "sacct": "7 PREEMPTED\n"})
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
+
+    states = SlurmJob.bulk_state([job])
+
+    assert states[job] == "pending"
+    # squeue answered for the id, so no sacct fallback happened.
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0][0].endswith("squeue")
+    # A non-terminal state must not finalize the (still-streaming) job log.
+    cast("MagicMock", job.workspace.finalize_job_log).assert_not_called()
+
+
+def test_slurm_bulk_state_out_of_queue_preempted_is_failed(monkeypatch, tmp_path) -> None:
+    """A preempted job that has left the queue (e.g. PreemptMode=CANCEL) is a real failure."""
+    job = _make_slurm_job(slurm_id="9", x=0)
+    log = tmp_path / "j.log"
+    log.write_text("streaming output")
+    job.log_path = log
+
+    # squeue no longer knows the job; sacct reports the terminal PREEMPTED.
+    recorder = _RunRecorder({"squeue": "", "sacct": "9 PREEMPTED\n"})
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
+
+    states = SlurmJob.bulk_state([job])
+
+    assert states[job] == "failed"
+    # Fell through squeue (empty) to sacct.
+    assert len(recorder.calls) == 2
+    assert recorder.calls[1][0].endswith("sacct")
+    # A terminal state finalizes the log exactly once.
+    cast("MagicMock", job.workspace.finalize_job_log).assert_called_once_with(log)
+
+
+def test_slurm_bulk_state_preempt_requeue_transition_is_not_terminal(monkeypatch, tmp_path) -> None:
+    """Walk a job through preempt -> requeue -> rerun -> completion.
+
+    On a PreemptMode=REQUEUE cluster the same slurm id cycles through PREEMPTED
+    (transient) and REQUEUED before running again. None of those intermediate
+    states are terminal, so the job log must stay open until the rerun actually
+    COMPLETEs -- a premature finalize would give up on the DAG mid-preemption.
+    """
+    job = _make_slurm_job(slurm_id="55", x=0)
+    log = tmp_path / "j.log"
+    log.write_text("streaming output")
+    job.log_path = log
+
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+
+    def poll(squeue_reply: str, sacct_reply: str = "") -> str:
+        recorder = _RunRecorder({"squeue": squeue_reply, "sacct": sacct_reply})
+        monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
+        return SlurmJob.bulk_state([job])[job]
+
+    # The controller keeps the job the whole way through the preempt/requeue
+    # cycle, so every intermediate poll is non-terminal.
+    assert poll("55 RUNNING\n") == "running"
+    assert poll("55 PREEMPTED\n") == "pending"  # caught mid-preemption / grace time
+    assert poll("55 REQUEUED\n") == "pending"
+    assert poll("55 PENDING\n") == "pending"
+    assert poll("55 RUNNING\n") == "running"
+    cast("MagicMock", job.workspace.finalize_job_log).assert_not_called()
+
+    # The rerun finishes; squeue has dropped the id and sacct is authoritative.
+    assert poll("", "55 COMPLETED\n") == "done"
+    cast("MagicMock", job.workspace.finalize_job_log).assert_called_once_with(log)

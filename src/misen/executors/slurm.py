@@ -90,7 +90,7 @@ class SlurmJob(Job):
         )
         for sid, raw in _parse_id_state_rows(squeue_out):
             if sid in by_id:
-                states[sid] = _normalize_slurm_state(raw)
+                states[sid] = _normalize_slurm_state(raw, in_queue=True)
                 remaining.discard(sid)
 
         if remaining:
@@ -100,7 +100,7 @@ class SlurmJob(Job):
             )
             for sid, raw in _parse_id_state_rows(sacct_out):
                 if sid in by_id:
-                    states[sid] = _normalize_slurm_state(raw)
+                    states[sid] = _normalize_slurm_state(raw, in_queue=False)
                     remaining.discard(sid)
 
         result: dict[Job, JobState] = {}
@@ -275,6 +275,9 @@ class _SlurmRule(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True)
 _SLURM_STATE_MAP: dict[str, _State] = {
     **dict.fromkeys(("PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED", "REQUEUED_HOLD", "STAGE_OUT"), "pending"),
     **dict.fromkeys(("RUNNING", "COMPLETING"), "running"),
+    # ``PREEMPTED`` here is the terminal (out-of-queue) reading; a preempted job
+    # still tracked by the controller is requeue-bound and mapped to ``pending``
+    # in ``_normalize_slurm_state`` via its ``in_queue`` flag.
     **dict.fromkeys(
         (
             "BOOT_FAIL",
@@ -371,7 +374,18 @@ def _parse_id_state_rows(output: str) -> list[tuple[str, str]]:
     return rows
 
 
-def _normalize_slurm_state(raw: str) -> JobState:
-    """Strip SLURM annotations like ``"CANCELLED+"`` / ``"CANCELLED by 1"`` and map to misen state."""
+def _normalize_slurm_state(raw: str, *, in_queue: bool = False) -> JobState:
+    """Strip SLURM annotations like ``"CANCELLED+"`` / ``"CANCELLED by 1"`` and map to misen state.
+
+    ``in_queue`` marks states read from ``squeue`` -- i.e. the controller still
+    tracks the job. This matters for ``PREEMPTED``: on a ``PreemptMode=REQUEUE``
+    cluster a preempted job transiently reports ``PREEMPTED`` (including during
+    any preemption ``GraceTime``) and is then requeued under the *same* job id,
+    so a ``PREEMPTED`` job still in the queue is non-terminal and reported as
+    ``pending``. A ``PREEMPTED`` job that has left the queue (answered only by
+    ``sacct``) was not requeued and is a genuine failure -- the map default.
+    """
     head = raw.upper().split("+", maxsplit=1)[0].split(":", maxsplit=1)[0].split(None, 1)[0]
+    if in_queue and head == "PREEMPTED":
+        return "pending"
     return _SLURM_STATE_MAP.get(head, "unknown")
