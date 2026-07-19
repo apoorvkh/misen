@@ -487,6 +487,20 @@ def test_executor_validation(tmp_path: Path) -> None:
     assert SlurmExecutor(snapshot=False)._make_snapshot(disk) is None
 
 
+def test_in_process_executor_warns_on_snapshot_config(caplog: pytest.LogCaptureFixture) -> None:
+    from misen.executors.in_process import InProcessExecutor
+
+    with caplog.at_level("WARNING", logger="misen.executors.in_process"):
+        executor = InProcessExecutor(snapshot=True)
+    assert executor.snapshot is True
+    assert any("ignores snapshot=True" in record.message for record in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="misen.executors.in_process"):
+        InProcessExecutor()
+    assert not caplog.records
+
+
 @pytest.mark.usefixtures("in_project")
 def test_slurm_executor_bootstrap_dispatch(tmp_path: Path) -> None:
     """Default SLURM config produces a bootstrap dispatch through the workspace."""

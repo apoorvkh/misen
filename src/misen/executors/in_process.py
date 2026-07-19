@@ -36,6 +36,15 @@ class InProcessExecutor(Executor[CompletedJob]):
 
     snapshot: bool = False
 
+    def __post_init__(self) -> None:
+        """Warn when snapshotting is requested; it cannot apply in-process."""
+        if self.snapshot:
+            logger.warning(
+                "InProcessExecutor ignores snapshot=True: tasks execute as live objects in "
+                "this process, so pinned code and materialized environments cannot apply. "
+                "Use LocalExecutor for snapshotted subprocess execution."
+            )
+
     def submit(
         self,
         tasks: set[Task],
