@@ -26,7 +26,7 @@ import weakref
 from collections.abc import Iterator, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Self, TextIO
+from typing import TYPE_CHECKING, Literal, Self
 
 from misen.exceptions import LockUnavailableError
 from misen.utils.hashing import ResultHash
@@ -191,6 +191,17 @@ class InMemoryWorkspace(Workspace):
         """Return workspace temporary directory path."""
         return self._directory / "tmp"
 
+    def _snapshots_dir(self) -> Path:
+        return self._directory / "snapshots"
+
+    def _job_files_dir(self) -> Path:
+        return self._directory / "job_files"
+
+    @property
+    def job_files_are_paths(self) -> bool:
+        """Job files are local paths on this backend."""
+        return True
+
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task."""
         key_str = task.resolved_hash(workspace=self).b32()
@@ -199,27 +210,8 @@ class InMemoryWorkspace(Workspace):
         return d
 
     def _task_log_dir(self, task: Task) -> tuple[Path, str]:
-        # Logs are keyed by resolved_hash; resolution requires every dependency's
-        # result hash to be cached, otherwise this raises ``CacheError``.
+        """Flat task-log directory behind the base path-backed log methods."""
         key_str = task.resolved_hash(workspace=self).b32()
         log_dir = self._directory / "task_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str
-
-    def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
-        """Return path where ``task``'s log for ``job_id`` should be written."""
-        log_dir, key_str = self._task_log_dir(task)
-        return log_dir / f"{key_str}_{job_id or '0'}.log"
-
-    def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
-        """Open a previously-written task log for reading."""
-        log_dir, key_str = self._task_log_dir(task)
-        if job_id is None:
-            matches = sorted(log_dir.glob(f"{key_str}_*.log"), key=lambda p: p.stat().st_mtime)
-            if not matches:
-                msg = f"No logs found for {key_str} in {log_dir}"
-                raise FileNotFoundError(msg)
-            log_path = matches[-1]
-        else:
-            log_path = log_dir / f"{key_str}_{job_id}.log"
-        return log_path.open("r", buffering=1)

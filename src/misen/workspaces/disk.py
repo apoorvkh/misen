@@ -13,7 +13,6 @@ and lock-based safety for concurrent producers.
 
 from __future__ import annotations
 
-import base64
 import binascii
 import logging
 import os
@@ -21,8 +20,9 @@ import shutil
 import tempfile
 from collections.abc import Iterator, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic, Literal, Self, TextIO, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Literal, Self, TypeVar, cast
 
+from misen.utils.fsync import atomic_write_bytes as _atomic_write_bytes
 from misen.utils.fsync import fsync_dir as _fsync_dir
 from misen.utils.fsync import fsync_file as _fsync_file
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
@@ -72,20 +72,6 @@ def _fsync_tree(root: Path) -> None:
 # an in-flight write or delete may leave behind.
 _B32_LEN = len(ResultHash(0).b32())
 _B32_SHARD_GLOB = f"{'[A-Z2-7]' * 2}/{'[A-Z2-7]' * _B32_LEN}"
-
-
-def _decode_b32(name: str) -> int:
-    """Decode an unpadded base32 key name back to its integer value.
-
-    Inverse of :meth:`misen.utils.hashing.Hash.b32`.
-
-    Args:
-        name: Unpadded base32 string.
-
-    Returns:
-        The decoded unsigned integer.
-    """
-    return int.from_bytes(base64.b32decode(name + "=" * (-len(name) % 8)), "big")
 
 
 class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
@@ -159,32 +145,18 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     def __setitem__(self, key: KT, value: VT) -> None:
         """Atomically write the value for ``key``, overwriting any prior value.
 
-        The value is written to a hidden temp file in the destination shard,
-        flushed and fsync'd, then moved into place with ``os.replace`` -- an
-        atomic overwrite within one filesystem, so a concurrent reader sees
-        either the old value or the new one, never a partial write. The shard
-        directory is fsync'd afterward so the rename survives a crash. On any
-        failure the temp file is removed before the error propagates.
+        Uses the shared durable-replace sequence (temp file, fsync, atomic
+        rename, directory fsync), so a concurrent reader sees either the
+        old value or the new one, never a partial write, and the rename
+        survives a crash.
 
         Args:
             key: Hash key.
             value: Hash value.
         """
         path = self._key_path(key)
-        parent = path.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=parent, prefix=f".{key.b32()}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(value.encode())
-                f.flush()
-                os.fsync(fd)
-            os.replace(tmp, path)  # noqa: PTH105  -- atomic overwrite; Path has no equivalent
-        finally:
-            # No-op on success (``os.replace`` consumed ``tmp``); on failure
-            # this removes the partial temp file before the error propagates.
-            Path(tmp).unlink(missing_ok=True)
-        _fsync_dir(parent)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(path, value.encode())
 
     def __delitem__(self, key: KT) -> None:
         """Remove the value stored for ``key``.
@@ -223,7 +195,7 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             if not p.is_file() or p.name[:2] != p.parent.name:
                 continue
             try:
-                yield self._key_type(_decode_b32(p.name))
+                yield self._key_type.from_b32(p.name)
             except (binascii.Error, ValueError):
                 continue
 
@@ -328,7 +300,7 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
             if not p.is_dir() or p.name[:2] != p.parent.name:
                 continue
             try:
-                yield ResultHash(_decode_b32(p.name))
+                yield ResultHash.from_b32(p.name)
             except (binascii.Error, ValueError):
                 continue
 
@@ -400,6 +372,42 @@ class DiskWorkspace(Workspace):
         """Return workspace temporary directory path."""
         return self._directory_path / "tmp"
 
+    def _snapshots_dir(self) -> Path:
+        return self._directory_path / "snapshots"
+
+    def _job_files_dir(self) -> Path:
+        return self._directory_path / "job_files"
+
+    @property
+    def job_files_are_paths(self) -> bool:
+        """Job files are worker-visible paths on this backend."""
+        return True
+
+    def publish_snapshot(self, key: str, staged_dir: Path) -> None:
+        """Publish a staged snapshot tree by atomic rename + durable marker.
+
+        Extends the base path-backed publication with NFS crash safety:
+        the tree is fsync'd before the rename, and the fsync'd
+        ``<key>.complete`` marker is the commit point (payload before
+        pointer). A tree without a marker is a crashed publisher's residue,
+        and — because entries are content-addressed and the rename was
+        atomic — that residue is a *complete* tree, so a later publisher
+        may simply re-commit the marker.
+        """
+        snapshots_dir = self._snapshots_dir()
+        if self.has_snapshot(key):
+            return
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        _fsync_tree(staged_dir)
+        self._adopt_staged_tree(staged_dir, snapshots_dir / key)
+        _fsync_dir(snapshots_dir)
+        _atomic_write_bytes(snapshots_dir / f"{key}.complete", b"complete\n")
+
+    def has_snapshot(self, key: str) -> bool:
+        """Return whether a published snapshot exists for ``key`` (marker-committed)."""
+        snapshots_dir = self._snapshots_dir()
+        return (snapshots_dir / f"{key}.complete").is_file() and (snapshots_dir / key).is_dir()
+
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task.
 
@@ -416,30 +424,8 @@ class DiskWorkspace(Workspace):
         return d
 
     def _task_log_dir(self, task: Task) -> tuple[Path, str]:
-        # Logs are keyed by resolved_hash so two runs of the same task with
-        # different dependency results land in distinct log directories.
-        # Resolving the hash requires every dependency's result hash to be
-        # cached; callers that may invoke this before deps complete should
-        # expect ``CacheError``.
+        """Sharded task-log directory behind the base path-backed log methods."""
         key_str = task.resolved_hash(workspace=self).b32()
         log_dir = self._directory_path / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str
-
-    def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
-        """Return path where ``task``'s log for ``job_id`` should be written."""
-        log_dir, key_str = self._task_log_dir(task)
-        return log_dir / f"{key_str}_{job_id or '0'}.log"
-
-    def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
-        """Open a previously-written task log for reading."""
-        log_dir, key_str = self._task_log_dir(task)
-        if job_id is None:
-            matches = sorted(log_dir.glob(f"{key_str}_*.log"), key=lambda p: p.stat().st_mtime)
-            if not matches:
-                msg = f"No logs found for {key_str} in {log_dir}"
-                raise FileNotFoundError(msg)
-            log_path = matches[-1]
-        else:
-            log_path = log_dir / f"{key_str}_{job_id}.log"
-        return log_path.open("r", buffering=1)

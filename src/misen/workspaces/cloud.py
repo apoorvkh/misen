@@ -9,11 +9,13 @@ compacted into a single ``.log`` object on close.
 
 from __future__ import annotations
 
-import base64
 import binascii
 import contextlib
+import io
 import logging
+import os
 import shutil
+import tarfile
 import tempfile
 import threading
 from collections.abc import Iterator, MutableMapping
@@ -44,6 +46,126 @@ CloudBackend: TypeAlias = Literal["s3", "gcs", "azure"]
 _CHUNKS = ".chunks"
 _STATE = ".state.json"
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------
+# Obstore data-plane helpers. Module-level (not methods) because the worker
+# bootstrap (misen.utils.bootstrap_env) reconstructs the data plane from a
+# transport spec — misen built-ins only, since the bootstrap env cannot
+# import custom CloudWorkspace subclasses. Both the workspace and the
+# bootstrap go through these, so layouts can never drift apart.
+# --------------------------------------------------------------------------
+
+
+def _join_prefix(prefix: str, *parts: str) -> str:
+    """Join object-key parts under an optional prefix (no leading/trailing slashes)."""
+    return "/".join(part for part in (prefix, *(p.strip("/") for p in parts if p)) if part)
+
+
+def _build_obstore_store(
+    backend: str,
+    bucket: str,
+    *,
+    endpoint: str | None = None,
+    s3_region: str | None = None,
+    config: dict[str, str] | None = None,
+) -> Any:
+    """Construct the obstore client for a backend/bucket/config triple.
+
+    Raises:
+        ValueError: On an unsupported backend or a config key colliding
+            with a dedicated field.
+    """
+    cfg = cast("dict[str, Any]", dict(config or {}))
+    explicit: dict[str, Any] = {}
+    if backend == "s3":
+        if s3_region is not None:
+            explicit["region"] = s3_region
+        if endpoint is not None:
+            explicit["endpoint"] = endpoint
+    elif backend == "azure":
+        if endpoint is not None:
+            explicit["endpoint"] = endpoint
+    for key, value in explicit.items():
+        if key in cfg:
+            msg = f"{key!r} cannot appear in both config and the dedicated field."
+            raise ValueError(msg)
+        cfg[key] = value
+
+    if backend == "s3":
+        return S3Store(bucket=bucket, **cfg)
+    if backend == "gcs":
+        return GCSStore(bucket=bucket, **cfg)
+    if backend == "azure":
+        return AzureStore(container_name=bucket, **cfg)
+    msg = f"Unsupported cloud backend: {backend!r}"
+    raise ValueError(msg)
+
+
+def _snapshot_object_key(prefix: str, key: str) -> str:
+    """Object key of a published snapshot tarball."""
+    return _join_prefix(prefix, "snapshots", f"{key}.tar.gz")
+
+
+def _download_snapshot(store: Any, prefix: str, key: str, target_dir: Path) -> Path:
+    """Materialize a published snapshot tarball into ``target_dir``.
+
+    Extracts into a sibling temp dir and renames into place, tolerating a
+    concurrent fetch of the same key (first rename wins; losers discard).
+
+    Raises:
+        FileNotFoundError: If no snapshot is published under ``key``.
+    """
+    if target_dir.exists():
+        return target_dir
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    object_key = _snapshot_object_key(prefix, key)
+    try:
+        payload = obs.get(store, object_key).bytes()
+    except FileNotFoundError as e:
+        msg = f"No snapshot published under key {key!r} at {object_key}."
+        raise FileNotFoundError(msg) from e
+    tmp = Path(tempfile.mkdtemp(dir=target_dir.parent, prefix=f".{key}.", suffix=".tmp"))
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+            tar.extractall(tmp, filter="data")
+        tmp.rename(target_dir)
+    except OSError:
+        # Renaming onto a directory a concurrent fetch just created fails
+        # (EEXIST/ENOTEMPTY); identical content is already in place.
+        shutil.rmtree(tmp, ignore_errors=True)
+        if not target_dir.exists():
+            raise
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return target_dir
+
+
+def _download_file(store: Any, object_key: str, target: Path, mode: int = 0o600) -> Path:
+    """Materialize one object as a local owner-only file (cached if present).
+
+    Raises:
+        FileNotFoundError: If the object does not exist.
+    """
+    if target.is_file():
+        return target
+    try:
+        payload = obs.get(store, object_key).bytes()
+    except FileNotFoundError as e:
+        raise FileNotFoundError(object_key) from e
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "wb") as f:
+        f.write(payload)
+    return target
+
+
+def _delete_prefix(store: Any, prefix: str) -> None:
+    """Bulk-delete every object under ``prefix``."""
+    keys = [entry["path"] for batch in obs.list(store, prefix=prefix) for entry in batch]
+    if keys:
+        obs.delete(store, keys)
 
 
 class ObstoreMapping(MutableMapping[KT, VT], Generic[KT, VT]):
@@ -105,7 +227,7 @@ class ObstoreMapping(MutableMapping[KT, VT], Generic[KT, VT]):
                 if not rel:
                     continue
                 try:
-                    yield self._key_type(int.from_bytes(base64.b32decode(rel + "=" * (-len(rel) % 8)), "big"))
+                    yield self._key_type.from_b32(rel)
                 except (binascii.Error, ValueError, TypeError):
                     continue
 
@@ -203,7 +325,7 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
                 if sep != "/" or tail != MANIFEST_FILENAME or len(head) != b32_len:
                     continue
                 try:
-                    yield ResultHash(int.from_bytes(base64.b32decode(head + "=" * (-len(head) % 8)), "big"))
+                    yield ResultHash.from_b32(head)
                 except (binascii.Error, ValueError, TypeError):
                     continue
 
@@ -477,39 +599,35 @@ class CloudWorkspace(Workspace):
         s3_region)`` produce the same id and may safely share local cache;
         any other pair produces distinct ids.
         """
-        payload = msgspec.json.encode(
-            (self.backend, self.bucket, self.prefix, self.endpoint, self.s3_region)
-        )
+        payload = msgspec.json.encode((self.backend, self.bucket, self.prefix, self.endpoint, self.s3_region))
         return xxh3_64_hexdigest(payload)
 
     def _build_store(self) -> Any:
-        cfg = cast("dict[str, Any]", dict(self.config))
-        explicit: dict[str, Any] = {}
-        if self.backend == "s3":
-            if self.s3_region is not None:
-                explicit["region"] = self.s3_region
-            if self.endpoint is not None:
-                explicit["endpoint"] = self.endpoint
-        elif self.backend == "azure":
-            if self.endpoint is not None:
-                explicit["endpoint"] = self.endpoint
-        for key, value in explicit.items():
-            if key in cfg:
-                msg = f"{key!r} cannot appear in both config and the dedicated field."
-                raise ValueError(msg)
-            cfg[key] = value
+        return _build_obstore_store(
+            self.backend, self.bucket, endpoint=self.endpoint, s3_region=self.s3_region, config=self.config
+        )
 
-        if self.backend == "s3":
-            return S3Store(bucket=self.bucket, **cfg)
-        if self.backend == "gcs":
-            return GCSStore(bucket=self.bucket, **cfg)
-        if self.backend == "azure":
-            return AzureStore(container_name=self.bucket, **cfg)
-        msg = f"Unsupported cloud backend: {self.backend!r}"
-        raise ValueError(msg)
+    def bootstrap_transport(self) -> dict[str, Any]:
+        """Obstore transport: enough for a worker to fetch snapshots/job files.
+
+        Deliberately *not* the workspace class/config: the bootstrap env
+        holds only misen, so a custom :class:`CloudWorkspace` subclass
+        would be unimportable there. The transport describes the blob
+        store in misen-built-in terms instead; subclasses that keep an
+        obstore-compatible layout inherit this for free.
+        """
+        return {
+            "kind": "obstore",
+            "backend": self.backend,
+            "bucket": self.bucket,
+            "prefix": self._cloud_prefix,
+            "endpoint": self.endpoint,
+            "s3_region": self.s3_region,
+            "config": dict(self.config),
+        }
 
     def _under(self, *parts: str) -> str:
-        return "/".join(part for part in (self._cloud_prefix, *(p.strip("/") for p in parts if p)) if part)
+        return _join_prefix(self._cloud_prefix, *parts)
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
         return ObjectStoreLock(
@@ -521,6 +639,48 @@ class CloudWorkspace(Workspace):
 
     def get_temp_dir(self) -> Path:
         return self._cache / "tmp"
+
+    # -- snapshot store -------------------------------------------------
+    # One ``snapshots/<key>.tar.gz`` object per content key (a tarball
+    # avoids per-file object churn: a staged tree is many small files),
+    # unpacked into the per-host cache on fetch. ``publish_snapshot``
+    # seeds the local cache from the staged tree so the submitting host
+    # never re-downloads its own upload.
+
+    def _snapshot_cache_dir(self, key: str) -> Path:
+        return self._cache / "snapshots" / key
+
+    def publish_snapshot(self, key: str, staged_dir: Path) -> None:
+        if not self.has_snapshot(key):
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+                tar.add(staged_dir, arcname=".")
+            obs.put(self._store, _snapshot_object_key(self._cloud_prefix, key), buffer.getbuffer(), mode="overwrite")
+        local = self._snapshot_cache_dir(key)
+        if not local.exists():
+            local.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                staged_dir.rename(local)
+
+    def has_snapshot(self, key: str) -> bool:
+        if self._snapshot_cache_dir(key).exists():
+            return True
+        try:
+            obs.head(self._store, _snapshot_object_key(self._cloud_prefix, key))
+        except FileNotFoundError:
+            return False
+        return True
+
+    def fetch_snapshot(self, key: str) -> Path:
+        return _download_snapshot(self._store, self._cloud_prefix, key, self._snapshot_cache_dir(key))
+
+    # -- job files ------------------------------------------------------
+
+    def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
+        self._check_job_file_name(name)
+        ref = self._under("job_files", submission_id, name)
+        obs.put(self._store, ref, data, mode="overwrite")
+        return ref
 
     def _get_scratch_dir(self, task: Task) -> Path:
         path = self._cache / "scratch" / task.resolved_hash(workspace=self).b32()
@@ -554,10 +714,7 @@ class CloudWorkspace(Workspace):
             sync.stop(final_upload=True)
 
     def _delete_scratch_dir_remote(self, remote_prefix: str) -> None:
-        prefix = f"{remote_prefix}/"
-        keys = [entry["path"] for batch in obs.list(self._store, prefix=prefix) for entry in batch]
-        if keys:
-            obs.delete(self._store, keys)
+        _delete_prefix(self._store, f"{remote_prefix}/")
 
     def remove_scratch_dir(self, task: Task) -> None:
         if not task.meta.cache:

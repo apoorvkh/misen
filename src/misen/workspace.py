@@ -21,6 +21,7 @@ import shutil
 from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
 from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar
 
 from misen.exceptions import CacheError
@@ -30,7 +31,6 @@ from misen.utils.settings import Configurable
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
     from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
     from misen.utils.locks import LockLike
@@ -191,6 +191,168 @@ class Workspace(Configurable):
     def get_temp_dir(self) -> Path:
         """Return temporary directory used for workspace operations."""
 
+    # ------------------------------------------------------------------
+    # Snapshot store: content-addressed, immutable staged project trees
+    # (see misen.utils.snapshot.ProjectSnapshot). Entries are published
+    # once per content key and fetched by workers, so the workspace is the
+    # data plane for code distribution — no shared filesystem required
+    # beyond what the workspace itself needs.
+    # ------------------------------------------------------------------
+
+    def _snapshots_dir(self) -> Path:
+        """Root of the path-backed snapshot store (see :meth:`publish_snapshot`).
+
+        Backends relying on the default path-backed snapshot/job-file
+        implementations must place this (and :meth:`_job_files_dir`) on
+        storage every worker can read.
+        """
+        raise NotImplementedError
+
+    def publish_snapshot(self, key: str, staged_dir: Path) -> None:
+        """Publish a staged snapshot tree under a content key.
+
+        Idempotent: publishing an already-present key is a no-op (entries
+        are content-addressed, so any two publishers of one key hold
+        identical bytes). Implementations may consume ``staged_dir`` (move
+        it into the store); callers must treat it as gone and clean up any
+        remainder themselves. ``staged_dir`` must live under
+        :meth:`get_temp_dir` so same-filesystem publication is possible.
+
+        The default implementation adopts the tree into
+        ``<_snapshots_dir()>/<key>`` with no durability barriers; backends
+        with crash-safety or remote-storage requirements override.
+
+        Args:
+            key: Content key of the staged tree.
+            staged_dir: Directory containing the fully-written tree.
+        """
+        final = self._snapshots_dir() / key
+        if not final.exists():
+            final.parent.mkdir(parents=True, exist_ok=True)
+            self._adopt_staged_tree(staged_dir, final)
+
+    @staticmethod
+    def _adopt_staged_tree(staged_dir: Path, final: Path) -> None:
+        """Rename a staged tree into place, tolerating a concurrent publisher.
+
+        Renaming onto a directory another publisher just created fails
+        (``EEXIST``/``ENOTEMPTY``); identical content is already in place,
+        so losing the race is success.
+        """
+        try:
+            staged_dir.rename(final)
+        except OSError:
+            if not final.is_dir():
+                raise
+
+    def has_snapshot(self, key: str) -> bool:
+        """Return whether a published snapshot exists for ``key``."""
+        return (self._snapshots_dir() / key).is_dir()
+
+    def fetch_snapshot(self, key: str) -> Path:
+        """Return a local directory holding the snapshot for ``key``.
+
+        Backends with remote storage materialize into a local cache; the
+        returned tree must be treated as read-only.
+
+        Raises:
+            FileNotFoundError: If no snapshot is published under ``key``.
+        """
+        path = self._snapshots_dir() / key
+        if not self.has_snapshot(key):
+            msg = f"No snapshot published under key {key!r} in {path.parent}."
+            raise FileNotFoundError(msg)
+        return path
+
+    # ------------------------------------------------------------------
+    # Job files: small submission/job-scoped blobs (serialized payloads,
+    # copies of ``.env`` files), grouped by submission id so names never
+    # collide across submissions and an age-based prune can reclaim whole
+    # submissions. Unlike snapshots these are never content-addressed
+    # (they can carry secrets and per-job state).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_job_file_name(name: str) -> None:
+        """Reject job-file names that could escape the submission directory."""
+        if not name or "/" in name or "\\" in name or name in {".", ".."}:
+            msg = f"Invalid job-file name: {name!r}"
+            raise ValueError(msg)
+
+    def _job_files_dir(self) -> Path:
+        """Root of the path-backed job-file store (see :meth:`_snapshots_dir`)."""
+        raise NotImplementedError
+
+    def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
+        """Store submission-scoped bytes and return an opaque ref.
+
+        Files are written with owner-only permissions where the backend
+        supports it (they may carry secrets, e.g. ``.env.local``). The
+        default implementation stores an owner-only file under
+        ``<_job_files_dir()>/<submission_id>/<name>``; its ref is the path.
+
+        Args:
+            submission_id: Grouping key for one executor submission.
+            name: File name within the submission (no path separators).
+            data: File contents.
+
+        Returns:
+            Opaque reference usable with :meth:`job_file_path` (or a
+            backend's transport fetcher).
+        """
+        self._check_job_file_name(name)
+        path = self._job_files_dir() / submission_id / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+        return str(path)
+
+    def job_file_path(self, ref: str) -> Path | None:
+        """Return the directly-readable local path for a ref, if any.
+
+        Refs are plain worker-visible paths exactly when
+        :attr:`job_files_are_paths` is true (shared or local filesystems);
+        remote backends return ``None`` and workers fetch through the
+        bootstrap transport instead.
+        """
+        return Path(ref) if self.job_files_are_paths else None
+
+    @property
+    def job_files_are_paths(self) -> bool:
+        """Whether job-file refs are plain worker-visible paths."""
+        return False
+
+    def bootstrap_transport(self) -> dict[str, Any]:
+        """Describe this workspace's data plane for the worker env bootstrap.
+
+        The bootstrap env holds only misen, so it can never import a custom
+        ``Workspace`` subclass; instead of a workspace spec it receives this
+        small transport dict, expressed purely in misen-built-in terms:
+
+        - ``{"kind": "path"}``: snapshot dirs and job-file refs are literal
+          paths the worker can open (shared or local filesystems). The
+          base implementation returns this whenever
+          :attr:`job_files_are_paths` is true, so path-serving custom
+          workspaces get it for free.
+        - ``{"kind": "obstore", ...}``: an object-store description
+          (see :meth:`misen.workspaces.cloud.CloudWorkspace.bootstrap_transport`).
+
+        Workspaces with a data plane expressible as neither must override
+        this — or be used with ``prewarm_envs``, which never runs the
+        bootstrap.
+
+        Raises:
+            NotImplementedError: If this workspace declares no transport.
+        """
+        if self.job_files_are_paths:
+            return {"kind": "path"}
+        msg = (
+            f"{type(self).__name__} declares no bootstrap transport; override "
+            "bootstrap_transport() (in misen-built-in terms) or use prewarm_envs."
+        )
+        raise NotImplementedError(msg)
+
     def get_scratch_dir(self, task: Task) -> Path:
         """Return a per-task scratch directory for cacheable tasks.
 
@@ -270,7 +432,17 @@ class Workspace(Configurable):
         if path.exists():
             shutil.rmtree(path)
 
-    @abstractmethod
+    def _task_log_dir(self, task: Task) -> tuple[Path, str]:
+        """Return the (created) log directory and per-task key for ``task``.
+
+        Hook behind the default path-backed :meth:`get_task_log` /
+        :meth:`read_task_log`. Logs are keyed by resolved hash so two runs
+        of the same task with different dependency results land in
+        distinct files; resolving requires every dependency's result hash
+        to be cached, so early callers should expect ``CacheError``.
+        """
+        raise NotImplementedError
+
     def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
         """Return path where ``task``'s log for ``job_id`` should be written.
 
@@ -280,10 +452,12 @@ class Workspace(Configurable):
         a stable path.
 
         Workspaces that publish to remote storage (e.g.
-        :class:`misen.workspaces.cloud.CloudWorkspace`) start streaming the
-        local file to the bucket on this call; the matching
+        :class:`misen.workspaces.cloud.CloudWorkspace`) override to start
+        streaming the local file on this call; the matching
         :meth:`finalize_task_log` call stops it.
         """
+        log_dir, key_str = self._task_log_dir(task)
+        return log_dir / f"{key_str}_{job_id or '0'}.log"
 
     def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
         """Hook called when a task log is no longer being written.
@@ -295,7 +469,6 @@ class Workspace(Configurable):
         :class:`misen.workspaces.disk.DiskWorkspace`).
         """
 
-    @abstractmethod
     def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
         """Open a previously-written task log for reading.
 
@@ -307,6 +480,16 @@ class Workspace(Configurable):
         Raises:
             FileNotFoundError: If no matching log exists.
         """
+        log_dir, key_str = self._task_log_dir(task)
+        if job_id is None:
+            matches = sorted(log_dir.glob(f"{key_str}_*.log"), key=lambda p: p.stat().st_mtime)
+            if not matches:
+                msg = f"No logs found for {key_str} in {log_dir}"
+                raise FileNotFoundError(msg)
+            log_path = matches[-1]
+        else:
+            log_path = log_dir / f"{key_str}_{job_id}.log"
+        return log_path.open("r", buffering=1)
 
     def _job_logs_dir(self) -> Path:
         """Return the local directory where job-log files live.
