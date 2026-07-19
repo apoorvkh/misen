@@ -127,5 +127,5 @@ class FileMapSerializer(Serializer[FileMap[Any]]):
 
 file_map_serializers: list[type[Serializer]] = [FileMapSerializer]
 file_map_serializers_by_type: dict[str, type[Serializer]] = {
-    "misen.file_map.FileMap": FileMapSerializer,
+    "misen.utils.file_map.FileMap": FileMapSerializer,
 }
