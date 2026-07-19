@@ -25,7 +25,16 @@ logger = logging.getLogger(__name__)
 
 
 class InProcessExecutor(Executor[CompletedJob]):
-    """Executor that runs the full task DAG in dependency order in-process."""
+    """Executor that runs the full task DAG in dependency order in-process.
+
+    Snapshots are structurally impossible here — tasks execute as live
+    objects in this process, so there is no boundary at which pinned code
+    or a materialized environment could apply. ``snapshot`` therefore
+    defaults to ``False`` (and enabling it has no effect: execution never
+    dispatches through the snapshot machinery).
+    """
+
+    snapshot: bool = False
 
     def submit(
         self,
@@ -58,10 +67,6 @@ class InProcessExecutor(Executor[CompletedJob]):
 
         logger.info("InProcessExecutor finished executing %d task node(s).", len(list(task_graph.node_indices())))
         return DependencyGraph()
-
-    def _make_snapshot(self, workspace: Workspace) -> None:
-        """No snapshot: execution happens in this process's live environment."""
-        _ = workspace
 
     def _dispatch(
         self,
