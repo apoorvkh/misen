@@ -24,7 +24,7 @@ from misen.utils.runtime_events import (
     task_label,
     work_unit_label,
 )
-from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap, prepare_live_job
+from misen.utils.snapshot import prepare_live_job
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from types import FrameType
 
     from misen.task_metadata import GpuRuntime, Resources
+    from misen.utils.snapshot import ProjectSnapshot
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -183,8 +184,6 @@ class LocalExecutor(Executor[LocalJob]):
     rocm_gpu_indices: list[int] | None = None
     num_xpu_gpus: int = 0
     xpu_gpu_indices: list[int] | None = None
-    snapshot: bool = True
-    env_store_dir: str | None = None
     prewarm_envs: bool = True
     enforce_time_limits: bool = False
 
@@ -262,13 +261,6 @@ class LocalExecutor(Executor[LocalJob]):
             self._resource_budget.rocm_gpus,
             self._resource_budget.xpu_gpus,
         )
-
-    def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
-        """Return a project snapshot, or ``None`` for live dispatch when disabled."""
-        if not self.snapshot:
-            _detect_pixi_wrap()  # fail fast on a misconfigured pixi.lock
-            return None
-        return ProjectSnapshot(workspace=workspace, env_store_dir=self.env_store_dir, prewarm=self.prewarm_envs)
 
     def _dispatch(
         self,

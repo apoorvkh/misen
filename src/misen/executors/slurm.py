@@ -14,12 +14,13 @@ import msgspec
 
 from misen.executor import Executor, Job, JobState
 from misen.utils.runtime_events import work_unit_label
-from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap, prepare_live_job
+from misen.utils.snapshot import prepare_live_job
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from misen.utils.snapshot import ProjectSnapshot
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -132,9 +133,6 @@ class SlurmExecutor(Executor[SlurmJob]):
     constraint: str | None = None
     default_flags: dict[str, _SetValue] = msgspec.field(default_factory=dict)
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
-    snapshot: bool = True
-    env_store_dir: str | None = None
-    prewarm_envs: bool = False
 
     def __post_init__(self) -> None:
         """Normalize untyped config into msgspec structs."""
@@ -142,11 +140,8 @@ class SlurmExecutor(Executor[SlurmJob]):
         self.rules = msgspec.convert(self.rules, type=list[_SlurmRule])
 
     def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
-        """Return a project snapshot, or ``None`` for live dispatch when disabled."""
-        if not self.snapshot:
-            _detect_pixi_wrap()  # fail fast on a misconfigured pixi.lock
-            return None
-        if self.prewarm_envs and self.env_store_dir is None:
+        """Add the SLURM topology check to the default snapshot creation."""
+        if self.snapshot and self.prewarm_envs and self.env_store_dir is None:
             # Executor-topology check (submit host vs compute nodes); the
             # workspace-capability check lives on ProjectSnapshot.
             msg = (
@@ -155,7 +150,7 @@ class SlurmExecutor(Executor[SlurmJob]):
                 "on the submit host would be invisible to compute nodes)."
             )
             raise ValueError(msg)
-        return ProjectSnapshot(workspace=workspace, env_store_dir=self.env_store_dir, prewarm=self.prewarm_envs)
+        return super()._make_snapshot(workspace)
 
     def _dispatch(
         self,

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar
 
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, task_label, work_unit_label
 from misen.utils.settings import Configurable
+from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap
 from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     from misen.task_metadata import Resources
     from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
-    from misen.utils.snapshot import ProjectSnapshot
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -46,9 +46,9 @@ logger = logging.getLogger(__name__)
 class Executor(Configurable, Generic[JobT]):
     """Abstract execution backend interface.
 
-    Subclasses provide snapshot creation and dispatch behavior; shared submission
-    logic here handles dependency-aware graph traversal and completed-work short
-    circuiting.
+    Shared submission logic here handles dependency-aware graph traversal,
+    completed-work short circuiting, and snapshot creation (see
+    :meth:`_make_snapshot`); subclasses provide dispatch behavior.
     """
 
     _config_key: ClassVar[str] = "executor"
@@ -58,6 +58,10 @@ class Executor(Configurable, Generic[JobT]):
         "in_process": "misen.executors.in_process:InProcessExecutor",
         "slurm": "misen.executors.slurm:SlurmExecutor",
     }
+
+    snapshot: bool = True
+    env_store_dir: str | None = None
+    prewarm_envs: bool = False
 
     def submit(
         self,
@@ -213,19 +217,26 @@ class Executor(Configurable, Generic[JobT]):
 
         return job_graph
 
-    @abstractmethod
     def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
         """Create an execution snapshot for a submit call, or ``None``.
 
+        The default implementation covers every subprocess-dispatching
+        backend: publish a :class:`ProjectSnapshot` to the workspace
+        (honoring ``env_store_dir`` / ``prewarm_envs``), or — with
+        ``snapshot = False`` — validate the in-tree pixi manifests and
+        return ``None`` so dispatch runs live against the current
+        environment (:func:`misen.utils.snapshot.prepare_live_job`).
+        Subclasses override to add submission-time validation (e.g.
+        SLURM's topology check) or to opt out of snapshots entirely
+        (in-process execution).
+
         Args:
             workspace: Workspace that stores the snapshot and job files.
-
-        Returns:
-            A published :class:`ProjectSnapshot`, or ``None`` for
-            live dispatch against the current environment
-            (:func:`misen.utils.snapshot.prepare_live_job`) or executors
-            that run work in-process.
         """
+        if not self.snapshot:
+            _detect_pixi_wrap()  # fail fast on a misconfigured pixi.lock
+            return None
+        return ProjectSnapshot(workspace=workspace, env_store_dir=self.env_store_dir, prewarm=self.prewarm_envs)
 
     @abstractmethod
     def _dispatch(
