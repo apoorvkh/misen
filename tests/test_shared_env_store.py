@@ -1,9 +1,10 @@
-"""Tests for the shared env store and overlay venvs of ``LocalSnapshot``.
+"""Tests for the env store and overlay venvs behind ``ProjectSnapshot``.
 
 Protocol tests exercise ``_ensure_store_entry`` with synthetic build
 functions (no uv); integration tests run real uv against a tiny generated
 workspace project (one root package, one workspace member with a console
-script, one non-workspace path dependency, one registry dependency).
+script, one non-workspace path dependency, one registry dependency),
+prewarming environments through ``ProjectSnapshot``.
 
 Reuse is asserted via markers and subprocess call counts, never via inode
 counts: uv links with reflink on macOS, so shared inodes are Linux-only.
@@ -24,14 +25,15 @@ import pytest
 from misen.utils import snapshot as snapshot_mod
 from misen.utils.locks import NFSLock
 from misen.utils.snapshot import (
-    LocalSnapshot,
+    ProjectSnapshot,
     _ensure_store_entry,
     _local_package_paths,
     _uv_cache_env,
 )
+from misen.workspaces.disk import DiskWorkspace
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
 _UV_BUILD_REQUIREMENT = 'requires = ["uv_build>=0.11.7,<0.13"]\nbuild-backend = "uv_build"\n'
 
@@ -76,9 +78,7 @@ def _write_project(root: Path) -> None:
     )
 
     (root / "src" / "mainpkg" / "__init__.py").write_text("X = 1\n")
-    (member_dir / "src" / "member" / "__init__.py").write_text(
-        'def main() -> None:\n    print("member-cli ok")\n'
-    )
+    (member_dir / "src" / "member" / "__init__.py").write_text('def main() -> None:\n    print("member-cli ok")\n')
     (pathdep_dir / "src" / "pathdep" / "__init__.py").write_text("Y = 2\n")
 
     subprocess.run(["uv", "lock"], cwd=root, check=True, capture_output=True)
@@ -112,8 +112,9 @@ def counted_run(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     return recorded
 
 
-def _sync_calls(recorded: list[list[str]]) -> list[list[str]]:
-    return [argv for argv in recorded if "sync" in argv]
+def _env_build_calls(recorded: list[list[str]]) -> list[list[str]]:
+    """Subprocess calls that create or populate an environment."""
+    return [argv for argv in recorded if "sync" in argv or "venv" in argv or "install" in argv]
 
 
 # ---------- protocol tests (synthetic builds, no uv) ----------
@@ -184,9 +185,7 @@ def test_concurrent_same_key_single_build(tmp_path: Path) -> None:
     def worker() -> None:
         try:
             results.append(
-                _ensure_store_entry(
-                    store=store, key="KEY", build=build, sanity_path="sane", label="test env"
-                )
+                _ensure_store_entry(store=store, key="KEY", build=build, sanity_path="sane", label="test env")
             )
         except BaseException as e:
             errors.append(e)
@@ -230,16 +229,12 @@ def test_failed_build_leaves_no_marker(tmp_path: Path) -> None:
         raise RuntimeError(msg)
 
     with pytest.raises(RuntimeError, match="boom"):
-        _ensure_store_entry(
-            store=store, key="KEY", build=failing_build, sanity_path="sane", label="test env"
-        )
+        _ensure_store_entry(store=store, key="KEY", build=failing_build, sanity_path="sane", label="test env")
     assert not (store / "KEY.complete").exists()
 
     # Next attempt treats the leftovers as residue and succeeds.
     calls: list[int] = []
-    _ensure_store_entry(
-        store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
-    )
+    _ensure_store_entry(store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env")
     assert calls == [1]
     assert (store / "KEY.complete").is_file()
 
@@ -304,66 +299,76 @@ def test_cache_dir_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.fixture(scope="module")
-def built_snapshot(project: Path, tmp_path_factory: pytest.TempPathFactory) -> Iterator[LocalSnapshot]:
-    """One real snapshot against a module-scoped snapshots dir (read-only)."""
+def module_workspace(tmp_path_factory: pytest.TempPathFactory) -> DiskWorkspace:
+    return DiskWorkspace(directory=str(tmp_path_factory.mktemp("ws") / ".misen"))
+
+
+@pytest.fixture(scope="module")
+def module_store(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return tmp_path_factory.mktemp("env-store")
+
+
+@pytest.fixture(scope="module")
+def built_snapshot(project: Path, module_workspace: DiskWorkspace, module_store: Path) -> ProjectSnapshot:
+    """One real prewarmed snapshot against module-scoped stores (read-only)."""
     cwd = Path.cwd()
     os.chdir(project)
     try:
-        snapshot = LocalSnapshot(snapshots_dir=tmp_path_factory.mktemp("snapshots"))
+        return ProjectSnapshot(workspace=module_workspace, env_store_dir=str(module_store), prewarm=True)
     finally:
         os.chdir(cwd)
-    yield snapshot
-    snapshot.cleanup()
 
 
 @pytest.mark.usefixtures("in_project")
-def test_shared_env_reused(tmp_path: Path, counted_run: list[list[str]]) -> None:
-    snapshots_dir = tmp_path / "snapshots"
-    first = LocalSnapshot(snapshots_dir=snapshots_dir)
-    sync_count_first = len(_sync_calls(counted_run))
-    assert sync_count_first == 1  # one shared build; no second sync step
+def test_envs_reused_across_snapshots(tmp_path: Path, counted_run: list[list[str]]) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
+    store = tmp_path / "env-store"
+    first = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
+    builds_first = len(_env_build_calls(counted_run))
+    assert builds_first > 0
 
-    second = LocalSnapshot(snapshots_dir=snapshots_dir)
-    assert len(_sync_calls(counted_run)) == sync_count_first  # reused, not rebuilt
+    second = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
+    assert len(_env_build_calls(counted_run)) == builds_first  # reused, not rebuilt
 
-    assert first.shared_env_dir is not None
-    assert first.shared_env_dir == second.shared_env_dir
-    store = snapshots_dir / ".shared" / "python-envs"
-    assert first.shared_env_dir.is_relative_to(store)
-    assert (store / f"{first.shared_env_dir.name}.complete").is_file()
-    # Distinct overlay venvs in distinct snapshot dirs.
-    assert first.python_env_dir != second.python_env_dir
-    assert first.snapshot_dir != second.snapshot_dir
-    first.cleanup()
-    second.cleanup()
+    assert first.prewarmed is not None
+    assert second.prewarmed is not None
+    # Identical code state: same snapshot key, same deps env, same overlay.
+    assert first.snapshot_key == second.snapshot_key
+    assert first.prewarmed.deps_env_dir == second.prewarmed.deps_env_dir
+    assert first.prewarmed.overlay_venv_dir == second.prewarmed.overlay_venv_dir
+    assert first.prewarmed.deps_env_dir.is_relative_to(store / "python-envs")
+    assert (store / "python-envs" / f"{first.prewarmed.deps_env_dir.name}.complete").is_file()
 
 
-def test_key_changes_with_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_code_change_rekeys_overlay_not_deps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "project"
     _write_project(root)
     monkeypatch.chdir(root)
-    snapshots_dir = tmp_path / "snapshots"
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
+    store = tmp_path / "env-store"
 
-    first = LocalSnapshot(snapshots_dir=snapshots_dir)
+    first = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
     member_pyproject = root / "packages" / "member" / "pyproject.toml"
     member_pyproject.write_text(member_pyproject.read_text().replace('version = "0.2.0"', 'version = "0.2.1"'))
-    second = LocalSnapshot(snapshots_dir=snapshots_dir)  # its `uv lock` refreshes the lockfile
+    second = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
 
-    assert first.shared_env_dir is not None
-    assert second.shared_env_dir is not None
-    assert first.shared_env_dir != second.shared_env_dir
-    assert first.shared_env_dir.is_dir()  # both keys coexist in the store
-    assert second.shared_env_dir.is_dir()
-    first.cleanup()
-    second.cleanup()
+    assert first.prewarmed is not None
+    assert second.prewarmed is not None
+    assert first.snapshot_key != second.snapshot_key
+    # Local-package edits change the overlay, not the remote-deps env.
+    assert first.prewarmed.deps_env_dir == second.prewarmed.deps_env_dir
+    assert first.prewarmed.overlay_venv_dir != second.prewarmed.overlay_venv_dir
+    assert first.prewarmed.overlay_venv_dir.is_dir()  # both keys coexist in the store
+    assert second.prewarmed.overlay_venv_dir.is_dir()
 
 
-def test_overlay_contents(built_snapshot: LocalSnapshot) -> None:
-    venv_dir = built_snapshot.python_env_dir
-    assert venv_dir == built_snapshot.snapshot_dir / "venv"
+def test_overlay_contents(built_snapshot: ProjectSnapshot) -> None:
+    assert built_snapshot.prewarmed is not None
+    venv_dir = built_snapshot.prewarmed.overlay_venv_dir
+    deps_env_dir = built_snapshot.prewarmed.deps_env_dir
 
     # Local packages import from the overlay; registry deps via the .pth
-    # chain into the shared env; dist metadata resolves for local packages.
+    # chain into the deps env; dist metadata resolves for local packages.
     check = (
         "import iniconfig, mainpkg, member, pathdep\n"
         "import importlib.metadata as m\n"
@@ -380,85 +385,86 @@ def test_overlay_contents(built_snapshot: LocalSnapshot) -> None:
     result = subprocess.run([str(member_cli)], check=True, capture_output=True, text=True)
     assert result.stdout.strip() == "member-cli ok"
 
-    # The shared env stays free of local packages.
-    assert built_snapshot.shared_env_dir is not None
-    shared_sites = list(built_snapshot.shared_env_dir.glob("lib/python*/site-packages"))
-    assert shared_sites
+    # The deps env stays free of local packages.
+    deps_sites = list(deps_env_dir.glob("lib/python*/site-packages"))
+    assert deps_sites
     for name in ("mainpkg", "member", "pathdep"):
-        assert not list(shared_sites[0].glob(f"{name}*"))
-    assert list(shared_sites[0].glob("iniconfig*"))
+        assert not list(deps_sites[0].glob(f"{name}*"))
+    assert list(deps_sites[0].glob("iniconfig*"))
 
 
-def test_env_overrides_composition(built_snapshot: LocalSnapshot, tmp_path: Path) -> None:
+def test_env_overrides_composition(built_snapshot: ProjectSnapshot, module_workspace: DiskWorkspace) -> None:
+    class _StubHash:
+        def b32(self) -> str:
+            return "STUBHASH"
+
+    class _StubRoot:
+        def task_hash(self) -> _StubHash:
+            return _StubHash()
+
     class _StubWorkUnit:
+        root = _StubRoot()
+
         def as_payload(self, *, workspace: object, job_id: str) -> bytes:
             return b"payload"
 
-    class _StubWorkspace:
-        def get_job_log(self, *, job_id: str, work_unit: object) -> Path:
-            return tmp_path / f"{job_id}.log"
-
-    _, _, env_overrides, _ = built_snapshot.prepare_job(
+    _, argv, env_overrides, log_path = built_snapshot.prepare_job(
         _StubWorkUnit(),  # type: ignore[arg-type]
-        _StubWorkspace(),  # type: ignore[arg-type]
+        module_workspace,
         "cuda",
         cpu_indices=None,
         gpu_indices=None,
     )
-    assert env_overrides["VIRTUAL_ENV"] == str(built_snapshot.python_env_dir)
-    assert built_snapshot.shared_env_dir is not None
-    assert env_overrides["PATH"].split(os.pathsep)[0] == str(built_snapshot.shared_env_dir / "bin")
+    assert built_snapshot.prewarmed is not None
+    assert env_overrides["VIRTUAL_ENV"] == str(built_snapshot.prewarmed.overlay_venv_dir)
+    assert env_overrides["PATH"].split(os.pathsep)[0] == str(built_snapshot.prewarmed.deps_env_dir / "bin")
     assert env_overrides["PATH"].endswith(os.environ["PATH"])
-    assert built_snapshot.overlay_site_dir is not None
-    assert env_overrides["PYTHONPATH"].split(os.pathsep)[0] == str(built_snapshot.overlay_site_dir)
+    assert env_overrides["PYTHONPATH"].split(os.pathsep)[0] == str(built_snapshot.prewarmed.overlay_site_dir)
+    # Direct dispatch: no bootstrap wrapper, straight to the worker module.
+    assert "misen.utils.bootstrap_env" not in argv
+    assert "misen.utils.execute" in argv
+    payload_path = Path(argv[argv.index("--payload") + 1])
+    assert payload_path.read_bytes() == b"payload"
+    assert argv[argv.index("--job-log-path") + 1] == str(log_path)
 
 
 @pytest.mark.usefixtures("in_project")
-def test_cleanup_preserves_shared_store(tmp_path: Path) -> None:
-    snapshots_dir = tmp_path / "snapshots"
-    snapshot = LocalSnapshot(snapshots_dir=snapshots_dir)
-    shared_env_dir = snapshot.shared_env_dir
-    assert shared_env_dir is not None
+def test_submission_artifacts_are_retained(tmp_path: Path) -> None:
+    """No per-submission deletion: payloads must outlive scheduler requeues."""
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
+    store = tmp_path / "env-store"
+    snapshot = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
+    assert snapshot.prewarmed is not None
+    deps_env_dir = snapshot.prewarmed.deps_env_dir
+    snapshot_key = snapshot.snapshot_key
+    ref = workspace.put_job_file(snapshot.submission_id, "probe.pkl", b"x")
 
-    snapshot.cleanup()
-    assert not snapshot.snapshot_dir.exists()
-    assert shared_env_dir.is_dir()
-    assert (shared_env_dir.parent / f"{shared_env_dir.name}.complete").is_file()
-
-
-@pytest.mark.usefixtures("in_project")
-def test_env_cache_false_private_store(tmp_path: Path, counted_run: list[list[str]]) -> None:
-    snapshot = LocalSnapshot(snapshots_dir=tmp_path / "snapshots", env_cache=False)
-    try:
-        # Same machinery, but the store is private to the snapshot: nothing
-        # is shared, and cleanup removes everything.
-        assert snapshot.shared_env_dir.is_relative_to(snapshot.snapshot_dir / "envs")
-        assert snapshot.python_env_dir == snapshot.snapshot_dir / "venv"
-        assert not (tmp_path / "snapshots" / ".shared").exists()
-        assert len(_sync_calls(counted_run)) == 1
-        python = snapshot.python_env_dir / "bin" / "python"
-        subprocess.run([str(python), "-c", "import iniconfig, mainpkg, member, pathdep"], check=True)
-    finally:
-        snapshot.cleanup()
-    assert not snapshot.snapshot_dir.exists()
+    del snapshot  # a submit call ending deletes nothing
+    assert Path(ref).exists()
+    assert workspace.has_snapshot(snapshot_key)
+    assert (deps_env_dir.parent / f"{deps_env_dir.name}.complete").is_file()
 
 
-def test_python_env_key_components(in_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_python_env_key_components(
+    built_snapshot: ProjectSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    project_dir = built_snapshot.project_dir
     monkeypatch.delenv("UV_PYTHON", raising=False)
-    base = snapshot_mod._python_env_key()
-    assert base == snapshot_mod._python_env_key()  # deterministic
+    base = snapshot_mod._python_env_key(project_dir)
+    assert base == snapshot_mod._python_env_key(project_dir)  # deterministic
 
     monkeypatch.setenv("UV_PYTHON", "3.12")
-    assert base != snapshot_mod._python_env_key()  # interpreter selection
+    assert base != snapshot_mod._python_env_key(project_dir)  # interpreter selection
     monkeypatch.delenv("UV_PYTHON")
 
-    lock_path = in_project / "uv.lock"
-    original = lock_path.read_bytes()
-    try:
-        lock_path.write_bytes(original + b"\n# perturbed\n")
-        assert base != snapshot_mod._python_env_key()  # lock content
-    finally:
-        lock_path.write_bytes(original)
+    # Different requirements bytes -> different key (checked on a copy: the
+    # published snapshot itself is immutable shared state).
+    copy_dir = tmp_path / "keyprobe"
+    shutil.copytree(project_dir, copy_dir)
+    (copy_dir / "requirements.txt").write_bytes((copy_dir / "requirements.txt").read_bytes() + b"\n# perturbed\n")
+    assert base != snapshot_mod._python_env_key(copy_dir)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only store")
@@ -466,15 +472,11 @@ def test_store_ignores_foreign_entries(tmp_path: Path) -> None:
     """Lock/claim files, probes, and marker temps never match residue checks."""
     store = tmp_path / "store"
     calls: list[int] = []
-    _ensure_store_entry(
-        store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
-    )
+    _ensure_store_entry(store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env")
     # Foreign files that legitimately appear in a busy store.
     (store / "OTHER.lock").touch()
     (store / ".misen.freshprobe.left.tmp").touch()
     (store / ".KEY.complete.stray.tmp").touch()
 
-    _ensure_store_entry(
-        store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
-    )
+    _ensure_store_entry(store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env")
     assert calls == [1]  # still a pure reuse

@@ -13,7 +13,6 @@ import threading
 import time
 from bisect import insort
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from misen.executor import Executor, Job
@@ -25,7 +24,7 @@ from misen.utils.runtime_events import (
     task_label,
     work_unit_label,
 )
-from misen.utils.snapshot import LocalSnapshot, NullSnapshot
+from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap, prepare_live_job
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,7 +61,7 @@ class LocalJob(Job):
         self,
         work_unit: WorkUnit,
         dependencies: set[LocalJob],
-        snapshot: LocalSnapshot | NullSnapshot,
+        snapshot: ProjectSnapshot | None,
         workspace: Workspace,
     ) -> None:
         """Initialize a local job."""
@@ -163,8 +162,17 @@ class LocalJob(Job):
             self._log_fp = None
 
 
-class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
-    """Executor that runs work units as local subprocesses."""
+class LocalExecutor(Executor[LocalJob]):
+    """Executor that runs work units as local subprocesses.
+
+    Snapshots are content-addressed project state published to the
+    workspace; environments materialize from them into the env store at
+    ``env_store_dir`` (default ``/tmp/misen-env-store-<user>``). With
+    ``prewarm_envs`` (the default here) they are built once at submission —
+    concurrent jobs share them and env failures surface before any job
+    starts; with ``prewarm_envs=False`` the first job builds them at
+    startup instead.
+    """
 
     max_memory: int | Literal["all"] = "all"
     num_cpus: int | Literal["all"] = "all"
@@ -176,8 +184,8 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
     num_xpu_gpus: int = 0
     xpu_gpu_indices: list[int] | None = None
     snapshot: bool = True
-    snapshots_dir: str | None = None
-    env_cache: bool = True
+    env_store_dir: str | None = None
+    prewarm_envs: bool = True
     enforce_time_limits: bool = False
 
     def __post_init__(self) -> None:
@@ -255,19 +263,19 @@ class LocalExecutor(Executor[LocalJob, "LocalSnapshot | NullSnapshot"]):
             self._resource_budget.xpu_gpus,
         )
 
-    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot | NullSnapshot:
-        """Return a local snapshot for this workspace, or ``NullSnapshot`` when disabled."""
+    def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
+        """Return a project snapshot, or ``None`` for live dispatch when disabled."""
         if not self.snapshot:
-            return NullSnapshot()
-        snapshots_dir = Path(self.snapshots_dir) if self.snapshots_dir is not None else None
-        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir, env_cache=self.env_cache)
+            _detect_pixi_wrap()  # fail fast on a misconfigured pixi.lock
+            return None
+        return ProjectSnapshot(workspace=workspace, env_store_dir=self.env_store_dir, prewarm=self.prewarm_envs)
 
     def _dispatch(
         self,
         work_unit: WorkUnit,
         dependencies: set[LocalJob],
         workspace: Workspace,
-        snapshot: LocalSnapshot | NullSnapshot,
+        snapshot: ProjectSnapshot | None,
     ) -> LocalJob:
         """Queue a work unit in the local scheduler."""
         resources = work_unit.resources
@@ -479,7 +487,8 @@ class _LocalScheduler:
         log_fp: FileIO | None = None
         process: subprocess.Popen[bytes] | None = None
         try:
-            job.job_id, argv, env_overrides, job.log_path = job.snapshot.prepare_job(
+            prepare = job.snapshot.prepare_job if job.snapshot is not None else prepare_live_job
+            job.job_id, argv, env_overrides, job.log_path = prepare(
                 work_unit=job.work_unit,
                 workspace=job.workspace,
                 gpu_runtime=job.resources["gpu_runtime"],

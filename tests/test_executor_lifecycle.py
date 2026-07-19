@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-import misen.executor as executor_module
 from misen import Task, meta
 from misen.executor import CompletedJob, Executor, Job, JobState, bulk_job_states
-from misen.utils.snapshot import Snapshot
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.disk import DiskWorkspace
 
@@ -21,67 +18,33 @@ def executor_lifecycle_task() -> int:
     return 1
 
 
-class FakeSnapshot(Snapshot):
-    def __init__(self) -> None:
-        self.cleaned = False
-
-    def cleanup(self) -> None:
-        self.cleaned = True
-
-    def prepare_job(self, *args: object, **kwargs: object) -> tuple[str, list[str], dict[str, str], Path]:
-        return "fake-job", [], {}, Path("/dev/null")
-
-
 class FailedJob(Job):
     def state(self) -> Literal["failed"]:
         return "failed"
 
 
-class FailingExecutor(Executor[FailedJob, FakeSnapshot]):
-    snapshots: ClassVar[list[FakeSnapshot]] = []
-
-    def _make_snapshot(self, workspace: Workspace) -> FakeSnapshot:
+class FailingExecutor(Executor[FailedJob]):
+    def _make_snapshot(self, workspace: Workspace) -> None:
         _ = workspace
-        snapshot = FakeSnapshot()
-        self.snapshots.append(snapshot)
-        return snapshot
 
     def _dispatch(
         self,
         work_unit: WorkUnit,
         dependencies: set[FailedJob],
         workspace: Workspace,
-        snapshot: FakeSnapshot,
+        snapshot: object,
     ) -> FailedJob:
         _ = dependencies, workspace, snapshot
         return FailedJob(work_unit=work_unit)
 
 
-class LocalSnapshotExecutor(Executor[FailedJob, FakeSnapshot]):
-    def _make_snapshot(self, workspace: Workspace) -> FakeSnapshot:
-        _ = workspace
-        return FakeSnapshot()
-
-    def _dispatch(
-        self,
-        work_unit: WorkUnit,
-        dependencies: set[FailedJob],
-        workspace: Workspace,
-        snapshot: FakeSnapshot,
-    ) -> FailedJob:
-        _ = dependencies, workspace, snapshot
-        return FailedJob(work_unit=work_unit)
-
-
-def test_blocking_submit_cleans_up_snapshot_when_jobs_fail(tmp_path) -> None:
-    FailingExecutor.snapshots.clear()
+def test_blocking_submit_returns_after_jobs_fail(tmp_path) -> None:
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
     executor = FailingExecutor()
 
-    executor.submit(tasks={Task(executor_lifecycle_task)}, workspace=workspace, blocking=True)
+    job_graph = executor.submit(tasks={Task(executor_lifecycle_task)}, workspace=workspace, blocking=True)
 
-    assert len(FailingExecutor.snapshots) == 1
-    assert FailingExecutor.snapshots[0].cleaned
+    assert all(job.state() == "failed" for job in job_graph.nodes())
 
 
 @meta(id="bulk_state_task", cache=False)
@@ -137,17 +100,9 @@ def test_bulk_job_states_groups_by_class_and_dispatches_once_per_class() -> None
     _CountingJob.bulk_calls.clear()
     _BatchSlurmJob.queries.clear()
 
-    counting_jobs = [
-        _CountingJob(work_unit=_wu(i), state_value="running")
-        for i in range(3)
-    ]
-    slurm_jobs = [
-        _BatchSlurmJob(work_unit=_wu(100 + i), slurm_id=str(i), state_value="done")
-        for i in range(4)
-    ]
-    completed_jobs = [
-        CompletedJob(work_unit=_wu(200 + i)) for i in range(2)
-    ]
+    counting_jobs = [_CountingJob(work_unit=_wu(i), state_value="running") for i in range(3)]
+    slurm_jobs = [_BatchSlurmJob(work_unit=_wu(100 + i), slurm_id=str(i), state_value="done") for i in range(4)]
+    completed_jobs = [CompletedJob(work_unit=_wu(200 + i)) for i in range(2)]
     all_jobs: list[Job] = [*counting_jobs, *slurm_jobs, *completed_jobs]
 
     states = bulk_job_states(all_jobs)
@@ -194,23 +149,3 @@ def test_bulk_job_states_normalizes_invalid_states_to_unknown() -> None:
     jobs = [_BadJob(work_unit=_wu(901))]
     states = bulk_job_states(jobs)
     assert states[jobs[0]] == "unknown"
-
-
-def test_make_local_snapshot_returns_fresh_snapshot(monkeypatch, tmp_path) -> None:
-    created: list[object] = []
-
-    class FakeLocalSnapshot:
-        def __init__(self, snapshots_dir: object, *, env_cache: bool = True) -> None:
-            self.snapshots_dir = snapshots_dir
-            self.env_cache = env_cache
-            created.append(self)
-
-    monkeypatch.setattr(executor_module, "LocalSnapshot", FakeLocalSnapshot)
-    workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
-    executor = LocalSnapshotExecutor()
-
-    first = executor._make_local_snapshot(workspace)  # noqa: SLF001
-    second = executor._make_local_snapshot(workspace)  # noqa: SLF001
-
-    assert first is not second
-    assert created == [first, second]

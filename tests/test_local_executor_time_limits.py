@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from misen import Task, meta
 from misen.executors.local import LocalExecutor, LocalJob
-from misen.utils.snapshot import NullSnapshot
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.disk import DiskWorkspace
 
@@ -32,7 +31,7 @@ def _make_local_job(task: Callable[[], int], tmp_path: Path) -> LocalJob:
     return LocalJob(
         work_unit=work_unit,
         dependencies=set(),
-        snapshot=NullSnapshot(),
+        snapshot=None,
         workspace=workspace,
     )
 

@@ -1,4 +1,5 @@
-"""Tests for the optional conda-environment path of ``LocalSnapshot``."""
+"""Tests for the optional conda-environment path of ``ProjectSnapshot``."""
+# ruff: noqa: D103, S101
 
 from __future__ import annotations
 
@@ -9,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from misen.utils.snapshot import LocalSnapshot
+from misen.utils.snapshot import ProjectSnapshot
+from misen.workspaces.disk import DiskWorkspace
 
 FIXTURES = Path(__file__).parent / "fixtures" / "conda_snapshot"
 ZLIB_XZ_LOCK = FIXTURES / "pixi.lock"
@@ -19,17 +21,20 @@ pytestmark = pytest.mark.skipif(shutil.which("pixi") is None, reason="pixi CLI n
 
 
 def _stage_uv_project(root: Path) -> None:
-    """Write a minimal pyproject.toml + uv.lock under ``root`` for uv sync."""
+    """Write a minimal pyproject.toml + uv.lock under ``root``."""
     (root / "pyproject.toml").write_text(
         '[project]\nname = "conda-snap-test"\nversion = "0.0.0"\nrequires-python = ">=3.11"\n'
     )
     (root / "README.md").write_text("")
-    subprocess.run(["uv", "lock"], cwd=root, check=True, capture_output=True)  # noqa: S603, S607
+    subprocess.run(["uv", "lock"], cwd=root, check=True, capture_output=True)  # noqa: S607
 
 
 def _write_minimal_pixi_manifest(root: Path) -> None:
-    """Minimal pixi.toml so pixi accepts the manifest; content doesn't matter
-    for rejection tests because the lockfile is invalid before pixi sees it."""
+    """Write a minimal pixi.toml so pixi accepts the manifest.
+
+    Content doesn't matter for rejection tests: the lockfile is invalid
+    before pixi ever reads it.
+    """
     (root / "pixi.toml").write_text(
         "[workspace]\n"
         'name = "rejection-fixture"\n'
@@ -39,10 +44,14 @@ def _write_minimal_pixi_manifest(root: Path) -> None:
     )
 
 
-# ---------- error-path tests via LocalSnapshot ----------
+def _workspace(tmp_path: Path) -> DiskWorkspace:
+    return DiskWorkspace(directory=str(tmp_path / ".misen"))
 
 
-def test_local_snapshot_rejects_pypi_dependencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# ---------- error-path tests via ProjectSnapshot staging ----------
+
+
+def test_project_snapshot_rejects_pypi_dependencies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     _stage_uv_project(project_root)
@@ -58,10 +67,10 @@ def test_local_snapshot_rejects_pypi_dependencies(tmp_path: Path, monkeypatch: p
     monkeypatch.chdir(project_root)
 
     with pytest.raises(RuntimeError, match="pypi dependencies"):
-        LocalSnapshot(snapshots_dir=tmp_path / "snapshots")
+        ProjectSnapshot(workspace=_workspace(tmp_path))
 
 
-def test_local_snapshot_rejects_missing_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_project_snapshot_rejects_missing_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Lockfile without adjacent pixi.toml -> clear error."""
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -69,16 +78,18 @@ def test_local_snapshot_rejects_missing_manifest(tmp_path: Path, monkeypatch: py
     shutil.copy(ZLIB_XZ_LOCK, project_root / "pixi.lock")
     monkeypatch.chdir(project_root)
 
-    with pytest.raises(RuntimeError, match="no pixi.toml"):
-        LocalSnapshot(snapshots_dir=tmp_path / "snapshots")
+    with pytest.raises(RuntimeError, match="no pixi"):
+        ProjectSnapshot(workspace=_workspace(tmp_path))
 
 
 # ---------- end-to-end (installs real tiny env) ----------
 
 
-def test_local_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end: install zlib+xz, confirm prepare_job wraps argv in ``pixi run``
-    and that running the wrapped argv activates the snapshot's conda env."""
+def test_prewarmed_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install zlib+xz for real; the conda entry lands in the env store.
+
+    Also confirms the pixi wrapper activates the snapshot's conda env.
+    """
     project_root = tmp_path / "project"
     project_root.mkdir()
     _stage_uv_project(project_root)
@@ -86,93 +97,72 @@ def test_local_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: pyte
     shutil.copy(ZLIB_XZ_LOCK, project_root / "pixi.lock")
     monkeypatch.chdir(project_root)
 
-    snapshots_dir = tmp_path / "snapshots"
-    snapshot = LocalSnapshot(snapshots_dir=snapshots_dir)
-    try:
-        # Snapshot has a staged manifest (in the shared store) and a cached pixi bin.
-        assert snapshot.conda_manifest_path is not None
-        assert snapshot.conda_manifest_path.is_file()
-        assert snapshot.conda_manifest_path.is_relative_to(snapshots_dir / ".shared" / "conda-envs")
-        assert snapshot.pixi_bin is not None
+    workspace = _workspace(tmp_path)
+    store_root = tmp_path / "env-store"
+    snapshot = ProjectSnapshot(workspace=workspace, env_store_dir=str(store_root), prewarm=True)
+    # The staged snapshot carries the manifests; the conda env is a
+    # store entry beside the staged copy of the manifest.
+    assert snapshot.project_dir is not None
+    assert (snapshot.project_dir / "pixi.lock").is_file()
+    assert snapshot.pixi_bin is not None
+    assert snapshot.prewarmed is not None
+    manifest_path = snapshot.prewarmed.conda_manifest_path
+    assert manifest_path is not None
+    assert manifest_path.is_file()
+    assert manifest_path.is_relative_to(store_root / "conda-envs")
 
-        # pixi install ran already, so the env exists beside the staged manifest.
-        prefix_dir = snapshot.conda_manifest_path.parent / ".pixi" / "envs" / "default"
-        assert prefix_dir.is_dir()
-        xz_bin = prefix_dir / "bin" / "xz"
-        assert xz_bin.is_file() and os.access(xz_bin, os.X_OK)
-        assert list((prefix_dir / "lib").glob("libz.*"))
-
-        # Run a tiny command through the same wrapper prepare_job would build
-        # and confirm CONDA_PREFIX + PATH land correctly.
-        wrapped = [
-            snapshot.pixi_bin,
-            "run",
-            "--no-progress",
-            "--color",
-            "never",
-            "--frozen",
-            "--manifest-path",
-            str(snapshot.conda_manifest_path),
-            "-x",
-            "--",
-            "/usr/bin/env",
-            "bash",
-            "-c",
-            'printf "%s\\n%s\\n" "$CONDA_PREFIX" "$PATH"',
-        ]
-        result = subprocess.run(wrapped, capture_output=True, text=True, check=True)  # noqa: S603
-        conda_prefix, path_value, *_ = result.stdout.splitlines()
-        assert Path(conda_prefix).resolve() == prefix_dir.resolve()
-        assert path_value.split(":")[0] == str(prefix_dir / "bin")
-
-        # A second snapshot reuses the shared conda env instead of reinstalling.
-        second = LocalSnapshot(snapshots_dir=snapshots_dir)
-        try:
-            assert second.conda_manifest_path == snapshot.conda_manifest_path
-        finally:
-            second.cleanup()
-    finally:
-        snapshot.cleanup()
-
-    assert not snapshot.snapshot_dir.exists()
-    # Cleanup removes only the snapshot dir; the shared conda env survives.
+    # pixi install ran already, so the env exists beside the staged manifest.
+    prefix_dir = manifest_path.parent / ".pixi" / "envs" / "default"
     assert prefix_dir.is_dir()
-    store = snapshots_dir / ".shared" / "conda-envs"
-    key = snapshot.conda_manifest_path.parent.name
-    assert (store / f"{key}.complete").is_file()
+    xz_bin = prefix_dir / "bin" / "xz"
+    assert xz_bin.is_file()
+    assert os.access(xz_bin, os.X_OK)
+    assert list((prefix_dir / "lib").glob("libz.*"))
+
+    # Run a tiny command through the same wrapper prepare_job builds
+    # and confirm CONDA_PREFIX + PATH land correctly.
+    wrapped = [
+        snapshot.prewarmed.pixi_bin,
+        "run",
+        "--no-progress",
+        "--color",
+        "never",
+        "--frozen",
+        "--manifest-path",
+        str(manifest_path),
+        "-x",
+        "--",
+        "/usr/bin/env",
+        "bash",
+        "-c",
+        'printf "%s\\n%s\\n" "$CONDA_PREFIX" "$PATH"',
+    ]
+    result = subprocess.run(wrapped, capture_output=True, text=True, check=True)  # noqa: S603
+    conda_prefix, path_value, *_ = result.stdout.splitlines()
+    assert Path(conda_prefix).resolve() == prefix_dir.resolve()
+    assert path_value.split(":")[0] == str(prefix_dir / "bin")
+
+    # A second snapshot reuses the conda env entry instead of reinstalling.
+    second = ProjectSnapshot(workspace=workspace, env_store_dir=str(store_root), prewarm=True)
+    assert second.prewarmed is not None
+    assert second.prewarmed.conda_manifest_path == manifest_path
+
+    assert workspace.has_snapshot(snapshot.snapshot_key)
+    assert prefix_dir.is_dir()
+    key = manifest_path.parent.name
+    assert (store_root / "conda-envs" / f"{key}.complete").is_file()
 
 
-def test_local_snapshot_env_cache_false_installs_in_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """env_cache=False keeps the whole conda env inside the snapshot dir."""
+def test_project_snapshot_no_conda_when_pixi_lock_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ProjectSnapshot without pixi.lock stages no manifests and no conda env."""
     project_root = tmp_path / "project"
     project_root.mkdir()
     _stage_uv_project(project_root)
-    shutil.copy(ZLIB_XZ_MANIFEST, project_root / "pixi.toml")
-    shutil.copy(ZLIB_XZ_LOCK, project_root / "pixi.lock")
     monkeypatch.chdir(project_root)
 
-    snapshot = LocalSnapshot(snapshots_dir=tmp_path / "snapshots", env_cache=False)
-    try:
-        assert snapshot.conda_manifest_path is not None
-        assert snapshot.conda_manifest_path.is_relative_to(snapshot.snapshot_dir)
-        assert (snapshot.conda_manifest_path.parent / ".pixi" / "envs" / "default").is_dir()
-        assert not (tmp_path / "snapshots" / ".shared").exists()
-    finally:
-        snapshot.cleanup()
-    assert not snapshot.snapshot_dir.exists()
-
-
-def test_local_snapshot_no_conda_when_pixi_lock_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """LocalSnapshot without pixi.lock leaves ``conda_manifest_path`` as None."""
-    project_root = tmp_path / "project"
-    project_root.mkdir()
-    _stage_uv_project(project_root)
-    monkeypatch.chdir(project_root)
-
-    snapshot = LocalSnapshot(snapshots_dir=tmp_path / "snapshots")
-    try:
-        assert snapshot.conda_manifest_path is None
-    finally:
-        snapshot.cleanup()
+    snapshot = ProjectSnapshot(workspace=_workspace(tmp_path), env_store_dir=str(tmp_path / "env-store"), prewarm=True)
+    assert snapshot.project_dir is not None
+    assert not (snapshot.project_dir / "pixi.lock").exists()
+    assert snapshot.pixi_bin is None
+    assert snapshot.prewarmed is not None
+    assert snapshot.prewarmed.conda_manifest_path is None

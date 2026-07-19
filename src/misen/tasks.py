@@ -481,8 +481,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         executor = Executor.resolve_auto(executor)
         workspace = Workspace.resolve_auto(workspace)
-        job_graph, _snapshot = executor.submit(tasks={self}, workspace=workspace, blocking=blocking)
-        return job_graph
+        return executor.submit(tasks={self}, workspace=workspace, blocking=blocking)
 
     def scratch_dir(self, workspace: Workspace | Literal["auto"] = "auto") -> Path:
         """Return this task's scratch directory.

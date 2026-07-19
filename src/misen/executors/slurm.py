@@ -8,17 +8,17 @@ import shlex
 import shutil
 import subprocess
 from functools import cache
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import msgspec
 
 from misen.executor import Executor, Job, JobState
 from misen.utils.runtime_events import work_unit_label
-from misen.utils.snapshot import LocalSnapshot, NullSnapshot
+from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap, prepare_live_job
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
@@ -54,7 +54,7 @@ class SlurmJob(Job):
         self.workspace = workspace
         self._finalized = False
 
-    def state(self) -> _State:
+    def state(self) -> JobState:
         """Return the current SLURM state, normalized to a misen job state."""
         return type(self).bulk_state([self]).get(self, "unknown")
 
@@ -85,9 +85,7 @@ class SlurmJob(Job):
         states: dict[str, JobState] = dict.fromkeys(by_id, "unknown")
         remaining = set(by_id)
 
-        squeue_out = _run_slurm_query(
-            "squeue", ["-h", "-j", ",".join(sorted(remaining)), "-o", "%i %T"]
-        )
+        squeue_out = _run_slurm_query("squeue", ["-h", "-j", ",".join(sorted(remaining)), "-o", "%i %T"])
         for sid, raw in _parse_id_state_rows(squeue_out):
             if sid in by_id:
                 states[sid] = _normalize_slurm_state(raw, in_queue=True)
@@ -114,8 +112,19 @@ class SlurmJob(Job):
         return result
 
 
-class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
-    """Executor that submits work units to SLURM via ``sbatch``."""
+class SlurmExecutor(Executor[SlurmJob]):
+    """Executor that submits work units to SLURM via ``sbatch``.
+
+    Snapshots are content-addressed project state published to the
+    workspace. By default each SLURM job materializes (or reuses) its
+    environments in an env store on its own compute node's local disk
+    (``env_store_dir``, default ``/tmp/misen-env-store-<user>``); the first
+    job per node pays the build, later jobs on that node share it. With
+    ``prewarm_envs=True`` and ``env_store_dir`` on a *shared* filesystem,
+    environments are instead built once at submission and jobs dispatch
+    with direct activation — no worker-side build, no network needed on
+    compute nodes.
+    """
 
     partition: str | None = None
     account: str | None = None
@@ -124,27 +133,36 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
     default_flags: dict[str, _SetValue] = msgspec.field(default_factory=dict)
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
     snapshot: bool = True
-    snapshots_dir: str | None = None
-    env_cache: bool = True
+    env_store_dir: str | None = None
+    prewarm_envs: bool = False
 
     def __post_init__(self) -> None:
         """Normalize untyped config into msgspec structs."""
         self.default_flags = msgspec.convert(self.default_flags, type=dict[str, _SetValue])
         self.rules = msgspec.convert(self.rules, type=list[_SlurmRule])
 
-    def _make_snapshot(self, workspace: Workspace) -> LocalSnapshot | NullSnapshot:
-        """Return a local snapshot for this workspace, or ``NullSnapshot`` when disabled."""
+    def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
+        """Return a project snapshot, or ``None`` for live dispatch when disabled."""
         if not self.snapshot:
-            return NullSnapshot()
-        snapshots_dir = Path(self.snapshots_dir) if self.snapshots_dir is not None else None
-        return self._make_local_snapshot(workspace=workspace, snapshots_dir=snapshots_dir, env_cache=self.env_cache)
+            _detect_pixi_wrap()  # fail fast on a misconfigured pixi.lock
+            return None
+        if self.prewarm_envs and self.env_store_dir is None:
+            # Executor-topology check (submit host vs compute nodes); the
+            # workspace-capability check lives on ProjectSnapshot.
+            msg = (
+                "prewarm_envs on SlurmExecutor requires env_store_dir on a shared "
+                "filesystem (the default env store is node-local, so envs prewarmed "
+                "on the submit host would be invisible to compute nodes)."
+            )
+            raise ValueError(msg)
+        return ProjectSnapshot(workspace=workspace, env_store_dir=self.env_store_dir, prewarm=self.prewarm_envs)
 
     def _dispatch(
         self,
         work_unit: WorkUnit,
         dependencies: set[SlurmJob],
         workspace: Workspace,
-        snapshot: LocalSnapshot | NullSnapshot,
+        snapshot: ProjectSnapshot | None,
     ) -> SlurmJob:
         """Submit one work unit to SLURM."""
         resources = work_unit.resources
@@ -164,8 +182,9 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
             str(resources["cpus"]),
             "--mem",
             f"{resources['memory']}G",
+            "--time",
+            str(resources["time"]),
         ]
-        sbatch_cmd.extend(["--time", str(resources["time"])])
 
         flags = dict(self.default_flags)
         flags.update(
@@ -206,7 +225,8 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
         # step, so the worker leaves the inherited environment alone — user
         # code reads ``CUDA_VISIBLE_DEVICES`` / ``os.sched_getaffinity`` to
         # discover its allotment.
-        job_id, argv, env_overrides, log_path = snapshot.prepare_job(
+        prepare = snapshot.prepare_job if snapshot is not None else prepare_live_job
+        job_id, argv, env_overrides, log_path = prepare(
             work_unit=work_unit,
             workspace=workspace,
             gpu_runtime=resources["gpu_runtime"],
@@ -249,7 +269,6 @@ class SlurmExecutor(Executor[SlurmJob, "LocalSnapshot | NullSnapshot"]):
         )
 
 
-_State = Literal["pending", "running", "done", "failed", "unknown"]
 _ResourceKey: TypeAlias = Literal["time", "memory", "cpus", "gpus", "gpu_memory", "gpu_runtime"]
 _OperatorName: TypeAlias = Literal["eq", "ne", "lt", "le", "gt", "ge", "contains", "is_", "is_not"]
 _SetValue: TypeAlias = str | int | float | bool | None | list[str]
@@ -272,7 +291,7 @@ class _SlurmRule(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True)
     set: dict[str, _SetValue] = msgspec.field(default_factory=dict)
 
 
-_SLURM_STATE_MAP: dict[str, _State] = {
+_SLURM_STATE_MAP: dict[str, JobState] = {
     **dict.fromkeys(("PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED", "REQUEUED_HOLD", "STAGE_OUT"), "pending"),
     **dict.fromkeys(("RUNNING", "COMPLETING"), "running"),
     # ``PREEMPTED`` here is the terminal (out-of-queue) reading; a preempted job

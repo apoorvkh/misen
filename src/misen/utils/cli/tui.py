@@ -65,13 +65,10 @@ def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> 
     named_tasks = experiment.normalized_tasks()
     tasks = set(named_tasks.values())
     with _runtime_job_board_suppressed():
-        job_graph, snapshot = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
+        job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
         with _runtime_events_suppressed():
             watch_tasks(named_tasks=named_tasks, job_graph=job_graph, workspace=workspace)
-    jobs = list(job_graph.nodes())
-    final_states = bulk_job_states(jobs)
-    if all(final_states.get(job, "unknown") in _TERMINAL_STATES for job in jobs):
-        executor.cleanup_snapshot(snapshot)
+    final_states = bulk_job_states(list(job_graph.nodes()))
     _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, states=final_states)
 
 
@@ -87,7 +84,7 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
     console = Console(stderr=True, soft_wrap=True)
     final_states: dict[Job, JobState] = {}
     with _runtime_job_board_suppressed():
-        job_graph, snapshot = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
+        job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
         if not job_graph.nodes():
             console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
             return
@@ -97,10 +94,7 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
             else:
                 _watch_line_events(job_graph=job_graph, console=console)
         finally:
-            jobs = list(job_graph.nodes())
-            final_states = bulk_job_states(jobs)
-            if all(final_states.get(job, "unknown") in _TERMINAL_STATES for job in jobs):
-                executor.cleanup_snapshot(snapshot)
+            final_states = bulk_job_states(list(job_graph.nodes()))
     if not console.is_terminal:
         _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, console=console, states=final_states)
 
@@ -451,19 +445,13 @@ def _run_textual_task_monitor(
             if end_char == -1:
                 end_cell = cell_length
             else:
-                end_cell = strip.index_to_cell_position(
-                    max(0, end_char - scroll_x)
-                )
+                end_cell = strip.index_to_cell_position(max(0, end_char - scroll_x))
                 end_cell = min(cell_length, end_cell)
-            start_cell = strip.index_to_cell_position(
-                max(0, start_char - scroll_x)
-            )
+            start_cell = strip.index_to_cell_position(max(0, start_char - scroll_x))
             start_cell = min(cell_length, start_cell)
             if end_cell <= start_cell:
                 return strip
-            selection_style = self.screen.get_component_rich_style(
-                "screen--selection"
-            )
+            selection_style = self.screen.get_component_rich_style("screen--selection")
             cuts: list[int] = []
             if start_cell > 0:
                 cuts.append(start_cell)
@@ -482,9 +470,7 @@ def _run_textual_task_monitor(
             # Use post_style so the selection background overrides the
             # segment's existing background (``Strip.apply_style`` prepends
             # the style, which leaves the original bg color intact).
-            styled_segments = list(
-                Segment.apply_style(iter(selected_part), post_style=selection_style)
-            )
+            styled_segments = list(Segment.apply_style(iter(selected_part), post_style=selection_style))
             styled_selected = Strip(styled_segments, selected_part.cell_length)
             return Strip.join([pre, styled_selected, *rest])
 
@@ -752,11 +738,7 @@ def _run_textual_task_monitor(
             for job, state in states.items():
                 if state == "running" and job not in self._job_started_at:
                     self._job_started_at[job] = now
-                elif (
-                    state in _TERMINAL_STATES
-                    and job in self._job_started_at
-                    and job not in self._job_ended_at
-                ):
+                elif state in _TERMINAL_STATES and job in self._job_started_at and job not in self._job_ended_at:
                     self._job_ended_at[job] = now
             self._job_states = states
             for entry in self._entries:
@@ -860,9 +842,7 @@ def _run_textual_task_monitor(
             self._last_scroll_offsets = offsets
 
         def _all_jobs_terminal(self) -> bool:
-            return all(
-                self._job_states.get(job, "unknown") in _TERMINAL_STATES for job in job_graph.nodes()
-            )
+            return all(self._job_states.get(job, "unknown") in _TERMINAL_STATES for job in job_graph.nodes())
 
         def _update_completion_state(self) -> None:
             all_done = self._all_jobs_terminal()
@@ -873,9 +853,7 @@ def _run_textual_task_monitor(
                 self._last_activity_at = time.monotonic()
                 # Re-evaluate bindings: the gated quit actions just turned on.
                 self.refresh_bindings()
-            if self._all_done and (
-                time.monotonic() - self._last_activity_at >= self.POST_RUN_IDLE_TIMEOUT_S
-            ):
+            if self._all_done and (time.monotonic() - self._last_activity_at >= self.POST_RUN_IDLE_TIMEOUT_S):
                 self.exit()
 
         def _mark_activity(self) -> None:

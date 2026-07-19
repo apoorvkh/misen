@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar
 
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, task_label, work_unit_label
 from misen.utils.settings import Configurable
-from misen.utils.snapshot import LocalSnapshot
 from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
     from misen.task_metadata import Resources
     from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
-    from misen.utils.snapshot import Snapshot
+    from misen.utils.snapshot import ProjectSnapshot
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -41,16 +40,10 @@ ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
 JobState: TypeAlias = Literal["pending", "running", "done", "failed", "unknown"]
 _VALID_JOB_STATES: frozenset[JobState] = frozenset({"pending", "running", "done", "failed", "unknown"})
 JobT = TypeVar("JobT", bound="Job")
-SnapshotT = TypeVar("SnapshotT", bound="Snapshot")
 logger = logging.getLogger(__name__)
 
 
-def _plural(count: int, singular: str, plural: str | None = None) -> str:
-    """Return ``singular`` when ``count == 1`` else ``plural`` (default: ``singular + 's'``)."""
-    return singular if count == 1 else (plural if plural is not None else f"{singular}s")
-
-
-class Executor(Configurable, Generic[JobT, SnapshotT]):
+class Executor(Configurable, Generic[JobT]):
     """Abstract execution backend interface.
 
     Subclasses provide snapshot creation and dispatch behavior; shared submission
@@ -72,7 +65,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
         workspace: Workspace,
         *,
         blocking: bool = False,
-    ) -> tuple[DependencyGraph[CompletedJob | JobT], SnapshotT | None]:
+    ) -> DependencyGraph[CompletedJob | JobT]:
         """Submit tasks for execution on this backend.
 
         The method first converts task DAGs into a work-unit DAG. Work units
@@ -86,8 +79,10 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
                 terminal state before returning.
 
         Returns:
-            Tuple of (dependency graph of job handles, snapshot used for
-            dispatched work units or ``None`` if all work was cached).
+            Dependency graph of job handles. Submission artifacts (the
+            published snapshot, per-job payloads, env-file copies) are
+            retained in the workspace — payloads must outlive scheduler
+            requeues, so nothing is deleted when a submit call ends.
         """
         work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
         work_units = list(work_graph)
@@ -113,7 +108,7 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             num_dispatch,
         )
 
-        snapshot: SnapshotT | None = None
+        snapshot: ProjectSnapshot | None = None
         if pending_work_units:
             logger.info("%s creating snapshot for %d pending work unit(s).", executor_name, num_dispatch)
             started_at = time.perf_counter()
@@ -181,16 +176,9 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
 
         dispatched_task_count = sum(len(wu.graph.nodes()) for wu in pending_work_units)
         completed_task_count = sum(len(wu.graph.nodes()) for wu in work_units) - dispatched_task_count
-        summary = (
-            f"Submitted {num_dispatch} {_plural(num_dispatch, 'job')} / "
-            f"{dispatched_task_count} {_plural(dispatched_task_count, 'task')} "
-            f"to {executor_name}"
-        )
+        summary = f"Submitted {num_dispatch} job(s) / {dispatched_task_count} task(s) to {executor_name}"
         if num_complete > 0:
-            summary += (
-                f" ({num_complete} {_plural(num_complete, 'job')} / "
-                f"{completed_task_count} {_plural(completed_task_count, 'task')} already complete)"
-            )
+            summary += f" ({num_complete} job(s) / {completed_task_count} task(s) already complete)"
         runtime_event(summary, style="green bold")
         logger.info(
             "%s submitted %d work unit(s) (%d already complete).",
@@ -205,56 +193,43 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
             job_graph[i] = jobs[work_graph[i]]
 
         if blocking:
-            blocking_jobs = set(job_graph.nodes())
+            blocking_jobs = list(job_graph.nodes())
             logger.info("%s waiting for %d job(s) to reach terminal states.", executor_name, len(blocking_jobs))
-            try:
-                for job in blocking_jobs:
-                    logger.debug(
-                        "%s waiting on %s (job_id=%s).",
-                        executor_name,
-                        job.label,
-                        job.job_id or "n/a",
-                    )
-                    job.wait()
-                logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
+            # One batched query per tick (e.g. a single squeue+sacct pair
+            # for all SLURM jobs) instead of per-job polling.
+            while True:
+                states = bulk_job_states(blocking_jobs)
+                if all(state in ("done", "failed") for state in states.values()):
+                    break
+                time.sleep(0.5)
+            logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
 
-                failed_jobs = [job for job in blocking_jobs if job.state() == "failed"]
-                if failed_jobs:
-                    failed_labels = ", ".join(job.label for job in failed_jobs)
-                    msg = f"{executor_name} observed {len(failed_jobs)} failed job(s): {failed_labels}"
-                    logger.error(msg)
-                    runtime_event(msg, style="bold red")
-            finally:
-                self.cleanup_snapshot(snapshot)
+            failed_jobs = [job for job, state in states.items() if state == "failed"]
+            if failed_jobs:
+                failed_labels = ", ".join(job.label for job in failed_jobs)
+                msg = f"{executor_name} observed {len(failed_jobs)} failed job(s): {failed_labels}"
+                logger.error(msg)
+                runtime_event(msg, style="bold red")
 
-        return job_graph, snapshot
-
-    def cleanup_snapshot(self, snapshot: Snapshot | None) -> None:
-        """Clean up a snapshot created by :meth:`submit`.
-
-        Args:
-            snapshot: Snapshot to remove, or ``None`` (no-op).
-        """
-        if snapshot is not None:
-            with runtime_activity("Cleaning up snapshot of the project environment", style="yellow"):
-                snapshot.cleanup()
-            logger.info("%s cleaned up snapshot.", self.__class__.__name__)
-            runtime_event("Cleaned up snapshot of the project environment", style="green")
+        return job_graph
 
     @abstractmethod
-    def _make_snapshot(self, workspace: Workspace) -> SnapshotT:
-        """Create or reuse an execution snapshot for a submit call.
+    def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
+        """Create an execution snapshot for a submit call, or ``None``.
 
         Args:
-            workspace: Workspace used to materialize snapshot artifacts.
+            workspace: Workspace that stores the snapshot and job files.
 
         Returns:
-            Backend-specific snapshot object.
+            A published :class:`ProjectSnapshot`, or ``None`` for
+            live dispatch against the current environment
+            (:func:`misen.utils.snapshot.prepare_live_job`) or executors
+            that run work in-process.
         """
 
     @abstractmethod
     def _dispatch(
-        self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace, snapshot: SnapshotT
+        self, work_unit: WorkUnit, dependencies: set[JobT], workspace: Workspace, snapshot: ProjectSnapshot | None
     ) -> JobT:
         """Dispatch a work unit once dependency jobs are satisfied.
 
@@ -267,25 +242,6 @@ class Executor(Configurable, Generic[JobT, SnapshotT]):
         Returns:
             A Job handle that can be queried for execution state.
         """
-
-    def _make_local_snapshot(
-        self, workspace: Workspace, snapshots_dir: Path | None = None, *, env_cache: bool = True
-    ) -> LocalSnapshot:
-        """Create a fresh :class:`LocalSnapshot`.
-
-        Args:
-            workspace: Workspace used to derive the default snapshot parent
-                directory when ``snapshots_dir`` is not provided.
-            snapshots_dir: Optional override for the parent directory under
-                which the per-snapshot directory is created. When ``None``,
-                snapshots are placed under ``workspace.get_temp_dir() / "snapshots"``.
-            env_cache: Whether environments may come from the shared env
-                store under the snapshots directory (see
-                :class:`~misen.utils.snapshot.LocalSnapshot`).
-        """
-        if snapshots_dir is None:
-            snapshots_dir = workspace.get_temp_dir() / "snapshots"
-        return LocalSnapshot(snapshots_dir=snapshots_dir.resolve(), env_cache=env_cache)
 
 
 class Job(ABC):

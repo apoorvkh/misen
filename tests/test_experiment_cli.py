@@ -1122,14 +1122,11 @@ def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> Non
             workspace: object,
             *,
             blocking: bool = False,
-        ) -> tuple[DependencyGraph[Job], None]:
+        ) -> DependencyGraph[Job]:
             submit_args["tasks"] = tasks
             submit_args["workspace"] = workspace
             submit_args["blocking"] = blocking
-            return graph, None
-
-        def cleanup_snapshot(self, snapshot: object) -> None:
-            pass
+            return graph
 
     class StubExperiment:
         def tasks(self) -> dict[str, Task[int]]:
@@ -1176,14 +1173,11 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
             workspace: object,
             *,
             blocking: bool = False,
-        ) -> tuple[DependencyGraph[Job], None]:
+        ) -> DependencyGraph[Job]:
             _ = tasks, workspace, blocking
             seen["during_submit"] = os.environ.get("MISEN_RUNTIME_EVENTS")
             seen["during_submit_job_board"] = os.environ.get("MISEN_RUNTIME_JOB_BOARD")
-            return graph, None
-
-        def cleanup_snapshot(self, snapshot: object) -> None:
-            pass
+            return graph
 
     class StubExperiment:
         def tasks(self) -> dict[str, Task[int]]:
@@ -1232,19 +1226,12 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     ))
 
     class StubExecutor:
-        def __init__(self) -> None:
-            self.cleanup_calls = 0
-
         def submit(
             self, *, tasks: set[Task[int]], workspace: object, blocking: bool = False,
-        ) -> tuple[DependencyGraph[Job], object]:
+        ) -> DependencyGraph[Job]:
             _ = tasks, workspace
             assert blocking is False
-            return graph, "snapshot-sentinel"
-
-        def cleanup_snapshot(self, snapshot: object) -> None:
-            assert snapshot == "snapshot-sentinel"
-            self.cleanup_calls += 1
+            return graph
 
     class StubExperiment:
         def normalized_tasks(self) -> dict[str, Task[int]]:
@@ -1267,7 +1254,6 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     # Terminal states render without the trailing job graph bookkeeping.
     assert "complete" in output
     assert "failed" in output
-    assert executor.cleanup_calls == 1
 
 
 def test_job_state_index_maps_roots_and_jobs() -> None:
