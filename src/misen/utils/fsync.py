@@ -8,12 +8,34 @@ them without importing a workspace backend.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+import tempfile
+from pathlib import Path
 
-if TYPE_CHECKING:
-    from pathlib import Path
+__all__ = ["atomic_write_bytes", "fsync_dir", "fsync_file"]
 
-__all__ = ["fsync_dir", "fsync_file"]
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Durably publish ``data`` at ``path`` (mkstemp → fsync → rename → fsync-dir).
+
+    The atomic-overwrite-plus-fsync sequence shared by every
+    payload-before-pointer commit point (hash-index writes, store and
+    snapshot markers): a crash leaves either the old file or the new one,
+    never a partial write, and the rename itself is durable.
+
+    Args:
+        path: Final file path (parent directory must exist).
+        data: File contents.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)  # noqa: PTH105  -- atomic overwrite; Path has no equivalent
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    fsync_dir(path.parent)
 
 
 def fsync_dir(path: Path) -> None:

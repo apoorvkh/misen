@@ -62,6 +62,16 @@ class Hash(int):
         """Return unpadded RFC 4648 base32 string (13 chars)."""
         return base64.b32encode(self.encode()).decode("ascii").rstrip("=")
 
+    @classmethod
+    def from_b32(cls, name: str) -> Self:
+        """Decode an unpadded base32 key name; inverse of :meth:`b32`.
+
+        Raises:
+            binascii.Error: If ``name`` is not valid base32.
+            ValueError: If the decoded payload is not 8 bytes.
+        """
+        return cls.decode(base64.b32decode(name + "=" * (-len(name) % 8)))
+
     def short_b32(self) -> str:
         """Return short base32 prefix for human-readable debug output."""
         return self.b32()[:4]
