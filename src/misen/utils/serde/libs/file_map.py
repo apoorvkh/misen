@@ -30,7 +30,7 @@ import shutil
 from typing import TYPE_CHECKING, Any
 
 from misen.exceptions import SerializationError
-from misen.file_map import FileMap
+from misen.utils.file_map import FileMap
 from misen.utils.serde.base import Serializer
 
 if TYPE_CHECKING:
