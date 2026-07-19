@@ -1,5 +1,13 @@
 # Design: shared env store for snapshots
 
+> **Note:** partially superseded by `design_unified_snapshot.md`
+> (implemented): environments now materialize from content-addressed
+> snapshots published in the workspace, the env store root is
+> `env_store_dir` (not `<snapshots>/.shared`), and `env_cache=False`
+> no longer exists. The store/publication protocol, cache-dir policy,
+> and lifecycle rules described below are unchanged and still
+> authoritative.
+
 ## Problem
 
 A snapshot's environment is a complete uv-built venv with the user's
@@ -79,10 +87,7 @@ Split each environment by rate of change, and co-locate caches:
   mutate the entry.
 
 A submission with only source edits now builds: one tiny venv, a wheel per
-local package, pickled payloads. Seconds, not minutes. `env_cache=False`
-on `LocalExecutor` / `SlurmExecutor` runs the same machinery with the
-store rooted *inside* the snapshot directory — nothing shared between
-snapshots, everything removed on cleanup.
+local package, pickled payloads. Seconds, not minutes.
 
 ## Publication protocol (NFS crash-safety)
 
