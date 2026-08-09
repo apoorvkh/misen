@@ -8,7 +8,7 @@ and published into the workspace's snapshot store. Environments are
 content-keyed **env store** (built once per content state per store, with
 crash-safe locking), either on the submitting host at snapshot time
 (prewarm) or on each execution host at job startup
-(:mod:`misen.utils.bootstrap_env`). Design rationale:
+(through the submitted Bash bootstrap). Design rationale:
 ``docs/design_shared_env_store.md`` and ``docs/design_unified_snapshot.md``.
 
 Submission-scoped secrets (``.env`` files) and per-job payloads are never
@@ -43,6 +43,7 @@ import uv
 from dotenv import load_dotenv
 
 from misen.exceptions import LockUnavailableError
+from misen.utils.bootstrap_transport import worker_bootstrap_script
 from misen.utils.fsync import fsync_dir
 from misen.utils.hashing import Hash
 from misen.utils.hashing.base import hash_values
@@ -69,17 +70,6 @@ logger = logging.getLogger(__name__)
 # ``__main__``, triggering a ``RuntimeWarning``.
 JOB_LOG_PATH_ARG = "--job-log-path"
 
-# Referenced by name (never imported) for the same runpy reason as above:
-# non-prewarmed jobs run ``uv run --with misen -m misen.utils.bootstrap_env``.
-BOOTSTRAP_MODULE = "misen.utils.bootstrap_env"
-
-# Environment variable carrying the data-plane transport to the worker
-# bootstrap (see :meth:`Workspace.bootstrap_transport`; only non-"path"
-# transports need it). An env override rather than argv: the transport may
-# reference credential config, and scheduler queues expose argv more
-# readily than job env.
-BOOTSTRAP_TRANSPORT_ENV = "MISEN_BOOTSTRAP_TRANSPORT"
-
 
 def prepare_live_job(
     work_unit: WorkUnit,
@@ -96,15 +86,15 @@ def prepare_live_job(
     the parent process has — sensitive to code or dependency edits made
     while the job runs. ``.env`` / ``.env.local`` are read live from CWD,
     and when a ``pixi.toml`` sits in CWD (with the ``pixi`` CLI on PATH)
-    argv is wrapped in ``pixi run --frozen -x -- …`` against the in-tree
+    argv is wrapped in ``pixi run --frozen -- …`` against the in-tree
     manifest, so conda activation still applies with no install work.
 
     As in :meth:`ProjectSnapshot.prepare_job`, ``argv`` carries the
     worker's ``--job-log-path`` so it can wrap its lifecycle in
     :meth:`Workspace.streaming_job_log` against the same file the executor
     uses for output redirection (the returned ``log_path``). Payloads land
-    under the workspace temp dir and are reclaimed by workspace cleanup,
-    not per-submission.
+    in the workspace's submission-scoped job-file store and are retained
+    until workspace pruning or manual removal.
 
     Args:
         work_unit: Work unit to execute.
@@ -167,8 +157,8 @@ class ProjectSnapshot:
     either on the submitting host at snapshot time (``prewarm=True``, so
     jobs dispatch with direct activation and workers need nothing but the
     store) or on each execution host at job startup via
-    :mod:`misen.utils.bootstrap_env` (``prewarm=False``, so workers build
-    into their own local disk).
+    one submitted Bash bootstrap (``prewarm=False``, so workers build into
+    their own local disk).
 
     Submission-scoped state that must *not* be content-addressed — copies
     of ``.env`` / ``.env.local`` (secrets) and per-job payloads — goes
@@ -217,10 +207,14 @@ class ProjectSnapshot:
             RuntimeError: If staging fails (uv/pixi invocations, invalid
                 pixi manifests) or a prewarm build fails.
         """
-        if prewarm and not workspace.job_files_are_paths:
+        self.transport = workspace.bootstrap_transport()
+        if self.transport is not None and (not isinstance(self.transport, str) or not self.transport.strip()):
+            msg = "bootstrap_transport() must return non-empty Bash source or None for path transport."
+            raise ValueError(msg)
+        if prewarm and self.transport is not None:
             msg = (
-                "prewarm_envs requires a workspace whose job files are worker-visible paths "
-                f"({type(workspace).__name__} is not); set prewarm_envs=False."
+                "prewarm_envs requires a workspace with worker-visible paths for snapshots and job files "
+                f"({type(workspace).__name__} declares a transport); set prewarm_envs=False."
             )
             raise ValueError(msg)
 
@@ -237,7 +231,10 @@ class ProjectSnapshot:
         finally:
             shutil.rmtree(staged, ignore_errors=True)
         self.project_dir = workspace.fetch_snapshot(self.snapshot_key)
-        self.misen_requirement = _misen_bootstrap_requirement(self.project_dir, workspace=workspace)
+        self.misen_requirement = _misen_bootstrap_requirement(
+            self.project_dir,
+            paths_visible=self.transport is None,
+        )
 
         self.env_file_refs: list[str] = [
             workspace.put_job_file(self.submission_id, src.name, src.read_bytes())
@@ -246,14 +243,9 @@ class ProjectSnapshot:
         ]
 
         self.prewarmed: _MaterializedEnvs | None = None
-        self.transport: dict[str, object] | None = None
         store_root = _resolve_store_root(env_store_dir)
         if prewarm:
             self.prewarmed = _materialize_envs(self.project_dir, store_root, pixi_bin=self.pixi_bin)
-        else:
-            # Resolved now so a workspace without a bootstrap transport
-            # fails at snapshot creation, not on the first dispatch.
-            self.transport = workspace.bootstrap_transport()
 
     def prepare_job(
         self,
@@ -268,12 +260,9 @@ class ProjectSnapshot:
 
         Prewarmed snapshots emit the worker command directly (activation
         paths are known); otherwise the command is a
-        ``uv run --with misen … -m misen.utils.bootstrap_env`` invocation
-        that materializes the envs on the execution host first. With a
-        ``path`` transport the bootstrap receives plain paths; otherwise
-        the data-plane transport rides the ``MISEN_BOOTSTRAP_TRANSPORT``
-        env override rather than argv (it may reference credential
-        config).
+        single Bash program that resolves tools, executes the workspace's
+        transport when paths are not worker-visible, then invokes
+        :mod:`misen.utils.materialize_env` with local paths.
 
         Args:
             work_unit: Work unit to execute.
@@ -300,8 +289,8 @@ class ProjectSnapshot:
         if self.prewarmed is not None:
             argv = _worker_command(
                 self.prewarmed,
-                self._job_file_paths(self.env_file_refs),
-                self._job_file_paths([payload_ref])[0],
+                [Path(ref) for ref in self.env_file_refs],
+                Path(payload_ref),
                 gpu_runtime,
                 cpu_indices=cpu_indices,
                 gpu_indices=gpu_indices,
@@ -318,39 +307,18 @@ class ProjectSnapshot:
             raise RuntimeError(msg)
         transport = self.transport
 
-        env_overrides: dict[str, str] = {}
-        if transport is not None and transport["kind"] == "path":
-            env_file_paths = self._job_file_paths(self.env_file_refs)
-            data_args = [
-                "--project-dir",
-                str(self.project_dir),
-                "--payload",
-                str(self._job_file_paths([payload_ref])[0]),
-                *(("--env-file", *(str(path) for path in env_file_paths)) if env_file_paths else ()),
-            ]
+        if transport is None:
+            project_dir: Path | None = self.project_dir
+            snapshot_key: str | None = None
+            payload = payload_ref
+            env_files = list(self.env_file_refs)
         else:
-            data_args = [
-                "--snapshot-key",
-                self.snapshot_key,
-                "--payload-ref",
-                payload_ref,
-                *(("--env-file-ref", *self.env_file_refs) if self.env_file_refs else ()),
-            ]
-            env_overrides[BOOTSTRAP_TRANSPORT_ENV] = json.dumps(transport)
+            project_dir = None
+            snapshot_key = self.snapshot_key
+            payload = payload_ref
+            env_files = list(self.env_file_refs)
 
-        argv = [
-            _uv_bin(),
-            "run",
-            "--no-project",
-            "--python",
-            f"{sys.version_info.major}.{sys.version_info.minor}",
-            "--with",
-            self.misen_requirement,
-            "-m",
-            BOOTSTRAP_MODULE,
-            *data_args,
-            *(("--env-store-root", self.env_store_dir) if self.env_store_dir is not None else ()),
-            *(("--pixi-bin", self.pixi_bin) if self.pixi_bin is not None else ()),
+        worker_args = [
             "--gpu-runtime",
             gpu_runtime,
             *_indices_argv("cpu-indices", cpu_indices),
@@ -358,22 +326,21 @@ class ProjectSnapshot:
             JOB_LOG_PATH_ARG,
             str(log_path),
         ]
-        return job_id, argv, env_overrides, log_path
-
-    def _job_file_paths(self, refs: list[str]) -> list[Path]:
-        """Resolve job-file refs to worker-visible paths.
-
-        Only called for path-visible dispatch modes, which construction
-        validated (prewarm) or the transport declared (``path`` kind).
-        """
-        paths = []
-        for ref in refs:
-            path = self.workspace.job_file_path(ref)
-            if path is None:
-                msg = f"{type(self.workspace).__name__} job files are not worker-visible paths."
-                raise RuntimeError(msg)
-            paths.append(path)
-        return paths
+        script = worker_bootstrap_script(
+            uv_bin=_uv_bin(),
+            pixi_bin=self.pixi_bin,
+            requires_pixi=self.pixi_bin is not None,
+            transport_script=transport,
+            misen_requirement=self.misen_requirement,
+            python_version=f"{sys.version_info.major}.{sys.version_info.minor}",
+            store_root=_resolve_store_root(self.env_store_dir),
+            project_dir=project_dir,
+            snapshot_key=snapshot_key,
+            payload=payload,
+            env_files=env_files,
+            worker_args=worker_args,
+        )
+        return job_id, ["bash", "-c", script], {}, log_path
 
     def _stage(self, staged_dir: Path) -> None:
         """Stage code and dependency metadata for the workspace snapshot store.
@@ -568,7 +535,7 @@ def _stage_local_package(package_dir: Path, packages_dir: Path) -> None:
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
-def _misen_bootstrap_requirement(project_dir: Path, *, workspace: Workspace) -> str | None:
+def _misen_bootstrap_requirement(project_dir: Path, *, paths_visible: bool) -> str | None:
     """Resolve how a worker bootstrap installs misen, from the staged lock.
 
     A registry pin installs from the index (``misen==<version>``). A local
@@ -585,7 +552,7 @@ def _misen_bootstrap_requirement(project_dir: Path, *, workspace: Workspace) -> 
         source = package.get("source", {})
         if "registry" in source and "version" in package:
             return f"misen=={package['version']}"
-        if any(kind in source for kind in ("editable", "directory", "path")) and workspace.job_files_are_paths:
+        if any(kind in source for kind in ("editable", "directory", "path")) and paths_visible:
             artifacts = sorted(
                 p for p in (project_dir / _PACKAGES_DIR_NAME).glob("misen-*") if p.name.split("-")[0] == "misen"
             )
@@ -850,7 +817,7 @@ def _build_overlay_venv(
 # Env materialization: build (or reuse) the environments described by a
 # published snapshot, in a content-keyed env store on this host. Same store
 # protocol as above; runs on the submitting host (prewarm) or on execution
-# hosts via ``uv run --with misen -m misen.utils.bootstrap_env``.
+# hosts via the submitted Bash bootstrap and ``misen.utils.materialize_env``.
 # --------------------------------------------------------------------------
 
 
@@ -1264,10 +1231,10 @@ def _indices_argv(flag: str, indices: list[int] | None) -> list[str]:
 
 
 def _pixi_run_prefix(pixi_bin: str, manifest_path: Path) -> list[str]:
-    """Return ``pixi run --frozen -x -- …`` argv prefix for activation wrapping.
+    """Return a ``pixi run --frozen -- …`` activation wrapper.
 
-    ``-x`` forces executable mode (no pixi-task lookup); ``--`` stops pixi
-    from parsing the wrapped command's flags.
+    ``--`` stops pixi from parsing the wrapped executable's flags and works
+    across both older and current Pixi releases.
     """
     return [
         pixi_bin,
@@ -1278,7 +1245,6 @@ def _pixi_run_prefix(pixi_bin: str, manifest_path: Path) -> list[str]:
         "--frozen",
         "--manifest-path",
         str(manifest_path),
-        "-x",
         "--",
     ]
 

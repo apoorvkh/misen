@@ -24,8 +24,7 @@ class FailedJob(Job):
 
 
 class FailingExecutor(Executor[FailedJob]):
-    def _make_snapshot(self, workspace: Workspace) -> None:
-        _ = workspace
+    snapshot: bool = False
 
     def _dispatch(
         self,

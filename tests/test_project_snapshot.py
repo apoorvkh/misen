@@ -11,19 +11,21 @@ exercised hermetically through obstore's ``MemoryStore``.
 
 from __future__ import annotations
 
-import json
+import hashlib
 import os
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
+import obstore.store as obstore_store
 import pytest
 import tyro
 
-from misen.utils import bootstrap_env
+from misen.utils import materialize_env
 from misen.utils import snapshot as snapshot_mod
+from misen.utils.bootstrap_transport import render_python_transport, worker_bootstrap_script
 from misen.utils.snapshot import (
-    BOOTSTRAP_MODULE,
-    BOOTSTRAP_TRANSPORT_ENV,
     JOB_LOG_PATH_ARG,
     ProjectSnapshot,
     _is_pure_wheel,
@@ -96,6 +98,18 @@ class _StubWorkUnit:
         return b"payload"
 
 
+def _test_python_transport(context: dict[str, object], operation: str, ref: str, destination: Path) -> None:
+    destination.write_text(f"{context['prefix']}:{operation}:{ref}")
+
+
+_CAPTURED_TRANSPORT_VALUE = "captured"
+
+
+def _capturing_python_transport(context: dict[str, object], operation: str, ref: str, destination: Path) -> None:
+    del context, operation, ref
+    destination.write_text(_CAPTURED_TRANSPORT_VALUE)
+
+
 # ---------- staging + publication ----------
 
 
@@ -109,7 +123,6 @@ def test_staging_contents_and_key_stability(tmp_path: Path, counted_run: list[li
     assert snapshot.prewarmed is None
 
     project_dir = snapshot.project_dir
-    assert workspace.has_snapshot(snapshot.snapshot_key)
     assert project_dir == workspace.fetch_snapshot(snapshot.snapshot_key)
     for name in ("pyproject.toml", "uv.lock", "requirements.txt"):
         assert (project_dir / name).is_file()
@@ -172,8 +185,6 @@ def test_cloud_workspace_publication_roundtrip(tmp_path: Path, monkeypatch: pyte
     workspace = _MemoryCloudWorkspace(backend="s3", bucket="snap-test", cache_dir=str(tmp_path / "cache-a"))
 
     snapshot = ProjectSnapshot(workspace=workspace, prewarm=False)
-    assert workspace.has_snapshot(snapshot.snapshot_key)
-
     # A second workspace over the same bucket with a cold cache = a worker.
     worker_side = _MemoryCloudWorkspace(backend="s3", bucket="snap-test", cache_dir=str(tmp_path / "cache-b"))
     fetched = worker_side.fetch_snapshot(snapshot.snapshot_key)
@@ -221,15 +232,12 @@ def test_broken_wheel_build_falls_back_to_sdist(tmp_path: Path) -> None:
 # ---------- misen bootstrap requirement resolution ----------
 
 
-def _requirement_for_lock(tmp_path: Path, lock_body: str, *, paths: bool = True) -> str | None:
+def _requirement_for_lock(tmp_path: Path, lock_body: str, *, paths_visible: bool = True) -> str | None:
     project_dir = tmp_path / "staged"
     (project_dir / "packages").mkdir(parents=True, exist_ok=True)
     (project_dir / "uv.lock").write_text(f"version = 1\n{lock_body}")
 
-    class _StubWorkspace:
-        job_files_are_paths = paths
-
-    return _misen_bootstrap_requirement(project_dir, workspace=_StubWorkspace())  # type: ignore[arg-type]
+    return _misen_bootstrap_requirement(project_dir, paths_visible=paths_visible)
 
 
 def test_misen_requirement_registry_pin(tmp_path: Path) -> None:
@@ -245,15 +253,9 @@ def test_misen_requirement_local_checkout_uses_staged_artifact(tmp_path: Path) -
     wheel = project_dir / "packages" / "misen-0.0.9-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
 
-    class _PathsWorkspace:
-        job_files_are_paths = True
-
-    class _RemoteWorkspace:
-        job_files_are_paths = False
-
-    assert _misen_bootstrap_requirement(project_dir, workspace=_PathsWorkspace()) == str(wheel)  # type: ignore[arg-type]
+    assert _misen_bootstrap_requirement(project_dir, paths_visible=True) == str(wheel)
     # No shared filesystem -> local misen is unusable (released misen required).
-    assert _misen_bootstrap_requirement(project_dir, workspace=_RemoteWorkspace()) is None  # type: ignore[arg-type]
+    assert _misen_bootstrap_requirement(project_dir, paths_visible=False) is None
 
 
 def test_misen_requirement_absent_or_git(tmp_path: Path) -> None:
@@ -265,21 +267,115 @@ def test_misen_requirement_absent_or_git(tmp_path: Path) -> None:
 # ---------- bootstrap dispatch argv ----------
 
 
-def test_bootstrap_transports(tmp_path: Path) -> None:
+def test_worker_shell_bootstrap_resolves_configured_tools(tmp_path: Path) -> None:
+    """The Bash root resolves required tools before entering uv."""
+    echo_bin = shutil.which("echo")
+    true_bin = shutil.which("true")
+    bash_bin = shutil.which("bash")
+    assert echo_bin is not None
+    assert true_bin is not None
+    assert bash_bin is not None
+    script = worker_bootstrap_script(
+        uv_bin=echo_bin,
+        pixi_bin=true_bin,
+        requires_pixi=True,
+        transport_script=None,
+        misen_requirement="misen==0.0.9",
+        python_version="3.11",
+        store_root=tmp_path / "store",
+        project_dir=tmp_path / "project",
+        snapshot_key=None,
+        payload=str(tmp_path / "payload"),
+        env_files=[],
+        worker_args=["--gpu-runtime", "cuda", JOB_LOG_PATH_ARG, str(tmp_path / "job.log")],
+    )
+    result = subprocess.run(  # noqa: S603
+        [bash_bin, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "misen.utils.materialize_env" in result.stdout
+
+
+def test_python_transport_renderer_extracts_and_invokes_function(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dependency_transport = render_python_transport(
+        _test_python_transport,
+        requirements=("example-package==1.2.3",),
+        context={"prefix": "workspace-a"},
+    )
+    assert "example-package==1.2.3" in dependency_transport
+
+    transport = render_python_transport(_test_python_transport, context={"prefix": "workspace-a"})
+    assert "def _test_python_transport" in transport
+    destination = tmp_path / "transport-output"
+    bash_bin = shutil.which("bash")
+    assert bash_bin is not None
+    monkeypatch.setenv("MISEN_UV_BIN", _uv_bin())
+    monkeypatch.setenv("MISEN_TRANSPORT_OPERATION", "job-file")
+    monkeypatch.setenv("MISEN_TRANSPORT_REF", "opaque-ref")
+    monkeypatch.setenv("MISEN_TRANSPORT_DEST", str(destination))
+    subprocess.run([bash_bin, "-c", transport], check=True)  # noqa: S603
+    assert destination.read_text() == "workspace-a:job-file:opaque-ref"
+
+
+def test_python_transport_renderer_rejects_captured_globals() -> None:
+    with pytest.raises(ValueError, match="module globals"):
+        render_python_transport(_capturing_python_transport, context={})
+
+
+def test_bootstrap_transports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     disk = DiskWorkspace(directory=str(tmp_path / ".misen"))
-    assert disk.bootstrap_transport() == {"kind": "path"}
+    assert disk.bootstrap_transport() is None
 
     cloud = _MemoryCloudWorkspace(backend="s3", bucket="transport-test", cache_dir=str(tmp_path / "cache"))
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "project.txt").write_text("snapshot")
+    cloud.publish_snapshot("snapshot-key", staged)
+    job_ref = cloud.put_job_file("submission", "job.pkl", b"payload")
     transport = cloud.bootstrap_transport()
-    assert transport["kind"] == "obstore"
-    assert transport["backend"] == "s3"
-    assert transport["bucket"] == "transport-test"
+    assert "obstore==" in transport
+    assert "--with misen" not in transport.lower()
+    assert "from misen" not in transport.lower()
+    assert '"backend":"s3"' in transport
+    assert '"bucket":"transport-test"' in transport
+    subprocess.run(["bash", "-n"], input=transport, text=True, check=True)  # noqa: S607
+    command = shlex.split(transport)
+    code = compile(command[command.index("-c") + 1], "<cloud-bootstrap-transport>", "exec")
+
+    # Execute the exact inline program against the hermetic MemoryStore. This
+    # tests both operation branches without invoking uv or a real cloud API.
+    monkeypatch.setattr(obstore_store, "S3Store", lambda **_kwargs: cloud._store)
+    snapshot_dest = tmp_path / "fetched-snapshot"
+    monkeypatch.setenv("MISEN_TRANSPORT_OPERATION", "snapshot")
+    monkeypatch.setenv("MISEN_TRANSPORT_REF", "snapshot-key")
+    monkeypatch.setenv("MISEN_TRANSPORT_DEST", str(snapshot_dest))
+    exec(code, {})  # noqa: S102
+    assert (snapshot_dest / "project.txt").read_text() == "snapshot"
+
+    job_dest = tmp_path / "fetched-job.pkl"
+    monkeypatch.setenv("MISEN_TRANSPORT_OPERATION", "job-file")
+    monkeypatch.setenv("MISEN_TRANSPORT_REF", job_ref)
+    monkeypatch.setenv("MISEN_TRANSPORT_DEST", str(job_dest))
+    exec(code, {})  # noqa: S102
+    assert job_dest.read_bytes() == b"payload"
+
+    configured = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket="configured-transport",
+        config={"secret_access_key": "do-not-embed"},
+        cache_dir=str(tmp_path / "configured-cache"),
+    )
+    with pytest.raises(ValueError, match="ambient worker environment"):
+        configured.bootstrap_transport()
 
     class _NoTransportWorkspace:
-        job_files_are_paths = False
         bootstrap_transport = Workspace.bootstrap_transport
 
-    with pytest.raises(NotImplementedError, match="bootstrap transport"):
+    with pytest.raises(NotImplementedError):
         _NoTransportWorkspace().bootstrap_transport()
 
 
@@ -296,31 +392,25 @@ def test_bootstrap_dispatch_argv(tmp_path: Path) -> None:
         cpu_indices=[0, 1],
         gpu_indices=None,
     )
-    # Path transport: no env var, no refs — everything is a path.
+    # Path transport: one self-contained shell program, with no transport.
     assert env_overrides == {}
-    assert "--snapshot-key" not in argv
-    assert BOOTSTRAP_TRANSPORT_ENV not in os.environ
-
-    assert argv[0] == _uv_bin()
-    assert argv[1:3] == ["run", "--no-project"]
-    assert argv[argv.index("--with") + 1] == "misen==0.0.9"
-    assert argv[argv.index("-m") + 1] == BOOTSTRAP_MODULE
-    assert argv[argv.index("--project-dir") + 1] == str(snapshot.project_dir)
-    assert argv[argv.index("--env-store-root") + 1] == "/scratch/envs"
-    payload_path = argv[argv.index("--payload") + 1]
-    assert Path(payload_path).read_bytes() == b"payload"
-    assert argv[argv.index("--cpu-indices") + 1 : argv.index("--cpu-indices") + 3] == ["0", "1"]
-    assert argv[argv.index(JOB_LOG_PATH_ARG) + 1] == str(log_path)
-    assert "misen.utils.execute" not in argv  # inner argv is built by the bootstrap
+    assert argv[:2] == ["bash", "-c"]
+    shell = argv[2]
+    assert "misen.utils.bootstrap_env" not in shell
+    assert "misen.utils.materialize_env" in shell
+    assert str(snapshot.project_dir) in shell
+    assert "/scratch/envs" in shell
+    assert "--cpu-indices 0 1" in shell
+    assert str(log_path) in shell
 
 
 # ---------- bootstrap (worker side, real uv) ----------
 
 
-def _run_bootstrap(snapshot: ProjectSnapshot, store_root: Path | str, payload_path: str) -> None:
-    """Invoke the bootstrap in path mode, as a path-transport dispatch would."""
+def _run_materializer(snapshot: ProjectSnapshot, store_root: Path | str, payload_path: str) -> None:
+    """Invoke the path-only worker materializer directly."""
     tyro.cli(
-        bootstrap_env.main,
+        materialize_env.main,
         args=[
             "--project-dir",
             str(snapshot.project_dir),
@@ -345,7 +435,7 @@ def test_bootstrap_builds_reuses_and_execs(
     snapshot = ProjectSnapshot(workspace=workspace, prewarm=False)
     payload_ref = workspace.put_job_file(snapshot.submission_id, "JOB.pkl", b"payload")
 
-    _run_bootstrap(snapshot, store_root, payload_ref)
+    _run_materializer(snapshot, store_root, payload_ref)
     path, argv, env = captured_exec[-1]
     assert path == argv[0] == _uv_bin()
     assert "misen.utils.execute" in argv
@@ -371,7 +461,7 @@ def test_bootstrap_builds_reuses_and_execs(
 
     # A second bootstrap (same snapshot, same host) reuses both entries.
     builds = len(_env_build_calls(counted_run))
-    _run_bootstrap(snapshot, store_root, payload_ref)
+    _run_materializer(snapshot, store_root, payload_ref)
     assert len(_env_build_calls(counted_run)) == builds
     assert captured_exec[-1][2]["VIRTUAL_ENV"] == str(overlay_venv)
 
@@ -400,21 +490,45 @@ def test_bootstrap_normalizes_relative_store_root(
     assert list((snapshot.project_dir / "packages").iterdir()) == []  # virtual root stages nothing
 
     payload_ref = workspace.put_job_file(snapshot.submission_id, "JOB.pkl", b"payload")
-    _run_bootstrap(snapshot, "env-store", payload_ref)  # relative to CWD
+    _run_materializer(snapshot, "env-store", payload_ref)  # relative to CWD
     _, _, env = captured_exec[-1]
     assert Path(env["VIRTUAL_ENV"]).is_relative_to((root / "env-store").absolute())
 
 
-def test_obstore_bootstrap_fetches_and_execs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_exec: list[ExecCall]
-) -> None:
-    """Ref-mode bootstrap: fetch snapshot + job files via the obstore transport.
+@pytest.mark.usefixtures("in_project")
+def test_materializer_removes_corrupt_transported_snapshot(tmp_path: Path) -> None:
+    """A failed integrity check leaves the cache ready for a clean refetch."""
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
+    snapshot = ProjectSnapshot(workspace=workspace, prewarm=False)
+    store_root = tmp_path / "env-store"
+    corrupt = store_root / "snapshots" / snapshot.snapshot_key
+    corrupt.mkdir(parents=True)
+    (corrupt / "wrong.txt").write_text("wrong")
+    payload = workspace.put_job_file(snapshot.submission_id, "JOB.pkl", b"payload")
 
-    Hermetic: the transport's store builder is patched to return the shared
-    ``MemoryStore``, so this exercises exactly the code path a real worker
-    runs against S3/GCS/Azure — reconstruction from the transport env var,
-    tarball fetch into the env store, job-file fetch, activation, exec.
-    """
+    with pytest.raises(RuntimeError, match="expected"):
+        tyro.cli(
+            materialize_env.main,
+            args=[
+                "--project-dir",
+                str(corrupt),
+                "--snapshot-key",
+                snapshot.snapshot_key,
+                "--env-store-root",
+                str(store_root),
+                "--payload",
+                payload,
+                "--gpu-runtime",
+                "cuda",
+                JOB_LOG_PATH_ARG,
+                str(store_root / "job.log"),
+            ],
+        )
+    assert not corrupt.exists()
+
+
+def test_bash_transport_fetches_before_materialization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The single submitted shell fetches every ref before materialization."""
     root = tmp_path / "project"
     root.mkdir()
     (root / "pyproject.toml").write_text(
@@ -423,47 +537,47 @@ def test_obstore_bootstrap_fetches_and_execs(
     monkeypatch.chdir(root)
     subprocess.run(["uv", "lock"], check=True, capture_output=True)  # noqa: S607
 
-    workspace = _MemoryCloudWorkspace(backend="s3", bucket="boot-test", cache_dir=str(tmp_path / "cache"))
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
     snapshot = ProjectSnapshot(workspace=workspace, prewarm=False)
-    assert snapshot.transport is not None
-    assert snapshot.transport["kind"] == "obstore"
     payload_ref = workspace.put_job_file(snapshot.submission_id, "JOB.pkl", b"payload")
     env_ref = workspace.put_job_file(snapshot.submission_id, ".env", b"A=1\n")
-
-    from misen.workspaces import cloud as cloud_mod
-
-    monkeypatch.setattr(cloud_mod, "_build_obstore_store", lambda *_args, **_kwargs: workspace._store)
-    monkeypatch.setenv(BOOTSTRAP_TRANSPORT_ENV, json.dumps(snapshot.transport))
-    store_root = tmp_path / "env-store"
-    tyro.cli(
-        bootstrap_env.main,
-        args=[
-            "--snapshot-key",
-            snapshot.snapshot_key,
-            "--env-store-root",
-            str(store_root),
-            "--payload-ref",
-            payload_ref,
-            "--env-file-ref",
-            env_ref,
-            "--gpu-runtime",
-            "cuda",
-            JOB_LOG_PATH_ARG,
-            str(store_root / "job.log"),
-        ],
+    script = (
+        'if [[ "$MISEN_TRANSPORT_OPERATION" == "snapshot" ]]; then\n'
+        f'  cp -a -- {shlex.quote(str(snapshot.project_dir))} "$MISEN_TRANSPORT_DEST"\n'
+        "else\n"
+        '  cp -- "$MISEN_TRANSPORT_REF" "$MISEN_TRANSPORT_DEST"\n'
+        "fi\n"
     )
+    store_root = tmp_path / "env-store"
+    echo_bin = shutil.which("echo")
+    bash_bin = shutil.which("bash")
+    assert echo_bin is not None
+    assert bash_bin is not None
+    bootstrap = worker_bootstrap_script(
+        uv_bin=echo_bin,
+        pixi_bin=None,
+        requires_pixi=False,
+        transport_script=script,
+        misen_requirement="misen==0.0.9",
+        python_version="3.11",
+        store_root=store_root,
+        project_dir=None,
+        snapshot_key=snapshot.snapshot_key,
+        payload=payload_ref,
+        env_files=[env_ref],
+        worker_args=["--gpu-runtime", "cuda", JOB_LOG_PATH_ARG, str(store_root / "job.log")],
+    )
+    result = subprocess.run([bash_bin, "-c", bootstrap], check=True, capture_output=True, text=True)  # noqa: S603
 
-    _, argv, env = captured_exec[-1]
-    # Snapshot fetched (content-addressed) and job files fetched into the env store root.
-    payload_path = Path(argv[argv.index("--payload") + 1])
-    assert payload_path.is_relative_to(store_root / "job-files")
+    transport_root = store_root / "job-files" / hashlib.sha256(script.encode()).hexdigest()
+    payload_path = transport_root / hashlib.sha256(payload_ref.encode()).hexdigest()
     assert payload_path.read_bytes() == b"payload"
-    env_file_path = Path(argv[argv.index("--env-file") + 1])
+    env_file_path = transport_root / hashlib.sha256(env_ref.encode()).hexdigest()
     assert env_file_path.read_bytes() == b"A=1\n"
     assert oct(env_file_path.stat().st_mode & 0o777) == "0o600"
     assert (store_root / "snapshots" / snapshot.snapshot_key / "requirements.txt").is_file()
-    assert Path(env["VIRTUAL_ENV"]).is_relative_to(store_root / "overlay-envs")
-    assert BOOTSTRAP_TRANSPORT_ENV not in env
+    assert "misen.utils.materialize_env" in result.stdout
+    assert "misen.utils.bootstrap_env" not in result.stdout
 
 
 # ---------- executor plumbing ----------
@@ -473,18 +587,17 @@ def test_obstore_bootstrap_fetches_and_execs(
 def test_executor_validation(tmp_path: Path) -> None:
     from misen.executors.slurm import SlurmExecutor
 
-    disk = DiskWorkspace(directory=str(tmp_path / ".misen"))
     cloud = _MemoryCloudWorkspace(backend="s3", bucket="val-test", cache_dir=str(tmp_path / "cache"))
 
     # SLURM prewarm needs an explicit (shared) env store.
     with pytest.raises(ValueError, match="env_store_dir"):
-        SlurmExecutor(prewarm_envs=True)._make_snapshot(disk)
+        SlurmExecutor(prewarm_envs=True)
     # Prewarm needs path-addressable job files.
     with pytest.raises(ValueError, match="worker-visible paths"):
-        SlurmExecutor(prewarm_envs=True, env_store_dir=str(tmp_path / "s"))._make_snapshot(cloud)
+        ProjectSnapshot(workspace=cloud, env_store_dir=str(tmp_path / "s"), prewarm=True)
 
-    # snapshot=False -> live dispatch, no snapshot object at all.
-    assert SlurmExecutor(snapshot=False)._make_snapshot(disk) is None
+    # snapshot=False is valid without a shared env-store path.
+    assert SlurmExecutor(snapshot=False, prewarm_envs=True).snapshot is False
 
 
 def test_in_process_executor_warns_on_snapshot_config(caplog: pytest.LogCaptureFixture) -> None:
@@ -508,7 +621,10 @@ def test_slurm_executor_bootstrap_dispatch(tmp_path: Path) -> None:
 
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
     executor = SlurmExecutor(env_store_dir="/mnt/local/misen-envs")
-    snapshot = executor._make_snapshot(workspace)
-    assert isinstance(snapshot, ProjectSnapshot)
+    snapshot = ProjectSnapshot(
+        workspace=workspace,
+        env_store_dir=executor.env_store_dir,
+        prewarm=executor.prewarm_envs,
+    )
     assert snapshot.prewarmed is None
     assert snapshot.env_store_dir == "/mnt/local/misen-envs"

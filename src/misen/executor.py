@@ -47,8 +47,8 @@ class Executor(Configurable, Generic[JobT]):
     """Abstract execution backend interface.
 
     Shared submission logic here handles dependency-aware graph traversal,
-    completed-work short circuiting, and snapshot creation (see
-    :meth:`_make_snapshot`); subclasses provide dispatch behavior.
+    completed-work short circuiting, and snapshot creation; subclasses
+    provide dispatch behavior.
     """
 
     _config_key: ClassVar[str] = "executor"
@@ -118,7 +118,14 @@ class Executor(Configurable, Generic[JobT]):
             started_at = time.perf_counter()
             try:
                 with runtime_activity("Creating a snapshot of the project environment", style="yellow"):
-                    snapshot = self._make_snapshot(workspace=workspace)
+                    if self.snapshot:
+                        snapshot = ProjectSnapshot(
+                            workspace=workspace,
+                            env_store_dir=self.env_store_dir,
+                            prewarm=self.prewarm_envs,
+                        )
+                    else:
+                        _detect_pixi_wrap()  # fail fast on a misconfigured pixi.lock
             except Exception:
                 elapsed_s = time.perf_counter() - started_at
                 logger.exception("%s failed to create a snapshot after %.2fs.", executor_name, elapsed_s)
@@ -216,27 +223,6 @@ class Executor(Configurable, Generic[JobT]):
                 runtime_event(msg, style="bold red")
 
         return job_graph
-
-    def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
-        """Create an execution snapshot for a submit call, or ``None``.
-
-        The default implementation covers every subprocess-dispatching
-        backend: publish a :class:`ProjectSnapshot` to the workspace
-        (honoring ``env_store_dir`` / ``prewarm_envs``), or — with
-        ``snapshot = False`` — validate the in-tree pixi manifests and
-        return ``None`` so dispatch runs live against the current
-        environment (:func:`misen.utils.snapshot.prepare_live_job`).
-        Subclasses override to add submission-time validation (e.g.
-        SLURM's topology check) or to opt out of snapshots entirely
-        (in-process execution).
-
-        Args:
-            workspace: Workspace that stores the snapshot and job files.
-        """
-        if not self.snapshot:
-            _detect_pixi_wrap()  # fail fast on a misconfigured pixi.lock
-            return None
-        return ProjectSnapshot(workspace=workspace, env_store_dir=self.env_store_dir, prewarm=self.prewarm_envs)
 
     @abstractmethod
     def _dispatch(

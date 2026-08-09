@@ -14,6 +14,7 @@ and lock-based safety for concurrent producers.
 from __future__ import annotations
 
 import binascii
+import contextlib
 import logging
 import os
 import shutil
@@ -372,17 +373,6 @@ class DiskWorkspace(Workspace):
         """Return workspace temporary directory path."""
         return self._directory_path / "tmp"
 
-    def _snapshots_dir(self) -> Path:
-        return self._directory_path / "snapshots"
-
-    def _job_files_dir(self) -> Path:
-        return self._directory_path / "job_files"
-
-    @property
-    def job_files_are_paths(self) -> bool:
-        """Job files are worker-visible paths on this backend."""
-        return True
-
     def publish_snapshot(self, key: str, staged_dir: Path) -> None:
         """Publish a staged snapshot tree by atomic rename + durable marker.
 
@@ -394,19 +384,49 @@ class DiskWorkspace(Workspace):
         atomic — that residue is a *complete* tree, so a later publisher
         may simply re-commit the marker.
         """
-        snapshots_dir = self._snapshots_dir()
-        if self.has_snapshot(key):
+        snapshots_dir = self._directory_path / "snapshots"
+        if (snapshots_dir / f"{key}.complete").is_file() and (snapshots_dir / key).is_dir():
             return
         snapshots_dir.mkdir(parents=True, exist_ok=True)
         _fsync_tree(staged_dir)
-        self._adopt_staged_tree(staged_dir, snapshots_dir / key)
+        final = snapshots_dir / key
+        try:
+            staged_dir.rename(final)
+        except OSError:
+            if not final.is_dir():
+                raise
         _fsync_dir(snapshots_dir)
         _atomic_write_bytes(snapshots_dir / f"{key}.complete", b"complete\n")
 
-    def has_snapshot(self, key: str) -> bool:
-        """Return whether a published snapshot exists for ``key`` (marker-committed)."""
-        snapshots_dir = self._snapshots_dir()
-        return (snapshots_dir / f"{key}.complete").is_file() and (snapshots_dir / key).is_dir()
+    def fetch_snapshot(self, key: str) -> Path:
+        """Return a marker-committed snapshot directory."""
+        snapshots_dir = self._directory_path / "snapshots"
+        path = snapshots_dir / key
+        if not (snapshots_dir / f"{key}.complete").is_file() or not path.is_dir():
+            msg = f"No snapshot published under key {key!r} in {snapshots_dir}."
+            raise FileNotFoundError(msg)
+        return path
+
+    def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
+        """Store an owner-only submission file and return its path."""
+        if not name or "/" in name or "\\" in name or name in {".", ".."}:
+            msg = f"Invalid job-file name: {name!r}"
+            raise ValueError(msg)
+        path = self._directory_path / "job_files" / submission_id / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+        return str(path)
+
+    def bootstrap_transport(self) -> None:
+        """Use directly worker-visible snapshot and job-file paths."""
+
+    def start_scratch_dir_sync(self, task: Task) -> None:
+        """No-op because the scratch directory is already durable."""
+
+    def finalize_scratch_dir(self, task: Task) -> None:
+        """No-op because the scratch directory requires no upload."""
 
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task.
@@ -429,3 +449,14 @@ class DiskWorkspace(Workspace):
         log_dir = self._directory_path / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str
+
+    def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
+        """No-op because task logs are written directly to durable storage."""
+
+    def streaming_job_log(self, local_path: Path) -> contextlib.AbstractContextManager[None]:
+        """Return a no-op context because job logs are already durable."""
+        del local_path
+        return contextlib.nullcontext()
+
+    def finalize_job_log(self, local_path: Path) -> None:
+        """No-op because job logs require no final upload."""

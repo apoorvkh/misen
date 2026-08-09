@@ -18,6 +18,7 @@ observe cached results or coordinate via the runtime lock.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import shutil
 import tempfile
@@ -191,16 +192,45 @@ class InMemoryWorkspace(Workspace):
         """Return workspace temporary directory path."""
         return self._directory / "tmp"
 
-    def _snapshots_dir(self) -> Path:
-        return self._directory / "snapshots"
+    def publish_snapshot(self, key: str, staged_dir: Path) -> None:
+        """Publish a snapshot into the workspace's temporary directory."""
+        final = self._directory / "snapshots" / key
+        if not final.exists():
+            final.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                staged_dir.rename(final)
+            except OSError:
+                if not final.is_dir():
+                    raise
 
-    def _job_files_dir(self) -> Path:
-        return self._directory / "job_files"
+    def fetch_snapshot(self, key: str) -> Path:
+        """Return a locally published snapshot directory."""
+        path = self._directory / "snapshots" / key
+        if not path.is_dir():
+            msg = f"No snapshot published under key {key!r} in {path.parent}."
+            raise FileNotFoundError(msg)
+        return path
 
-    @property
-    def job_files_are_paths(self) -> bool:
-        """Job files are local paths on this backend."""
-        return True
+    def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
+        """Store an owner-only submission file and return its path."""
+        if not name or "/" in name or "\\" in name or name in {".", ".."}:
+            msg = f"Invalid job-file name: {name!r}"
+            raise ValueError(msg)
+        path = self._directory / "job_files" / submission_id / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+        return str(path)
+
+    def bootstrap_transport(self) -> None:
+        """Use directly visible paths for this process-local workspace."""
+
+    def start_scratch_dir_sync(self, task: Task) -> None:
+        """No-op because the scratch directory needs no remote sync."""
+
+    def finalize_scratch_dir(self, task: Task) -> None:
+        """No-op because the scratch directory needs no final upload."""
 
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task."""
@@ -215,3 +245,14 @@ class InMemoryWorkspace(Workspace):
         log_dir = self._directory / "task_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str
+
+    def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
+        """No-op because task logs stay in this workspace's local directory."""
+
+    def streaming_job_log(self, local_path: Path) -> contextlib.AbstractContextManager[None]:
+        """Return a no-op context for process-local job logs."""
+        del local_path
+        return contextlib.nullcontext()
+
+    def finalize_job_log(self, local_path: Path) -> None:
+        """No-op because process-local job logs require no upload."""

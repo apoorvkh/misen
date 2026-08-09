@@ -112,33 +112,43 @@ The executor delivers five things to a worker, all strings/small files:
 5. **env files** — paths or refs, plus the usual exec parameters (gpu
    runtime, indices, job log path).
 
-Bootstrap phases (`misen.utils.bootstrap_env`):
+The executor submits one Bash bootstrap with these phases:
 
-1. Resolve the data plane: use argv paths directly, or fetch the
-   snapshot/blobs via the transport into the env-store root
-   (content-addressed, so one fetch per host per code state).
-2. Ensure the **conda env** store entry first (`pixi install --frozen`).
-3. Ensure the **deps env** (`uv venv` + `uv pip install -r
+1. Enter through Bash and locate `uv`; also locate `pixi` when the staged
+   project has a Pixi environment. A transport locates any additional
+   tools it needs itself.
+2. Resolve the data plane entirely from shell: use worker-visible paths
+   directly, or run the workspace's Bash transport for the snapshot,
+   payload, and env-file refs into local paths under the env-store root.
+3. Invoke `uv run --with misen==<pin> -m misen.utils.materialize_env`
+   with only those local paths. This path-only step verifies a transported
+   snapshot's content key and ensures the **conda env** store entry first
+   (`pixi install --frozen`).
+4. Ensure the **deps env** (`uv venv` + `uv pip install -r
    requirements.txt`, hash-checked).
-4. Ensure the **overlay** — installs staged wheels directly; builds sdists
+5. Ensure the **overlay** — installs staged wheels directly; builds sdists
    wrapped in `pixi run --frozen` so native builds see the locked
    toolchain (this ordering is why conda comes first).
-5. Fetch the payload, apply activation (`VIRTUAL_ENV`, `PATH`,
-   `PYTHONPATH`, pixi wrap), and `exec` `uv run --no-project --env-file …
+6. Apply activation (`VIRTUAL_ENV`, `PATH`, `PYTHONPATH`, pixi wrap), and
+   `exec` `uv run --no-project --env-file …
    -m misen.utils.execute --payload …`.
 
-**Bootstrap environment.** The bootstrap needs misen + its deps, nothing
-else. Default: `uv run --with misen==<submitting version> --with
-cloudpickle -m misen.utils.bootstrap_env …` — the worker needs only `uv`
-on PATH (SSH/SkyPilot setup can install it) and index access. When the
+**Bootstrap runtime.** Bash is the root bootstrap dependency. It
+checks configured `uv`/`pixi` paths, falls back to `PATH`, and fails with
+a precise error if a required tool is absent. Executors provision these
+tools once through an image, container, module, node setup, or scheduler
+prologue rather than reinstalling them in every job. After the
+shell has resolved every data-plane ref, it runs `uv run --with
+misen==<submitting version> -m misen.utils.materialize_env …`. When the
 submitting misen is a local/editable package (developing misen itself —
-detectable from the user's `uv.lock` source table), `--with <misen wheel>`
-delivered over the executor's file channel replaces the index pin; the
-wheel is already built into the snapshot. Payload compatibility is *not*
-a bootstrap concern: payloads are only unpickled inside the project env by
-`misen.utils.execute`, where misen is the project's locked version.
-LocalExecutor skips the wrapper entirely and calls the bootstrap functions
-in-process (same code, no `uv run --with`, works offline).
+detectable from the user's `uv.lock` source table), its staged artifact is
+usable only with a path-serving workspace. A non-path transport requires
+an index-installable `misen==<submitting version>`. Payload compatibility
+is *not* a bootstrap concern: payloads are only unpickled inside the
+project env by `misen.utils.execute`, where misen is the project's locked
+version.
+LocalExecutor uses the same wrapper when `prewarm_envs=false`; its default
+`prewarm_envs=true` path dispatches directly and needs no bootstrap.
 
 **Env store policy subsumes deep/shallow.** Two executor knobs replace
 `snapshot = true | "shallow"`:
@@ -166,37 +176,48 @@ unchanged. The `uv sync` build path is deleted: every environment now
 builds from the staged export, on whichever side policy dictates.
 
 **The bootstrap consumes a data-plane *transport*, never a workspace.**
-The bootstrap env holds only misen, so it cannot import custom
-`Workspace` subclasses (and it never unpickles anything — pickles would
-bind to the submitter's library versions and execute code on load).
-`Workspace.bootstrap_transport()` describes the data plane in
-misen-built-in terms:
+The shell cannot and does not import custom `Workspace` subclasses (and
+the later materializer never unpickles anything — pickles would bind to
+the submitter's library versions and execute code on load).
+`Workspace.bootstrap_transport()` returns Bash source for the data plane:
 
-- `{"kind": "path"}` — snapshot dir, payload, and env files are passed as
-  plain worker-visible argv paths; the bootstrap touches no storage code
-  at all. The base class derives this from `job_files_are_paths`, so
-  Disk/Memory and any path-serving custom workspace get it for free.
-- `{"kind": "obstore", backend, bucket, prefix, endpoint, s3_region,
-  config}` — the bootstrap constructs a raw obstore client and fetches
-  the snapshot tarball and job-file objects with the same module-level
-  helpers `CloudWorkspace` itself uses (layouts can't drift). Fetches
-  land under the env-store root: snapshots content-addressed (one fetch
-  per host per code state), job files under their refs. The transport
-  travels as the `MISEN_BOOTSTRAP_TRANSPORT` env override, not argv (it
-  may reference credential config, and scheduler queues expose argv more
-  readily than job environments).
+- `None` — snapshot dir, payload, and env files are worker-visible argv
+  paths; the bootstrap touches no storage code. Path-serving workspaces
+  return this explicitly.
+- Bash source — Misen invokes the same script for `snapshot` and
+  `job-file` operations, supplying the opaque ref and a temporary
+  destination through `MISEN_TRANSPORT_*` environment variables. It also
+  exposes resolved `MISEN_UV_BIN` and optional project Pixi as
+  `MISEN_PIXI_BIN`. The script resolves any other tools it needs and may
+  call worker CLIs or provision packages with uv or Pixi.
+  The shell validates types, applies `0600` to job files, and publishes
+  successful fetches into a transport-namespaced per-host cache; the
+  path-only materializer verifies the snapshot content key before using
+  it and evicts a corrupt tree so the next attempt can refetch it.
 
-A workspace with a data plane expressible as neither must override
-`bootstrap_transport()` or be used with `prewarm_envs` (which never runs
-the bootstrap). Payload *unpickling* still happens only inside the
+`CloudWorkspace` returns a small `uv run --with obstore python -c …`
+script, generated by `render_python_transport()` from one ordinary static
+Python function on the workspace class. The renderer verifies the fixed
+function signature, rejects captured globals/closures, embeds JSON-safe
+context, and adds declared PEP 508 dependencies through `uv run --with`.
+This keeps the authoring and direct-test surface as normal Python while the
+worker-facing contract remains Bash; raw Bash remains available to transports
+that need it. Resolving the data plane therefore does not install or import
+Misen or the custom workspace. The resulting transport is embedded in the
+single Bash program passed to the worker, so it must not contain credentials.
+Cloud authentication comes from the worker's ambient environment or workload
+identity; generic `CloudWorkspace.config` values are rejected for bootstrap
+dispatch rather than copied into scheduler-visible command text.
+
+Payload *unpickling* still happens only inside the
 project env, where any custom workspace's library is guaranteed present
 (the user's project constructed the workspace, so it depends on its
 package).
 
 ## Executors
 
-- **LocalExecutor**: in-process bootstrap; env store local; payloads/env
-  files by path. No behavioral change beyond the unified build path.
+- **LocalExecutor**: prewarmed direct dispatch by default; with prewarming
+  disabled, the same Bash bootstrap and local env store as other executors.
 - **SlurmExecutor**: `sbatch --wrap` carries the bootstrap invocation;
   everything bulky rides the workspace. With `DiskWorkspace` this is
   today's shared-FS layout. With `CloudWorkspace` the shared-FS
@@ -268,14 +289,14 @@ safe when nothing is queued or running.
    workspace job files (submission-scoped). There is no per-submission
    cleanup — payloads must outlive scheduler requeues, so all
    submission artifacts are retained for the phase-5 prune.
-2. **Snapshot store** — done: `Workspace.publish/has/fetch_snapshot`
+2. **Snapshot store** — done: `Workspace.publish_snapshot/fetch_snapshot`
    (Disk tree + durable marker, Cloud tarball + per-host cache, Memory
    tempdir); `ProjectSnapshot` stages → hashes → publishes; executors
    reference by content key.
-3. **Universal bootstrap** — done: data plane via
-   `bootstrap_transport()` (plain paths, or obstore refs +
-   `MISEN_BOOTSTRAP_TRANSPORT`); `uv run --no-project --with
-   misen==<pin> -m misen.utils.bootstrap_env` dispatch; prewarmed
+3. **Universal bootstrap** — done: data plane via plain paths or a
+   workspace Bash transport embedded in one submitted script; Bash
+   resolves worker tools and data first, then path-only `uv run --no-project --with
+   misen==<pin> -m misen.utils.materialize_env` dispatches; prewarmed
    snapshots dispatch directly; `env_store_dir` + `prewarm_envs` replace
    `snapshot="shallow"`/`env_cache`/`snapshots_dir`; the `uv sync` path
    is deleted.

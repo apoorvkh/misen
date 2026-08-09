@@ -441,7 +441,7 @@ def test_submission_artifacts_are_retained(tmp_path: Path) -> None:
 
     del snapshot  # a submit call ending deletes nothing
     assert Path(ref).exists()
-    assert workspace.has_snapshot(snapshot_key)
+    assert workspace.fetch_snapshot(snapshot_key).is_dir()
     assert (deps_env_dir.parent / f"{deps_env_dir.name}.complete").is_file()
 
 

@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Iterator, MutableMapping
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TextIO, TypeAlias, TypeVar, cast
 
@@ -27,6 +28,7 @@ import obstore as obs
 from obstore.store import AzureStore, GCSStore, S3Store
 from xxhash import xxh3_64_hexdigest
 
+from misen.utils.bootstrap_transport import render_python_transport
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import ObjectStoreLock
 from misen.utils.serde import MANIFEST_FILENAME
@@ -49,11 +51,7 @@ logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
-# Obstore data-plane helpers. Module-level (not methods) because the worker
-# bootstrap (misen.utils.bootstrap_env) reconstructs the data plane from a
-# transport spec — misen built-ins only, since the bootstrap env cannot
-# import custom CloudWorkspace subclasses. Both the workspace and the
-# bootstrap go through these, so layouts can never drift apart.
+# Obstore data-plane helpers shared by workspace operations.
 # --------------------------------------------------------------------------
 
 
@@ -62,19 +60,17 @@ def _join_prefix(prefix: str, *parts: str) -> str:
     return "/".join(part for part in (prefix, *(p.strip("/") for p in parts if p)) if part)
 
 
-def _build_obstore_store(
+def _obstore_store_config(
     backend: str,
-    bucket: str,
     *,
     endpoint: str | None = None,
     s3_region: str | None = None,
     config: dict[str, str] | None = None,
-) -> Any:
-    """Construct the obstore client for a backend/bucket/config triple.
+) -> dict[str, Any]:
+    """Merge dedicated endpoint/region fields into obstore configuration.
 
     Raises:
-        ValueError: On an unsupported backend or a config key colliding
-            with a dedicated field.
+        ValueError: If a dedicated field also appears in ``config``.
     """
     cfg = cast("dict[str, Any]", dict(config or {}))
     explicit: dict[str, Any] = {}
@@ -91,6 +87,19 @@ def _build_obstore_store(
             msg = f"{key!r} cannot appear in both config and the dedicated field."
             raise ValueError(msg)
         cfg[key] = value
+    return cfg
+
+
+def _build_obstore_store(
+    backend: str,
+    bucket: str,
+    *,
+    endpoint: str | None = None,
+    s3_region: str | None = None,
+    config: dict[str, str] | None = None,
+) -> Any:
+    """Construct the obstore client for a backend/bucket/config triple."""
+    cfg = _obstore_store_config(backend, endpoint=endpoint, s3_region=s3_region, config=config)
 
     if backend == "s3":
         return S3Store(bucket=bucket, **cfg)
@@ -607,24 +616,78 @@ class CloudWorkspace(Workspace):
             self.backend, self.bucket, endpoint=self.endpoint, s3_region=self.s3_region, config=self.config
         )
 
-    def bootstrap_transport(self) -> dict[str, Any]:
-        """Obstore transport: enough for a worker to fetch snapshots/job files.
+    @staticmethod
+    def _bootstrap_transport(context: dict[str, str | None], operation: str, ref: str, destination: Path) -> None:
+        """Fetch one snapshot or job file using only the declared worker dependency."""
+        import io
+        import tarfile
 
-        Deliberately *not* the workspace class/config: the bootstrap env
-        holds only misen, so a custom :class:`CloudWorkspace` subclass
-        would be unimportable there. The transport describes the blob
-        store in misen-built-in terms instead; subclasses that keep an
-        obstore-compatible layout inherit this for free.
+        import obstore as obs
+        from obstore.store import AzureStore, GCSStore, S3Store
+
+        backend = context["backend"]
+        bucket = context["bucket"]
+        prefix = context["prefix"]
+        if backend is None or bucket is None or prefix is None:
+            msg = "Cloud transport requires backend, bucket, and prefix."
+            raise ValueError(msg)
+
+        config: dict[str, str] = {}
+        if backend == "s3":
+            if context["s3_region"] is not None:
+                config["region"] = context["s3_region"]
+            if context["endpoint"] is not None:
+                config["endpoint"] = context["endpoint"]
+            store = S3Store(bucket=bucket, **config)
+        elif backend == "gcs":
+            store = GCSStore(bucket=bucket, **config)
+        elif backend == "azure":
+            if context["endpoint"] is not None:
+                config["endpoint"] = context["endpoint"]
+            store = AzureStore(container_name=bucket, **config)
+        else:
+            msg = f"Unsupported cloud backend: {backend!r}"
+            raise ValueError(msg)
+
+        if operation == "snapshot":
+            object_key = "/".join(part for part in (prefix, "snapshots", f"{ref}.tar.gz") if part)
+            payload = obs.get(store, object_key).bytes()
+            destination.mkdir(parents=True)
+            with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+                archive.extractall(destination, filter="data")
+        elif operation == "job-file":
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(obs.get(store, ref).bytes())
+        else:
+            msg = f"Unsupported transport operation: {operation!r}"
+            raise ValueError(msg)
+
+    def bootstrap_transport(self) -> str:
+        """Return a self-contained obstore transport run through uv.
+
+        The transport depends only on ``obstore`` plus the Python standard
+        library; it neither installs nor imports Misen or this workspace.
+        Credentials come from the worker's ambient environment or workload
+        identity and are never embedded in scheduler-visible shell text.
         """
-        return {
-            "kind": "obstore",
-            "backend": self.backend,
-            "bucket": self.bucket,
-            "prefix": self._cloud_prefix,
-            "endpoint": self.endpoint,
-            "s3_region": self.s3_region,
-            "config": dict(self.config),
-        }
+        if self.config:
+            msg = (
+                "CloudWorkspace.config cannot be embedded in the worker bootstrap because its shell text may be "
+                "visible through the executor or scheduler. Configure worker authentication and obstore options "
+                "through the ambient worker environment, or use a custom workspace transport."
+            )
+            raise ValueError(msg)
+        return render_python_transport(
+            self._bootstrap_transport,
+            requirements=(f"obstore=={package_version('obstore')}",),
+            context={
+                "backend": self.backend,
+                "bucket": self.bucket,
+                "prefix": self._cloud_prefix,
+                "endpoint": self.endpoint,
+                "s3_region": self.s3_region,
+            },
+        )
 
     def _under(self, *parts: str) -> str:
         return _join_prefix(self._cloud_prefix, *parts)
@@ -651,7 +714,9 @@ class CloudWorkspace(Workspace):
         return self._cache / "snapshots" / key
 
     def publish_snapshot(self, key: str, staged_dir: Path) -> None:
-        if not self.has_snapshot(key):
+        try:
+            obs.head(self._store, _snapshot_object_key(self._cloud_prefix, key))
+        except FileNotFoundError:
             buffer = io.BytesIO()
             with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
                 tar.add(staged_dir, arcname=".")
@@ -662,22 +727,15 @@ class CloudWorkspace(Workspace):
             with contextlib.suppress(OSError):
                 staged_dir.rename(local)
 
-    def has_snapshot(self, key: str) -> bool:
-        if self._snapshot_cache_dir(key).exists():
-            return True
-        try:
-            obs.head(self._store, _snapshot_object_key(self._cloud_prefix, key))
-        except FileNotFoundError:
-            return False
-        return True
-
     def fetch_snapshot(self, key: str) -> Path:
         return _download_snapshot(self._store, self._cloud_prefix, key, self._snapshot_cache_dir(key))
 
     # -- job files ------------------------------------------------------
 
     def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
-        self._check_job_file_name(name)
+        if not name or "/" in name or "\\" in name or name in {".", ".."}:
+            msg = f"Invalid job-file name: {name!r}"
+            raise ValueError(msg)
         ref = self._under("job_files", submission_id, name)
         obs.put(self._store, ref, data, mode="overwrite")
         return ref

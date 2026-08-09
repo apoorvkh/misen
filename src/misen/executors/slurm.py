@@ -135,22 +135,16 @@ class SlurmExecutor(Executor[SlurmJob]):
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Normalize untyped config into msgspec structs."""
+        """Normalize config and validate submit/worker filesystem topology."""
         self.default_flags = msgspec.convert(self.default_flags, type=dict[str, _SetValue])
         self.rules = msgspec.convert(self.rules, type=list[_SlurmRule])
-
-    def _make_snapshot(self, workspace: Workspace) -> ProjectSnapshot | None:
-        """Add the SLURM topology check to the default snapshot creation."""
         if self.snapshot and self.prewarm_envs and self.env_store_dir is None:
-            # Executor-topology check (submit host vs compute nodes); the
-            # workspace-capability check lives on ProjectSnapshot.
             msg = (
                 "prewarm_envs on SlurmExecutor requires env_store_dir on a shared "
                 "filesystem (the default env store is node-local, so envs prewarmed "
                 "on the submit host would be invisible to compute nodes)."
             )
             raise ValueError(msg)
-        return super()._make_snapshot(workspace)
 
     def _dispatch(
         self,
@@ -238,7 +232,11 @@ class SlurmExecutor(Executor[SlurmJob]):
             *argv,
         ]
         sbatch_cmd.extend(["--output", str(log_path), "--export", "ALL", "--wrap", shlex.join(wrapped)])
-        logger.debug("sbatch command for %s: %s", label, shlex.join(sbatch_cmd))
+        debug_argv = [*argv]
+        if debug_argv[:2] == ["bash", "-c"] and len(debug_argv) > 2:  # noqa: PLR2004
+            debug_argv[2] = "<redacted bootstrap script>"
+        debug_wrapped = ["env", *(f"{key}={value}" for key, value in env_overrides.items()), *debug_argv]
+        logger.debug("sbatch command for %s: %s", label, shlex.join([*sbatch_cmd[:-1], shlex.join(debug_wrapped)]))
 
         try:
             result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603

@@ -130,7 +130,6 @@ def test_prewarmed_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: 
         "--frozen",
         "--manifest-path",
         str(manifest_path),
-        "-x",
         "--",
         "/usr/bin/env",
         "bash",
@@ -147,7 +146,7 @@ def test_prewarmed_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: 
     assert second.prewarmed is not None
     assert second.prewarmed.conda_manifest_path == manifest_path
 
-    assert workspace.has_snapshot(snapshot.snapshot_key)
+    assert workspace.fetch_snapshot(snapshot.snapshot_key).is_dir()
     assert prefix_dir.is_dir()
     key = manifest_path.parent.name
     assert (store_root / "conda-envs" / f"{key}.complete").is_file()

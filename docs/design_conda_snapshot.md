@@ -1,13 +1,11 @@
 # Design: optional conda environment in `LocalSnapshot`
 
 > **Update:** the staging/install target described below has since moved.
-> The staged `pixi.toml` + `pixi.lock` and the installed
-> `.pixi/envs/default` prefix now form a content-keyed env-store entry —
-> under `<snapshots_dir>/.shared/conda-envs/` by default (reused across
-> snapshots), or nested inside the snapshot directory with
-> `env_cache=False` (removed on cleanup). Everything else — opt-in via
-> `pixi.lock`, pypi rejection, `pixi run` activation wrapping, env-var
-> layering — is unchanged. See
+> The staged `pixi.toml` + `pixi.lock` and installed prefix now form a
+> content-keyed entry under `env_store_dir/conda-envs/`, reused across
+> snapshots and retained until store pruning. Everything else — opt-in
+> via `pixi.lock`, pypi rejection, `pixi run` activation wrapping, and
+> env-var layering — is unchanged. See
 > [design_shared_env_store.md](design_shared_env_store.md).
 
 ## Goal
@@ -57,7 +55,7 @@ Shelling out gives us:
 
 - Correct pypi-detection, platform matching, channel priority, lockfile
   validation — all handled by pixi upstream.
-- `pixi install --frozen` at snapshot time and `pixi run --frozen -x --`
+- `pixi install --frozen` at snapshot time and `pixi run --frozen --`
   at job-spawn time are the two pixi flows we reuse; the global rattler
   package cache means installs are mostly hard-links.
 - No dependency on the `py-rattler` Python binding (~33 MB).
@@ -132,15 +130,15 @@ LocalSnapshot
   the argv is wrapped as:
   ```
   [pixi, run, --no-progress, --color, never, --frozen,
-   --manifest-path, <staged pixi.toml>, -x, --, <uv run ...>]
+   --manifest-path, <staged pixi.toml>, --, <uv run ...>]
   ```
-  - `-x` forces executable mode (no pixi-task lookup).
   - `--` stops pixi from parsing our command's flags.
   - `--frozen` ensures pixi re-uses the already-installed env without
     touching the lockfile.
   `env_overrides` stays `{"VIRTUAL_ENV": <python_env_dir>}` — conda
   activation now happens inside the pixi subprocess.
-- `cleanup()`: unchanged — everything new lives under `snapshot_dir`.
+- Snapshot cleanup does not own the content-addressed conda entry; store
+  pruning removes it when it is no longer needed.
 
 ### No new module-level helpers
 
@@ -158,7 +156,7 @@ state seen by user code):
    seeds the child (here, `pixi run`) with the parent's `PATH`,
    `LD_LIBRARY_PATH`, etc., plus `VIRTUAL_ENV` and any executor-specific
    overrides.
-2. **Conda activation by pixi**: `pixi run --frozen -x -- <cmd>`
+2. **Conda activation by pixi**: `pixi run --frozen -- <cmd>`
    activates the env against live env and then execs `<cmd>`. That
    activation:
    - Sets `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, `CONDA_SHLVL`.
@@ -239,7 +237,7 @@ render, lockfile parsing) are all covered by `pixi`.
     - running the pixi-wrapped argv (the same one `prepare_job` builds)
       prints a `CONDA_PREFIX` equal to the installed prefix and a
       `PATH` whose first entry is `<prefix>/bin`,
-    - `cleanup()` is a single `rmtree` and leaves no artifacts.
+    - a later snapshot reuses the same content-addressed conda entry.
   - Absence case: `pixi.lock` not in CWD →
     `LocalSnapshot.conda_manifest_path is None`.
 
