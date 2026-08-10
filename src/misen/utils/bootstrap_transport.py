@@ -340,7 +340,7 @@ def worker_bootstrap_script(
                     env_file_refs=({_array(env_files)})
                     env_file_keys=({_array(env_file_keys)})
                     env_file_paths=()
-                    for i in "${{!env_file_refs[@]}}"; do
+                    for i in "${{env_file_refs[@]+"${{!env_file_refs[@]}}"}}"; do
                         path="$job_file_root/${{env_file_keys[$i]}}"
                         fetch_job_file "${{env_file_refs[$i]}}" "$path"
                         env_file_paths+=("$path")
@@ -361,7 +361,7 @@ def worker_bootstrap_script(
             --payload "$payload_path"
             --env-store-root "$store_root"
         )
-        for path in "${{env_file_paths[@]}}"; do
+        for path in "${{env_file_paths[@]+"${{env_file_paths[@]}}"}}"; do
             materialize+=(--env-file "$path")
         done
         """

@@ -289,6 +289,7 @@ def test_worker_shell_bootstrap_resolves_configured_tools(tmp_path: Path) -> Non
         env_files=[],
         worker_args=["--gpu-runtime", "cuda", JOB_LOG_PATH_ARG, str(tmp_path / "job.log")],
     )
+    assert '${env_file_paths[@]+"${env_file_paths[@]}"}' in script
     result = subprocess.run(  # noqa: S603
         [bash_bin, "-c", script],
         check=True,
@@ -567,6 +568,7 @@ def test_bash_transport_fetches_before_materialization(tmp_path: Path, monkeypat
         env_files=[env_ref],
         worker_args=["--gpu-runtime", "cuda", JOB_LOG_PATH_ARG, str(store_root / "job.log")],
     )
+    assert '${env_file_refs[@]+"${!env_file_refs[@]}"}' in bootstrap
     result = subprocess.run([bash_bin, "-c", bootstrap], check=True, capture_output=True, text=True)  # noqa: S603
 
     transport_root = store_root / "job-files" / hashlib.sha256(script.encode()).hexdigest()
