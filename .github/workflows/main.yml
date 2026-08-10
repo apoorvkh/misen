@@ -11,8 +11,8 @@ jobs:
     checks:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
-            - uses: astral-sh/setup-uv@v3.2.2
+            - uses: actions/checkout@v7
+            - uses: astral-sh/setup-uv@v9
               with:
                   version: "0.12.3"
                   python-version-file: ".python-version"

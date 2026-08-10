@@ -10,8 +10,8 @@ jobs:
         permissions:
             id-token: write
         steps:
-            - uses: actions/checkout@v4
-            - uses: astral-sh/setup-uv@v8.1.0
+            - uses: actions/checkout@v7
+            - uses: astral-sh/setup-uv@v9
               with:
                   version: "0.12.3"
             - run: uv build
