@@ -13,6 +13,7 @@ and external callables.
 
 from __future__ import annotations
 
+from types import FunctionType
 from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeAlias, TypedDict, TypeVar, cast
 
 from msgspec import Struct
@@ -27,7 +28,7 @@ from misen.utils.hashing import ResultHash
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-    from types import BuiltinFunctionType, FunctionType
+    from types import BuiltinFunctionType
 
     from misen.utils.serde import Serializer
 
@@ -125,7 +126,8 @@ class TaskMetadata(Struct, frozen=True):
     """Immutable metadata describing task identity, execution, and caching.
 
     Attributes:
-        id: Stable task identifier.
+        id: Stable task identifier. An empty string represents an unresolved
+            decorator placeholder and is rejected when constructing a task.
         cache: Whether task results are persisted in the workspace.
         exclude: Argument names excluded from hash identity.
         defaults: Argument values treated as "default" and omitted from hashes
@@ -162,7 +164,9 @@ def meta(
     """Attach :class:`TaskMetadata` metadata to a function.
 
     Args:
-        id: Stable task identifier. Required for local project functions.
+        id: Stable task identifier. An omitted or empty string is a temporary
+            placeholder that must be filled before constructing a
+            :class:`misen.tasks.Task`.
         cache: Whether task results should be stored in the workspace.
         exclude: Argument names excluded from task identity.
         defaults: Argument defaults excluded from task identity when equal.
@@ -174,14 +178,7 @@ def meta(
 
     Returns:
         A decorator that annotates the target function.
-
-    Raises:
-        ValueError: If ``id`` is not provided or is empty.
     """
-    if not id:
-        msg = "id must be provided."
-        raise ValueError(msg)
-
     resources_fn: Callable[..., Resources]
     if resources is None or isinstance(resources, dict):
         resources_fn = lambda *_, r=resources, **__: cast("Resources", r or Resources())  # noqa: E731
@@ -223,16 +220,22 @@ def resolve_task_metadata(func: FunctionType | BuiltinFunctionType) -> TaskMetad
         Resolved task metadata.
 
     Raises:
-        ValueError: If a local project function lacks ``@meta(...)`` metadata.
+        ValueError: If a local project function lacks ``@meta(...)`` metadata
+            or its metadata has no stable task id.
     """
-    if is_lambda_function(func):
+    if isinstance(func, FunctionType) and is_lambda_function(func):
         return TaskMetadata(lambda_task_id(func))
 
     if is_local_project_function(func):
         if not hasattr(func, "__task_metadata__"):
             msg = f"Local function {func.__module__}.{func.__qualname__} must define __task_metadata__. Use @meta(...)."
             raise ValueError(msg)
-        return func.__task_metadata__
+        metadata = cast("TaskMetadata", func.__task_metadata__)
+        if not metadata.id:
+            name = f"{func.__module__}.{func.__qualname__}"
+            msg = f"Local function {name} has no task id. Set @meta(id=...) or run `misen fill`."
+            raise ValueError(msg)
+        return metadata
 
     return TaskMetadata(external_callable_id(func))
 

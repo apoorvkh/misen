@@ -77,7 +77,7 @@ class TaskIdFiller(cst.CSTTransformer):
 
     @override
     def leave_Decorator(self, original_node: cst.Decorator, updated_node: cst.Decorator) -> cst.Decorator:
-        """Rewrite task decorators missing an ``id`` or using a placeholder (``id=None`` or ``id=""``)."""
+        """Rewrite task decorators missing an ``id`` or using an empty string placeholder."""
         del original_node
         decorator = updated_node.decorator
         if _is_task_reference(decorator):
@@ -418,9 +418,7 @@ def _is_task_reference(expression: cst.BaseExpression) -> bool:
 
 
 def _is_placeholder_id(value: cst.BaseExpression) -> bool:
-    """Return whether an ``id`` value is a placeholder: ``None`` or an empty string literal."""
-    if m.matches(value, m.Name("None")):
-        return True
+    """Return whether an ``id`` value is an empty string literal."""
     return isinstance(value, cst.SimpleString) and value.evaluated_value == ""
 
 
