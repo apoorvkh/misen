@@ -16,7 +16,7 @@ jobs:
         steps:
             - uses: actions/configure-pages@v5
             - uses: actions/checkout@v7
-            - uses: astral-sh/setup-uv@v9
+            - uses: astral-sh/setup-uv@v9.0.0
               with:
                   version: "0.12.3"
             - run: uv run --no-project --with zensical zensical build --clean
