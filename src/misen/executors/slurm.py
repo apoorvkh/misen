@@ -208,7 +208,13 @@ class SlurmExecutor(Executor[SlurmJob]):
                 sbatch_cmd.append(f"--{flag}={value}")
 
         if dependencies:
-            sbatch_cmd.extend(["--dependency", f"afterok:{':'.join(job.slurm_job_id for job in dependencies)}"])
+            sbatch_cmd.extend(
+                [
+                    "--dependency",
+                    f"afterok:{':'.join(job.slurm_job_id for job in dependencies)}",
+                    "--kill-on-invalid-dep=yes",
+                ]
+            )
 
         # SLURM cgroups already mask GPUs and pin CPU affinity for the job
         # step, so the worker leaves the inherited environment alone — user

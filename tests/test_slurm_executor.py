@@ -164,6 +164,37 @@ def test_slurm_dispatch_delegates_resource_isolation_to_slurm(monkeypatch, tmp_p
     assert snapshot.prepare_job.call_args.kwargs["gpu_indices"] is None
 
 
+def test_slurm_dispatch_kills_jobs_with_invalid_dependencies(monkeypatch, tmp_path) -> None:
+    work_unit = WorkUnit(root=Task(_slurm_test_task, x=0), dependencies=set())
+    dependency = _make_slurm_job(slurm_id="42", x=1)
+    workspace = cast("Workspace", MagicMock(spec=Workspace))
+    snapshot = MagicMock()
+    snapshot.prepare_job.return_value = ("job-local", ["python", "-m", "worker"], {}, tmp_path / "slurm.log")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="123\n", stderr="")
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", run)
+
+    executor = SlurmExecutor()
+    executor._dispatch(work_unit=work_unit, dependencies=set(), workspace=workspace, snapshot=snapshot)  # noqa: SLF001
+    executor._dispatch(  # noqa: SLF001
+        work_unit=work_unit,
+        dependencies={dependency},
+        workspace=workspace,
+        snapshot=snapshot,
+    )
+
+    assert "--kill-on-invalid-dep=yes" not in commands[0]
+    assert "--kill-on-invalid-dep=yes" in commands[1]
+    dependency_index = commands[1].index("--dependency")
+    assert commands[1][dependency_index + 1] == "afterok:42"
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
