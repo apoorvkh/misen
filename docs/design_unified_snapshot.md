@@ -38,9 +38,7 @@ One `Snapshot` class. Staged contents:
 
 ```
 <snapshot>/
-├── pyproject.toml, uv.lock, .python-version    # interpreter + [tool.uv] config
-├── requirements.txt                            # uv export --frozen --no-emit-local
-│                                               #   --no-header (deterministic bytes)
+├── pyproject.toml, uv.lock, .python-version    # frozen uv project
 ├── pixi.toml, pixi.lock                        # when the project has a conda env
 └── packages/                                   # local packages, built at staging
     ├── purepkg-1.0-py3-none-any.whl            # pure python -> wheel
@@ -61,15 +59,14 @@ One `Snapshot` class. Staged contents:
 - **Deterministic bytes.** `uv build` runs with a fixed
   `SOURCE_DATE_EPOCH` so unchanged source rebuilds byte-identical
   artifacts (uv_build/hatchling are reproducible under it; setuptools
-  mostly). The requirements export is already deterministic. Result: the
-  snapshot hash is stable per (code state, lock state), and resubmitting
-  unchanged code republishes nothing.
+  mostly). Result: the snapshot hash is stable per (code state, frozen uv
+  project), and resubmitting unchanged code republishes nothing.
 - **Identity.** `hash(snapshot)` = `hash_values` over the staged tree
   (relative path + bytes per file), carried as a dedicated hash type so
   workspace stores can key it like `ResultHash`. Two-level env keying is
-  unchanged: deps env by (requirements bytes, python selection, platform);
-  overlay by (deps key, package bytes) — so envs share across snapshots
-  that differ only in code.
+  unchanged: deps env by (pyproject + lock bytes, python selection,
+  platform); overlay by (deps key, package bytes) — so envs share across
+  snapshots that differ only in code.
 - **Not in the snapshot**: env files (secrets; submission-scoped),
   payloads (job-scoped). The content-addressed store is immortal-ish and
   shareable; nothing secret or per-job belongs in it.
@@ -120,12 +117,13 @@ The executor submits one Bash bootstrap with these phases:
 2. Resolve the data plane entirely from shell: use worker-visible paths
    directly, or run the workspace's Bash transport for the snapshot,
    payload, and env-file refs into local paths under the env-store root.
-3. Invoke `uv run --with misen==<pin> -m misen.utils.materialize_env`
+3. Invoke `uv run --with <locked-misen-requirement> -m misen.utils.materialize_env`
    with only those local paths. This path-only step verifies a transported
    snapshot's content key and ensures the **conda env** store entry first
    (`pixi install --frozen`).
-4. Ensure the **deps env** (`uv venv` + `uv pip install -r
-   requirements.txt`, hash-checked).
+4. Ensure the **deps env** (`uv sync --frozen --no-install-local
+   --compile-bytecode` into the content-addressed entry). This consumes
+   the staged uv project directly, preserving sources and explicit indexes.
 5. Ensure the **overlay** — installs staged wheels directly; builds sdists
    wrapped in `pixi run --frozen` so native builds see the locked
    toolchain (this ordering is why conda comes first).
@@ -139,14 +137,14 @@ a precise error if a required tool is absent. Executors provision these
 tools once through an image, container, module, node setup, or scheduler
 prologue rather than reinstalling them in every job. After the
 shell has resolved every data-plane ref, it runs `uv run --with
-misen==<submitting version> -m misen.utils.materialize_env …`. When the
+<locked-misen-requirement> -m misen.utils.materialize_env …`. When the
 submitting misen is a local/editable package (developing misen itself —
 detectable from the user's `uv.lock` source table), its staged artifact is
 usable only with a path-serving workspace. A non-path transport requires
-an index-installable `misen==<submitting version>`. Payload compatibility
-is *not* a bootstrap concern: payloads are only unpickled inside the
-project env by `misen.utils.execute`, where misen is the project's locked
-version.
+a registry or immutable Git requirement installable on the worker. Payload
+compatibility is *not* a bootstrap concern: payloads are only unpickled
+inside the project env by `misen.utils.execute`, where misen is the project's
+locked version.
 LocalExecutor uses the same wrapper when `prewarm_envs=false`; its default
 `prewarm_envs=true` path dispatches directly and needs no bootstrap.
 
@@ -171,9 +169,9 @@ LocalExecutor uses the same wrapper when `prewarm_envs=false`; its default
 
 Old deep = shared store + prewarm; old shallow = node-local store, no
 prewarm. `snapshot = false` (live dispatch via `prepare_live_job`; the
-in-process executor never uses snapshots) is
-unchanged. The `uv sync` build path is deleted: every environment now
-builds from the staged export, on whichever side policy dictates.
+in-process executor never uses snapshots) is unchanged. Every environment
+now builds through the same frozen-sync path, on whichever side policy
+dictates.
 
 **The bootstrap consumes a data-plane *transport*, never a workspace.**
 The shell cannot and does not import custom `Workspace` subclasses (and
@@ -257,16 +255,17 @@ safe when nothing is queued or running.
 
 ## Resolved decisions
 
-- **The requirements export stays in the snapshot** (not just `uv.lock`):
-  producing it requires full project discovery — workspace-member and
-  path-dep manifests at their true relative locations, which can escape
-  the staged root — so it must be generated at staging time where the
-  working tree exists. `uv.lock` is staged too, as provenance and as the
-  input for misen-requirement resolution.
-- **No shared filesystem ⇒ released misen.** A local misen checkout's
-  staged wheel is only referenced by path, which requires a
-  path-serving workspace; otherwise the bootstrap needs `misen==<ver>`
-  from an index (presigned-URL delivery was considered and dropped).
+- **The frozen uv project is the dependency authority.** The snapshot keeps
+  the root `pyproject.toml` and `uv.lock`; `uv sync --no-install-local`
+  installs only registry/Git/URL dependencies without requiring the staged
+  workspace and path-dependency source trees. This preserves uv's native
+  `[tool.uv.sources]` and explicit-index semantics and avoids a parallel
+  requirements export.
+- **No shared filesystem ⇒ remotely installable misen.** A registry lock
+  becomes `misen==<ver>` and a Git lock becomes an immutable PEP 508 direct
+  reference at its resolved commit. A local checkout's staged artifact is
+  referenced by path and therefore still requires a path-serving workspace
+  (presigned-URL delivery was considered and dropped).
 - **LocalExecutor prewarms by default** on the node-local store: jobs run
   on the building host and can run concurrently, so building once at
   submission is strictly better than racing the first jobs into the
@@ -274,12 +273,6 @@ safe when nothing is queued or running.
 - **Sdist buildability is not verified at submission** when the local
   toolchain is missing (staging warns and ships the sdist);
   `prewarm_envs` is the fail-fast escape hatch.
-
-## Open questions
-
-- `uv pip install -r` behavior on a requirements file mixing hashed
-  (registry) and unhashed (git/URL) entries — untested; git-dependency
-  projects are the risk now that the `uv sync` path is gone.
 
 ## Phases
 
@@ -296,10 +289,10 @@ safe when nothing is queued or running.
 3. **Universal bootstrap** — done: data plane via plain paths or a
    workspace Bash transport embedded in one submitted script; Bash
    resolves worker tools and data first, then path-only `uv run --no-project --with
-   misen==<pin> -m misen.utils.materialize_env` dispatches; prewarmed
+   <locked-misen-requirement> -m misen.utils.materialize_env` dispatches; prewarmed
    snapshots dispatch directly; `env_store_dir` + `prewarm_envs` replace
-   `snapshot="shallow"`/`env_cache`/`snapshots_dir`; the `uv sync` path
-   is deleted.
+   `snapshot="shallow"`/`env_cache`/`snapshots_dir`; dependency envs use
+   the staged project's frozen uv sync on either host.
 4. **New executors** (pending): SSH, then SkyPilot, on the phase-3
    contract; submit-time workspace/executor compatibility validation
    beyond the current prewarm checks.

@@ -218,9 +218,10 @@ def test_lost_lease_blocks_marker(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Lost the build lock"):
         _ensure_store_entry(store=store, key="KEY", build=build, sanity_path="sane", label="test env")
     assert not (store / "KEY.complete").exists()
+    assert (store / "KEY").is_dir()  # replacement ownership is ambiguous; do not delete
 
 
-def test_failed_build_leaves_no_marker(tmp_path: Path) -> None:
+def test_failed_build_removes_entry_and_leaves_no_marker(tmp_path: Path) -> None:
     store = tmp_path / "store"
 
     def failing_build(entry_dir: Path) -> None:
@@ -231,8 +232,9 @@ def test_failed_build_leaves_no_marker(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="boom"):
         _ensure_store_entry(store=store, key="KEY", build=failing_build, sanity_path="sane", label="test env")
     assert not (store / "KEY.complete").exists()
+    assert not (store / "KEY").exists()
 
-    # Next attempt treats the leftovers as residue and succeeds.
+    # The next attempt starts clean and succeeds.
     calls: list[int] = []
     _ensure_store_entry(store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env")
     assert calls == [1]
@@ -326,6 +328,12 @@ def test_envs_reused_across_snapshots(tmp_path: Path, counted_run: list[list[str
     first = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
     builds_first = len(_env_build_calls(counted_run))
     assert builds_first > 0
+    sync_calls = [argv for argv in counted_run if "sync" in argv]
+    assert len(sync_calls) == 1
+    assert "--frozen" in sync_calls[0]
+    assert "--no-install-local" in sync_calls[0]
+    assert "--compile-bytecode" in sync_calls[0]
+    assert "pip" not in sync_calls[0]
 
     second = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
     assert len(_env_build_calls(counted_run)) == builds_first  # reused, not rebuilt
@@ -348,8 +356,8 @@ def test_code_change_rekeys_overlay_not_deps(tmp_path: Path, monkeypatch: pytest
     store = tmp_path / "env-store"
 
     first = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
-    member_pyproject = root / "packages" / "member" / "pyproject.toml"
-    member_pyproject.write_text(member_pyproject.read_text().replace('version = "0.2.0"', 'version = "0.2.1"'))
+    member_source = root / "packages" / "member" / "src" / "member" / "__init__.py"
+    member_source.write_text(member_source.read_text() + "\n# changed\n")
     second = ProjectSnapshot(workspace=workspace, env_store_dir=str(store), prewarm=True)
 
     assert first.prewarmed is not None
@@ -459,12 +467,17 @@ def test_python_env_key_components(
     assert base != snapshot_mod._python_env_key(project_dir)  # interpreter selection
     monkeypatch.delenv("UV_PYTHON")
 
-    # Different requirements bytes -> different key (checked on a copy: the
-    # published snapshot itself is immutable shared state).
+    # The frozen project controls the sync, so either metadata input changes
+    # the key (checked on copies: published snapshots are immutable).
     copy_dir = tmp_path / "keyprobe"
     shutil.copytree(project_dir, copy_dir)
-    (copy_dir / "requirements.txt").write_bytes((copy_dir / "requirements.txt").read_bytes() + b"\n# perturbed\n")
+    (copy_dir / "uv.lock").write_bytes((copy_dir / "uv.lock").read_bytes() + b"\n# perturbed\n")
     assert base != snapshot_mod._python_env_key(copy_dir)
+
+    metadata_dir = tmp_path / "metadataprobe"
+    shutil.copytree(project_dir, metadata_dir)
+    (metadata_dir / "pyproject.toml").write_bytes((metadata_dir / "pyproject.toml").read_bytes() + b"\n# perturbed\n")
+    assert base != snapshot_mod._python_env_key(metadata_dir)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only store")

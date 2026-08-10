@@ -957,9 +957,7 @@ def test_experiment_cli_parses_run_no_tui_flag(monkeypatch) -> None:
 
 def test_experiment_cli_tree_command_with_task_positional(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["prog", "tree", "task"])
-    monkeypatch.setattr(
-        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set()))
-    )
+    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set())))
 
     experiment_cli(CliExperiment)
 
@@ -971,9 +969,7 @@ def test_experiment_cli_tree_command_with_task_positional(monkeypatch, capsys) -
 
 def test_experiment_cli_tree_command_rejects_unknown_task(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["prog", "tree", "missing"])
-    monkeypatch.setattr(
-        Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set()))
-    )
+    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set())))
 
     with pytest.raises(ValueError, match=r"no task named 'missing'"):
         experiment_cli(CliExperiment)
@@ -1216,18 +1212,26 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     graph: DependencyGraph[Job] = DependencyGraph()
     # FakeJob advances one state per ``state()`` call, so seed enough entries
     # to reach a terminal state within a few polls without hanging.
-    graph.add_node(FakeJob(
-        work_unit=WorkUnit(root=source_task, dependencies=set()),
-        states=["pending", "running", "done"],
-    ))
-    graph.add_node(FakeJob(
-        work_unit=WorkUnit(root=sink_task, dependencies=set()),
-        states=["pending", "running", "failed"],
-    ))
+    graph.add_node(
+        FakeJob(
+            work_unit=WorkUnit(root=source_task, dependencies=set()),
+            states=["pending", "running", "done"],
+        )
+    )
+    graph.add_node(
+        FakeJob(
+            work_unit=WorkUnit(root=sink_task, dependencies=set()),
+            states=["pending", "running", "failed"],
+        )
+    )
 
     class StubExecutor:
         def submit(
-            self, *, tasks: set[Task[int]], workspace: object, blocking: bool = False,
+            self,
+            *,
+            tasks: set[Task[int]],
+            workspace: object,
+            blocking: bool = False,
         ) -> DependencyGraph[Job]:
             _ = tasks, workspace
             assert blocking is False
@@ -1243,6 +1247,7 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     # ``force_terminal=False`` on the console Rich constructs internally —
     # we monkeypatch ``Console.is_terminal`` directly to be deterministic.
     from rich.console import Console as _Console
+
     monkeypatch.setattr(_Console, "is_terminal", property(lambda _self: False))
     # Shrink the poll interval so the test finishes quickly.
     monkeypatch.setattr(tui_module, "_watch_line_events", tui_module._watch_line_events)
@@ -1254,6 +1259,41 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     # Terminal states render without the trailing job graph bookkeeping.
     assert "complete" in output
     assert "failed" in output
+
+
+def test_run_without_tui_resumes_when_final_poll_is_nonterminal(monkeypatch) -> None:
+    task = Task(source, x=1)
+    job = FakeJob(
+        work_unit=WorkUnit(root=task, dependencies=set()),
+        states=["done", "running", "done", "done"],
+    )
+    graph: DependencyGraph[Job] = DependencyGraph()
+    graph.add_node(job)
+
+    class StubExecutor:
+        def submit(
+            self,
+            *,
+            tasks: set[Task[int]],
+            workspace: object,
+            blocking: bool = False,
+        ) -> DependencyGraph[Job]:
+            _ = tasks, workspace
+            assert blocking is False
+            return graph
+
+    class StubExperiment:
+        def normalized_tasks(self) -> dict[str, Task[int]]:
+            return {"task": task}
+
+    from rich.console import Console as _Console
+
+    monkeypatch.setattr(_Console, "is_terminal", property(lambda _self: False))
+    tui_module.run_without_tui(experiment=StubExperiment(), executor=StubExecutor(), workspace=object())
+
+    # Initial terminal observation, a nonterminal final poll, then two
+    # terminal observations before returning.
+    assert job.state_calls == 4
 
 
 def test_job_state_index_maps_roots_and_jobs() -> None:

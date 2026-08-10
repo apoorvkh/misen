@@ -124,21 +124,17 @@ def test_staging_contents_and_key_stability(tmp_path: Path, counted_run: list[li
 
     project_dir = snapshot.project_dir
     assert project_dir == workspace.fetch_snapshot(snapshot.snapshot_key)
-    for name in ("pyproject.toml", "uv.lock", "requirements.txt"):
+    for name in ("pyproject.toml", "uv.lock"):
         assert (project_dir / name).is_file()
+    assert not (project_dir / "requirements.txt").exists()
 
-    # Local packages become artifacts (all pure -> wheels); remote deps
-    # become requirement pins.
+    # Local packages become artifacts (all pure -> wheels); remote deps stay
+    # represented by the frozen uv project.
     artifact_names = sorted(p.name for p in (project_dir / "packages").iterdir())
     assert [name.split("-")[0] for name in artifact_names] == ["mainpkg", "member", "pathdep"]
     assert all(name.endswith(".whl") for name in artifact_names)
-    requirement_lines = [
-        line
-        for line in (project_dir / "requirements.txt").read_text().splitlines()
-        if line and not line[0].isspace() and not line.startswith("#")
-    ]
-    assert len(requirement_lines) == 1
-    assert requirement_lines[0].startswith("iniconfig==")
+    lock = (project_dir / "uv.lock").read_text()
+    assert 'name = "iniconfig"' in lock
 
     # No misen in the lock: bootstrap dispatch must fail with a clear error.
     assert snapshot.misen_requirement is None
@@ -188,7 +184,8 @@ def test_cloud_workspace_publication_roundtrip(tmp_path: Path, monkeypatch: pyte
     # A second workspace over the same bucket with a cold cache = a worker.
     worker_side = _MemoryCloudWorkspace(backend="s3", bucket="snap-test", cache_dir=str(tmp_path / "cache-b"))
     fetched = worker_side.fetch_snapshot(snapshot.snapshot_key)
-    assert (fetched / "requirements.txt").read_bytes() == (snapshot.project_dir / "requirements.txt").read_bytes()
+    assert (fetched / "pyproject.toml").read_bytes() == (snapshot.project_dir / "pyproject.toml").read_bytes()
+    assert (fetched / "uv.lock").read_bytes() == (snapshot.project_dir / "uv.lock").read_bytes()
     assert sorted(p.name for p in (fetched / "packages").iterdir()) == sorted(
         p.name for p in (snapshot.project_dir / "packages").iterdir()
     )
@@ -254,14 +251,34 @@ def test_misen_requirement_local_checkout_uses_staged_artifact(tmp_path: Path) -
     wheel.write_bytes(b"wheel")
 
     assert _misen_bootstrap_requirement(project_dir, paths_visible=True) == str(wheel)
-    # No shared filesystem -> local misen is unusable (released misen required).
+    # No shared filesystem -> a local checkout artifact is not worker-visible.
     assert _misen_bootstrap_requirement(project_dir, paths_visible=False) is None
 
 
-def test_misen_requirement_absent_or_git(tmp_path: Path) -> None:
+def test_misen_requirement_absent_or_unresolved_git(tmp_path: Path) -> None:
     assert _requirement_for_lock(tmp_path, "") is None
     git_body = '[[package]]\nname = "misen"\nversion = "0.0.9"\n[package.source]\ngit = "https://x.invalid/misen"\n'
     assert _requirement_for_lock(tmp_path, git_body) is None
+
+
+def test_misen_requirement_git_uses_locked_commit(tmp_path: Path) -> None:
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    body = (
+        '[[package]]\nname = "misen"\nversion = "0.0.9"\n[package.source]\n'
+        f'git = "https://github.com/example/misen.git?branch=dev#{commit}"\n'
+    )
+    assert _requirement_for_lock(tmp_path, body) == f"misen @ git+https://github.com/example/misen.git@{commit}"
+
+
+def test_misen_requirement_git_preserves_subdirectory(tmp_path: Path) -> None:
+    commit = "fedcba9876543210fedcba9876543210fedcba98"
+    body = (
+        '[[package]]\nname = "misen"\nversion = "0.0.9"\n[package.source]\n'
+        f'git = "git+ssh://git@example.com/mono.git?rev=main&subdirectory=packages%2Fmisen#{commit}"\n'
+    )
+    assert _requirement_for_lock(tmp_path, body) == (
+        f"misen @ git+ssh://git@example.com/mono.git@{commit}#subdirectory=packages/misen"
+    )
 
 
 # ---------- bootstrap dispatch argv ----------
@@ -577,7 +594,7 @@ def test_bash_transport_fetches_before_materialization(tmp_path: Path, monkeypat
     env_file_path = transport_root / hashlib.sha256(env_ref.encode()).hexdigest()
     assert env_file_path.read_bytes() == b"A=1\n"
     assert oct(env_file_path.stat().st_mode & 0o777) == "0o600"
-    assert (store_root / "snapshots" / snapshot.snapshot_key / "requirements.txt").is_file()
+    assert (store_root / "snapshots" / snapshot.snapshot_key / "uv.lock").is_file()
     assert "misen.utils.materialize_env" in result.stdout
     assert "misen.utils.bootstrap_env" not in result.stdout
 

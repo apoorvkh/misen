@@ -47,8 +47,10 @@ Split each environment by rate of change, and co-locate caches:
 
 - **Shared python env** (`uv sync --frozen --no-install-local
   --compile-bytecode`): all locked *remote* deps (registry/git/url), no
-  local packages. Keyed by `(schema const, uv.lock bytes, .python-version
-  bytes-or-absent, UV_PYTHON, sys.platform, machine)`. Interpreter
+  local packages. Keyed by `(schema const, pyproject.toml bytes, uv.lock
+  bytes, .python-version bytes-or-absent, UV_PYTHON, sys.platform,
+  machine)`. Including project metadata captures the dependency groups,
+  sources, indexes, and build settings interpreted during sync. Interpreter
   identity is keyed by its *selection inputs* rather than a resolved
   path: an interpreter upgrade satisfying the same pin keeps the key (the
   entry stays self-consistent on its original interpreter), and if that
@@ -60,8 +62,8 @@ Split each environment by rate of change, and co-locate caches:
   omits it and the gap surfaces as a loud ImportError.
   `--compile-bytecode` pre-compiles once at build time so many concurrent
   readers don't race `__pycache__` writes into the shared env over NFS.
-  `uv lock` runs before keying, preserving the auto-relock semantics of
-  the bare `uv sync` this replaced.
+  `uv lock` runs before staging; materialization then uses the copied
+  project and lock with `--frozen` on either the submitter or worker.
 - **Per-snapshot overlay venv**: local packages only — the root project,
   workspace members, and path deps, classified from `uv.lock` `source`
   tables (`editable` / `directory` / `path`; `virtual` is never
@@ -119,15 +121,19 @@ pointer:
    - entry present without marker → crashed-builder residue; `rmtree`
      with retry/backoff (an orphaned `uv`/`pixi` child of a SIGKILLed
      builder may still be writing) and rebuild.
-4. Build, then `os.syncfs` on the store (Linux; one syscall commits the
+4. Build. A normal failure removes its partial entry before releasing the
+   still-owned lock, so a dependency error cannot strand a multi-gigabyte
+   environment. A builder that lost its lease leaves the entry untouched:
+   its replacement may already be writing the same path and owns cleanup.
+5. Run `os.syncfs` on the store (Linux; one syscall commits the
    mount's dirty pages — per-file fsync over 32k files would cost tens of
    seconds and defeat the point). Entry file *data* is otherwise already
    at the server via NFS close-to-open semantics when the build tool
    exits.
-5. Verify `lock.is_locked()` — if the lease was stolen mid-build (extreme
+6. Verify `lock.is_locked()` — if the lease was stolen mid-build (extreme
    stall), a thief may already be rebuilding the entry, so publishing
    would bless a half-built directory; raise instead.
-6. Publish the marker with the hash-index write mechanics: `mkstemp` in
+7. Publish the marker with the hash-index write mechanics: `mkstemp` in
    the store → write forensic content (host, pid, time) → fsync →
    `os.replace` → fsync the directory.
 

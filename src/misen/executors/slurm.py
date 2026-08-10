@@ -39,7 +39,7 @@ class SlurmJob(Job):
     accounting, OOM messages, etc.).
     """
 
-    __slots__ = ("_finalized", "slurm_job_id", "workspace")
+    __slots__ = ("_finalized", "_terminal_candidate", "slurm_job_id", "workspace")
 
     def __init__(
         self,
@@ -54,6 +54,7 @@ class SlurmJob(Job):
         self.slurm_job_id = slurm_job_id
         self.workspace = workspace
         self._finalized = False
+        self._terminal_candidate: JobState | None = None
 
     def state(self) -> JobState:
         """Return the current SLURM state, normalized to a misen job state."""
@@ -104,8 +105,18 @@ class SlurmJob(Job):
 
         result: dict[Job, JobState] = {}
         for sid, group in by_id.items():
-            state = states[sid]
+            observed = states[sid]
             for job in group:
+                # A requeued job can briefly disappear from squeue while sacct
+                # still exposes the terminal state of its previous attempt.
+                # Require the same terminal observation twice before exposing
+                # it; any nonterminal observation revokes the candidate.
+                if observed in {"done", "failed"}:
+                    state = observed if job._terminal_candidate == observed else "unknown"  # noqa: SLF001
+                    job._terminal_candidate = observed  # noqa: SLF001
+                else:
+                    job._terminal_candidate = None  # noqa: SLF001
+                    state = observed
                 if not job._finalized and state in {"done", "failed"} and job.log_path is not None:  # noqa: SLF001
                     job.workspace.finalize_job_log(job.log_path)
                     job._finalized = True  # noqa: SLF001

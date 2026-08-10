@@ -1,14 +1,13 @@
 """Execution snapshots: content-addressed project state + env materialization.
 
 A :class:`ProjectSnapshot` is pure data — the project's code (local packages
-built to wheels/sdists) and dependency metadata (a requirements export,
-``uv.lock``, ``.python-version``, pixi manifests) — staged, content-hashed,
-and published into the workspace's snapshot store. Environments are
-*materialized from* snapshots by :func:`_materialize_envs` into a
-content-keyed **env store** (built once per content state per store, with
-crash-safe locking), either on the submitting host at snapshot time
-(prewarm) or on each execution host at job startup
-(through the submitted Bash bootstrap). Design rationale:
+built to wheels/sdists) and uv/pixi dependency metadata — staged,
+content-hashed, and published into the workspace's snapshot store.
+Environments are *materialized from* snapshots by :func:`_materialize_envs`
+into a content-keyed **env store** (built once per content state per store,
+with crash-safe locking), either on the submitting host at snapshot time
+(prewarm) or on each execution host at job startup (through the submitted
+Bash bootstrap). Design rationale:
 ``docs/design_shared_env_store.md`` and ``docs/design_unified_snapshot.md``.
 
 Submission-scoped secrets (``.env`` files) and per-job payloads are never
@@ -38,6 +37,7 @@ from functools import cache
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
+from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 import uv
 from dotenv import load_dotenv
@@ -137,17 +137,14 @@ class ProjectSnapshot:
     A snapshot is pure data — code and dependency metadata, never a built
     environment:
 
-    - ``requirements.txt``: the locked *remote* dependency set
-      (``uv export --frozen --no-emit-local``, hashes and environment
-      markers included so heterogeneous workers install correctly);
     - ``packages/``: each local package built from the working tree now,
       so queued jobs stay pinned to the submitted code. Pure-python wheels
       are staged as wheels; native packages are staged as sdists and
       compile on the execution host inside the pixi activation (where the
       locked toolchain and the correct platform exist);
-    - ``pyproject.toml`` / ``uv.lock`` / ``.python-version``: interpreter
-      selection and ``[tool.uv]`` configuration (e.g. index URLs) for the
-      env-building uv invocations, plus provenance;
+    - ``pyproject.toml`` / ``uv.lock`` / ``.python-version``: the frozen uv
+      project used to sync remote dependencies without installing local
+      packages, including the project's source and index configuration;
     - ``pixi.toml`` + ``pixi.lock`` when the project has a conda env.
 
     The staged tree is hashed and published once per content key into the
@@ -301,8 +298,8 @@ class ProjectSnapshot:
         if self.misen_requirement is None:
             msg = (
                 "The worker-side env bootstrap needs an installable misen: pin misen from a "
-                "package index in the project's uv.lock (a local misen checkout works only "
-                "when the workspace serves files as shared paths), or use prewarm_envs."
+                "package index or Git commit in the project's uv.lock (a local misen checkout "
+                "works only when the workspace serves files as shared paths), or use prewarm_envs."
             )
             raise RuntimeError(msg)
         transport = self.transport
@@ -354,19 +351,11 @@ class ProjectSnapshot:
 
         _run_tool([_uv_bin(), "lock"], error_msg="Lockfile resolution (uv lock) failed")
 
-        # Stdout capture (not ``-o``) plus ``--no-header`` keeps the staged
-        # bytes deterministic for a given lock state, so snapshot keys and
-        # worker-side deps-env keys agree across submissions and machines.
-        export = _run_tool(
-            [_uv_bin(), "export", "--frozen", "--no-emit-local", "--no-header", "--format", "requirements-txt"],
-            error_msg="Dependency export (uv export) failed",
-        )
-        (staged_dir / _REQUIREMENTS_NAME).write_text(export.stdout)
-
-        for name in ("pyproject.toml", "uv.lock", ".python-version"):
-            src = Path.cwd() / name
-            if src.exists():
-                shutil.copy(src, staged_dir / name)
+        for name in ("pyproject.toml", "uv.lock"):
+            shutil.copy(Path.cwd() / name, staged_dir / name)
+        python_version = Path.cwd() / ".python-version"
+        if python_version.exists():
+            shutil.copy(python_version, staged_dir / python_version.name)
 
         for package_path in _local_package_paths(Path.cwd() / "uv.lock"):
             if package_path.is_dir():
@@ -429,8 +418,7 @@ def token_base32(nbytes: int) -> str:
 # the commit point). See docs/design_shared_env_store.md.
 # --------------------------------------------------------------------------
 
-_ENV_STORE_SCHEMA = 1  # bump to invalidate every store and snapshot key
-_REQUIREMENTS_NAME = "requirements.txt"  # staged remote-deps export
+_ENV_STORE_SCHEMA = 1  # bump when an entry format changes incompatibly
 _PACKAGES_DIR_NAME = "packages"  # staged local-package artifacts (wheels/sdists)
 # Fixed build timestamp (1980-01-01, zip's minimum) so unchanged source
 # rebuilds byte-identical artifacts and snapshot/overlay keys stay stable.
@@ -466,10 +454,9 @@ def _store_key(parts: tuple[object, ...]) -> str:
 def _snapshot_key(staged_dir: Path) -> str:
     """Content key of a staged snapshot: every file's relative path and bytes.
 
-    Deterministic because staging is: the requirements export has a fixed
-    header-free byte form, and package artifacts build under a pinned
-    ``SOURCE_DATE_EPOCH``. Non-reproducible build backends only cost key
-    stability (one snapshot entry per submission), never correctness.
+    Package artifacts build under a pinned ``SOURCE_DATE_EPOCH``.
+    Non-reproducible build backends only cost key stability (one snapshot
+    entry per submission), never correctness.
     """
     files = sorted(p for p in staged_dir.rglob("*") if p.is_file())
     return _store_key((_ENV_STORE_SCHEMA, tuple((p.relative_to(staged_dir).as_posix(), p.read_bytes()) for p in files)))
@@ -538,12 +525,12 @@ def _stage_local_package(package_dir: Path, packages_dir: Path) -> None:
 def _misen_bootstrap_requirement(project_dir: Path, *, paths_visible: bool) -> str | None:
     """Resolve how a worker bootstrap installs misen, from the staged lock.
 
-    A registry pin installs from the index (``misen==<version>``). A local
-    misen checkout (developing misen itself) uses the artifact staged in
-    ``packages/`` — usable only when the workspace serves files as shared
-    paths, per the "no shared filesystem requires released misen" rule.
-    Returns ``None`` when no usable form exists; prewarmed snapshots never
-    need one.
+    A registry pin installs from the index (``misen==<version>``); a Git
+    source becomes an immutable PEP 508 direct reference at the commit
+    recorded in ``uv.lock``. A local misen checkout (developing misen itself)
+    uses the artifact staged in ``packages/`` — usable only when the workspace
+    serves files as shared paths. Returns ``None`` when no usable form exists;
+    prewarmed snapshots never need one.
     """
     lock = tomllib.loads((project_dir / "uv.lock").read_text())
     for package in lock.get("package", []):
@@ -552,6 +539,24 @@ def _misen_bootstrap_requirement(project_dir: Path, *, paths_visible: bool) -> s
         source = package.get("source", {})
         if "registry" in source and "version" in package:
             return f"misen=={package['version']}"
+        if isinstance(locked_git := source.get("git"), str):
+            # uv records selectors in the query and the resolved commit in
+            # the fragment, e.g. ``...?branch=main#<sha>``. Workers must use
+            # the commit, never re-resolve the moving selector.
+            parsed = urlsplit(locked_git)
+            commit = parsed.fragment
+            if commit:
+                subdirectory = next(
+                    (value for key, value in parse_qsl(parsed.query) if key == "subdirectory"),
+                    None,
+                )
+                git_url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+                if not git_url.startswith("git+"):
+                    git_url = f"git+{git_url}"
+                requirement = f"misen @ {git_url}@{commit}"
+                if subdirectory:
+                    requirement += f"#subdirectory={quote(subdirectory, safe='/')}"
+                return requirement
         if any(kind in source for kind in ("editable", "directory", "path")) and paths_visible:
             artifacts = sorted(
                 p for p in (project_dir / _PACKAGES_DIR_NAME).glob("misen-*") if p.name.split("-")[0] == "misen"
@@ -668,11 +673,12 @@ def _ensure_store_entry(
     Entries are immutable once published and built at their final path
     (venvs bake absolute paths into scripts, so build-then-rename is out).
     The fsync'd marker beside the entry is the commit point: written only
-    after ``build`` succeeds and only while the lock lease is still held,
-    so an entry without a marker is crashed-builder residue — safe to
-    remove, because executors dispatch jobs only after snapshot creation
-    returns. ``sanity_path`` (entry-relative) must exist for a marked entry
-    to count as usable, healing a durable marker that outlived its entry.
+    after ``build`` succeeds and only while the lock lease is still held.
+    Failed builds are removed before releasing an owned lock; an entry without
+    a marker is therefore crashed-builder or lost-lease residue and is safe to
+    remove on the next attempt. ``sanity_path`` (entry-relative) must exist for
+    a marked entry to count as usable, healing a durable marker that outlived
+    its entry.
 
     Raises:
         RuntimeError: If the build fails or the build lock is lost mid-build.
@@ -714,7 +720,20 @@ def _ensure_store_entry(
             logger.warning("Removing incomplete %s %s left by an interrupted build.", label, entry_dir)
             _rmtree_with_retry(entry_dir)
         logger.info("Building %s %s.", label, entry_dir)
-        build(entry_dir)
+        try:
+            build(entry_dir)
+        except BaseException:
+            # A normal failed builder still owns the entry and should not
+            # strand a potentially huge partial environment. If the lease was
+            # stolen, a replacement may already be writing this path, so only
+            # that builder may clean it.
+            if lock.is_locked() and entry_dir.exists():
+                logger.warning("Removing failed %s build at %s.", label, entry_dir)
+                try:
+                    _rmtree_with_retry(entry_dir)
+                except OSError:
+                    logger.exception("Could not remove failed %s build at %s.", label, entry_dir)
+            raise
         if not lock.is_locked():
             # Lease stolen mid-build (extreme stall): a thief may already be
             # rebuilding this entry, so our marker could bless a half-built one.
@@ -953,17 +972,17 @@ def _materialize_envs(project_dir: Path, store_root: Path, *, pixi_bin: str | No
 def _python_env_key(project_dir: Path) -> str:
     """Content key of the deps env for a published snapshot on this host.
 
-    Captures the staged requirements bytes, the interpreter-selection
-    inputs (``.python-version`` pin and ``UV_PYTHON``), and this host's
-    platform — so heterogeneous hosts sharing a store root coexist, and an
-    interpreter upgrade satisfying the same pin keeps the key (a missing
-    interpreter fails the ``bin/python`` sanity check and rebuilds).
+    Captures the frozen uv project, interpreter-selection inputs
+    (``.python-version`` pin and ``UV_PYTHON``), and this host's platform.
+    The project metadata is part of the key because it controls dependency
+    groups, sources, indexes, and build settings that ``uv sync`` applies.
     """
     pin = project_dir / ".python-version"
     return _store_key(
         (
             _ENV_STORE_SCHEMA,
-            (project_dir / _REQUIREMENTS_NAME).read_bytes(),
+            (project_dir / "pyproject.toml").read_bytes(),
+            (project_dir / "uv.lock").read_bytes(),
             pin.read_bytes() if pin.exists() else None,
             os.environ.get("UV_PYTHON"),
             sys.platform,
@@ -977,13 +996,11 @@ def _ensure_python_env(
 ) -> tuple[Path, Path, Path]:
     """Materialize the python env for a published snapshot on this host.
 
-    Two store entries: the deps env (``uv venv`` + ``uv pip install`` of the
-    staged requirements export — hash-checked, marker-evaluated on this
-    host) and the overlay (keyed by the deps key plus the staged package
-    artifacts' bytes, so it is shared by every job whose snapshot carries
-    the same code and replaced whenever the code changes). uv runs with
-    ``cwd=project_dir`` so the staged ``.python-version`` and ``[tool.uv]``
-    configuration (e.g. index URLs) apply.
+    Two store entries: a dependency env produced by frozen ``uv sync`` with
+    every local package excluded, and an overlay containing the exact local
+    artifacts staged at submission. The dependency env therefore preserves
+    uv's native lock, source, index, and build semantics while remaining
+    reusable across code-only changes.
 
     Returns:
         Tuple ``(deps_env_dir, overlay_venv_dir, overlay_site_dir)``.
@@ -991,37 +1008,27 @@ def _ensure_python_env(
     Raises:
         RuntimeError: If any uv invocation fails or a build lock is lost.
     """
-    requirements_path = project_dir / _REQUIREMENTS_NAME
     deps_key = _python_env_key(project_dir)
 
     def build_deps(env_dir: Path) -> None:
         _run_tool(
-            [_uv_bin(), "venv", str(env_dir)],
+            [
+                _uv_bin(),
+                "sync",
+                "--frozen",
+                "--no-install-local",
+                "--compile-bytecode",
+                "--project",
+                str(project_dir),
+            ],
+            # An explicit project-environment path keeps the immutable
+            # snapshot untouched and builds directly at the final venv path.
+            # Cache policy stays lazy, so warm store reuse invokes no uv
+            # subprocess at all.
+            env=os.environ.copy() | _uv_cache_env(store_root) | {"UV_PROJECT_ENVIRONMENT": str(env_dir)},
             cwd=project_dir,
-            error_msg="Virtual environment creation failed",
+            error_msg="Dependency environment sync failed",
         )
-        has_requirements = any(
-            line.strip() and not line.lstrip().startswith("#") for line in requirements_path.read_text().splitlines()
-        )
-        if has_requirements:
-            _run_tool(
-                [
-                    _uv_bin(),
-                    "pip",
-                    "install",
-                    "--python",
-                    str(env_dir / "bin" / "python"),
-                    "--no-deps",
-                    "--compile-bytecode",
-                    "--requirements",
-                    str(requirements_path),
-                ],
-                # Cache-dir policy resolved lazily (a ``uv cache dir``
-                # subprocess) so the warm reuse path pays nothing.
-                env=os.environ.copy() | _uv_cache_env(store_root),
-                cwd=project_dir,
-                error_msg="Dependency installation failed",
-            )
 
     deps_env_dir = _ensure_store_entry(
         store=store_root / "python-envs",
