@@ -83,21 +83,17 @@ def test_slurm_bulk_state_falls_back_to_sacct_for_jobs_squeue_doesnt_know(monkey
     monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
 
-    first = SlurmJob.bulk_state(jobs)
     states = SlurmJob.bulk_state(jobs)
 
-    # One squeue + sacct pair per batched poll. The first terminal observation
-    # is held as a candidate; the second confirms it.
-    assert len(recorder.calls) == 4
+    # One squeue call covering all ids, plus one sacct call for the 2 ids
+    # squeue didn't return.
+    assert len(recorder.calls) == 2
     assert recorder.calls[0][0].endswith("squeue")
     assert recorder.calls[1][0].endswith("sacct")
     # sacct call only includes the still-unknown ids, sorted.
     assert "1,2" in recorder.calls[1]
     assert "0" not in recorder.calls[1][-2]  # the joined-id arg, not the format spec
 
-    assert first[jobs[0]] == "running"
-    assert first[jobs[1]] == "unknown"
-    assert first[jobs[2]] == "unknown"
     assert states[jobs[0]] == "running"
     assert states[jobs[1]] == "done"
     assert states[jobs[2]] == "failed"
@@ -116,8 +112,6 @@ def test_slurm_bulk_state_finalizes_logs_for_terminal_jobs(monkeypatch, tmp_path
     monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
 
-    SlurmJob.bulk_state(jobs)
-    cast("MagicMock", jobs[0].workspace.finalize_job_log).assert_not_called()
     SlurmJob.bulk_state(jobs)
 
     # Terminal job's workspace.finalize_job_log must have been called for the
@@ -241,13 +235,11 @@ def test_slurm_bulk_state_out_of_queue_preempted_is_failed(monkeypatch, tmp_path
     monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
 
-    first = SlurmJob.bulk_state([job])
     states = SlurmJob.bulk_state([job])
 
-    assert first[job] == "unknown"
     assert states[job] == "failed"
-    # Each confirmation poll fell through squeue (empty) to sacct.
-    assert len(recorder.calls) == 4
+    # Fell through squeue (empty) to sacct.
+    assert len(recorder.calls) == 2
     assert recorder.calls[1][0].endswith("sacct")
     # A terminal state finalizes the log exactly once.
     cast("MagicMock", job.workspace.finalize_job_log).assert_called_once_with(log)
@@ -282,27 +274,6 @@ def test_slurm_bulk_state_preempt_requeue_transition_is_not_terminal(monkeypatch
     assert poll("55 RUNNING\n") == "running"
     cast("MagicMock", job.workspace.finalize_job_log).assert_not_called()
 
-    # The rerun finishes; two matching accounting observations confirm it.
-    assert poll("", "55 COMPLETED\n") == "unknown"
+    # The rerun finishes; squeue has dropped the id and sacct is authoritative.
     assert poll("", "55 COMPLETED\n") == "done"
-    cast("MagicMock", job.workspace.finalize_job_log).assert_called_once_with(log)
-
-
-def test_slurm_terminal_candidate_is_revoked_by_requeue(monkeypatch, tmp_path) -> None:
-    job = _make_slurm_job(slurm_id="77", x=0)
-    log = tmp_path / "j.log"
-    log.write_text("streaming output")
-    job.log_path = log
-    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
-
-    def poll(squeue_reply: str, sacct_reply: str = "") -> str:
-        recorder = _RunRecorder({"squeue": squeue_reply, "sacct": sacct_reply})
-        monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
-        return SlurmJob.bulk_state([job])[job]
-
-    assert poll("", "77 COMPLETED\n") == "unknown"
-    assert poll("77 RUNNING\n") == "running"
-    assert poll("", "77 COMPLETED\n") == "unknown"
-    cast("MagicMock", job.workspace.finalize_job_log).assert_not_called()
-    assert poll("", "77 COMPLETED\n") == "done"
     cast("MagicMock", job.workspace.finalize_job_log).assert_called_once_with(log)

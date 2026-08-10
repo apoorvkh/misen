@@ -89,22 +89,12 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
             console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
             return
         try:
-            while True:
-                if console.is_terminal:
-                    _watch_live_tree(named_tasks=named_tasks, job_graph=job_graph, console=console)
-                else:
-                    _watch_line_events(job_graph=job_graph, console=console)
-                final_states = bulk_job_states(list(job_graph.nodes()))
-                # The extra poll is both the final display state and a guard
-                # against scheduler requeue races. If a supposedly terminal
-                # job is running again, resume watching instead of returning.
-                if all(state in _TERMINAL_STATES for state in final_states.values()):
-                    break
-        except BaseException:
-            # Preserve log-finalization side effects from the original
-            # best-effort final poll when monitoring is interrupted.
-            bulk_job_states(list(job_graph.nodes()))
-            raise
+            if console.is_terminal:
+                _watch_live_tree(named_tasks=named_tasks, job_graph=job_graph, console=console)
+            else:
+                _watch_line_events(job_graph=job_graph, console=console)
+        finally:
+            final_states = bulk_job_states(list(job_graph.nodes()))
     if not console.is_terminal:
         _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, console=console, states=final_states)
 

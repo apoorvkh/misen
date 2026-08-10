@@ -1212,18 +1212,16 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     graph: DependencyGraph[Job] = DependencyGraph()
     # FakeJob advances one state per ``state()`` call, so seed enough entries
     # to reach a terminal state within a few polls without hanging.
-    graph.add_node(
-        FakeJob(
-            work_unit=WorkUnit(root=source_task, dependencies=set()),
-            states=["pending", "running", "done"],
-        )
+    source_job = FakeJob(
+        work_unit=WorkUnit(root=source_task, dependencies=set()),
+        states=["done"],
     )
-    graph.add_node(
-        FakeJob(
-            work_unit=WorkUnit(root=sink_task, dependencies=set()),
-            states=["pending", "running", "failed"],
-        )
+    sink_job = FakeJob(
+        work_unit=WorkUnit(root=sink_task, dependencies=set()),
+        states=["pending", "running", "failed"],
     )
+    graph.add_node(source_job)
+    graph.add_node(sink_job)
 
     class StubExecutor:
         def submit(
@@ -1249,51 +1247,20 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     from rich.console import Console as _Console
 
     monkeypatch.setattr(_Console, "is_terminal", property(lambda _self: False))
-    # Shrink the poll interval so the test finishes quickly.
-    monkeypatch.setattr(tui_module, "_watch_line_events", tui_module._watch_line_events)
+    monkeypatch.setattr(tui_module.time, "sleep", lambda _: None)
     tui_module.run_without_tui(experiment=StubExperiment(), executor=executor, workspace=object())
 
     output = capsys.readouterr().err
+    # The source is already done, but the monitor keeps polling until the sink
+    # advances through both nonterminal states, then polls once for the final
+    # tree. A foreground run cannot return while any job is still running.
+    assert source_job.state_calls == 4
+    assert sink_job.state_calls == 4
     assert "source(x=1)" in output
     assert "sink(x=2)" in output
     # Terminal states render without the trailing job graph bookkeeping.
     assert "complete" in output
     assert "failed" in output
-
-
-def test_run_without_tui_resumes_when_final_poll_is_nonterminal(monkeypatch) -> None:
-    task = Task(source, x=1)
-    job = FakeJob(
-        work_unit=WorkUnit(root=task, dependencies=set()),
-        states=["done", "running", "done", "done"],
-    )
-    graph: DependencyGraph[Job] = DependencyGraph()
-    graph.add_node(job)
-
-    class StubExecutor:
-        def submit(
-            self,
-            *,
-            tasks: set[Task[int]],
-            workspace: object,
-            blocking: bool = False,
-        ) -> DependencyGraph[Job]:
-            _ = tasks, workspace
-            assert blocking is False
-            return graph
-
-    class StubExperiment:
-        def normalized_tasks(self) -> dict[str, Task[int]]:
-            return {"task": task}
-
-    from rich.console import Console as _Console
-
-    monkeypatch.setattr(_Console, "is_terminal", property(lambda _self: False))
-    tui_module.run_without_tui(experiment=StubExperiment(), executor=StubExecutor(), workspace=object())
-
-    # Initial terminal observation, a nonterminal final poll, then two
-    # terminal observations before returning.
-    assert job.state_calls == 4
 
 
 def test_job_state_index_maps_roots_and_jobs() -> None:
