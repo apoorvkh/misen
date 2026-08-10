@@ -18,6 +18,7 @@ jobs:
                   python-version-file: ".python-version"
                   enable-cache: true
             - run: uv sync
+            - run: uv run --frozen pytest -q
             - run: uv run --frozen ruff check
               if: success() || failure()
             - run: uv run --frozen ruff format --check
