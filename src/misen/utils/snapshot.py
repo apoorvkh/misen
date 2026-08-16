@@ -53,7 +53,7 @@ from misen.utils.runtime_events import runtime_event
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from misen.task_metadata import GpuRuntime
+    from misen.task_metadata import AcceleratorType
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -74,10 +74,10 @@ JOB_LOG_PATH_ARG = "--job-log-path"
 def prepare_live_job(
     work_unit: WorkUnit,
     workspace: Workspace,
-    gpu_runtime: GpuRuntime,
     *,
     cpu_indices: list[int] | None,
-    gpu_indices: list[int] | None,
+    accelerator_type: AcceleratorType,
+    accelerator_indices: list[int] | None,
 ) -> tuple[str, list[str], dict[str, str], Path]:
     """Prepare a work unit to run via ``uv run --no-project`` in the live env.
 
@@ -99,11 +99,12 @@ def prepare_live_job(
     Args:
         work_unit: Work unit to execute.
         workspace: Workspace for payload/log paths.
-        gpu_runtime: Runtime environment for GPU resources.
         cpu_indices: CPU logical-core indices for worker affinity, or
             ``None`` when the scheduler already pins CPUs (e.g. SLURM).
-        gpu_indices: GPU device indices for worker visibility, or ``None``
-            when the scheduler already masks GPUs (e.g. SLURM cgroups).
+        accelerator_type: Accelerator backend whose visibility should be bound.
+        accelerator_indices: Device indices assigned by a host-level executor,
+            ``[]`` to hide all maskable devices, or ``None`` when a scheduler
+            already provides isolation.
 
     Returns:
         Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -120,9 +121,9 @@ def prepare_live_job(
         *_uv_execute_argv(
             _active_env_files(),
             payload_path,
-            gpu_runtime,
             cpu_indices=cpu_indices,
-            gpu_indices=gpu_indices,
+            accelerator_type=accelerator_type,
+            accelerator_indices=accelerator_indices,
         ),
         JOB_LOG_PATH_ARG,
         str(log_path),
@@ -248,10 +249,10 @@ class ProjectSnapshot:
         self,
         work_unit: WorkUnit,
         workspace: Workspace,
-        gpu_runtime: GpuRuntime,
         *,
         cpu_indices: list[int] | None,
-        gpu_indices: list[int] | None,
+        accelerator_type: AcceleratorType,
+        accelerator_indices: list[int] | None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute one work unit.
 
@@ -264,11 +265,12 @@ class ProjectSnapshot:
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log storage.
-            gpu_runtime: Runtime environment for GPU resources.
             cpu_indices: CPU logical-core indices for worker affinity, or
                 ``None`` to leave inherited affinity untouched.
-            gpu_indices: GPU device indices for worker visibility, or ``None``
-                to leave inherited visibility untouched.
+            accelerator_type: Accelerator backend whose visibility should be bound.
+            accelerator_indices: Device indices assigned by a host-level executor,
+                ``[]`` to hide all maskable devices, or ``None`` to preserve
+                scheduler-provided isolation.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -288,10 +290,10 @@ class ProjectSnapshot:
                 self.prewarmed,
                 [Path(ref) for ref in self.env_file_refs],
                 Path(payload_ref),
-                gpu_runtime,
                 cpu_indices=cpu_indices,
-                gpu_indices=gpu_indices,
                 log_path=log_path,
+                accelerator_type=accelerator_type,
+                accelerator_indices=accelerator_indices,
             )
             return job_id, argv, _activation_env(self.prewarmed), log_path
 
@@ -304,22 +306,18 @@ class ProjectSnapshot:
             raise RuntimeError(msg)
         transport = self.transport
 
+        payload = payload_ref
+        env_files = list(self.env_file_refs)
         if transport is None:
             project_dir: Path | None = self.project_dir
             snapshot_key: str | None = None
-            payload = payload_ref
-            env_files = list(self.env_file_refs)
         else:
             project_dir = None
             snapshot_key = self.snapshot_key
-            payload = payload_ref
-            env_files = list(self.env_file_refs)
 
         worker_args = [
-            "--gpu-runtime",
-            gpu_runtime,
             *_indices_argv("cpu-indices", cpu_indices),
-            *_indices_argv("gpu-indices", gpu_indices),
+            *_accelerator_argv(accelerator_type, accelerator_indices),
             JOB_LOG_PATH_ARG,
             str(log_path),
         ]
@@ -881,11 +879,11 @@ def _worker_command(
     envs: _MaterializedEnvs,
     env_files: list[Path],
     payload_path: Path,
-    gpu_runtime: GpuRuntime,
     *,
     cpu_indices: list[int] | None,
-    gpu_indices: list[int] | None,
     log_path: Path,
+    accelerator_type: AcceleratorType,
+    accelerator_indices: list[int] | None,
 ) -> list[str]:
     """Build the worker command for materialized envs.
 
@@ -897,7 +895,13 @@ def _worker_command(
     argv: list[str] = []
     if envs.conda_manifest_path is not None and envs.pixi_bin is not None:
         argv += _pixi_run_prefix(envs.pixi_bin, envs.conda_manifest_path)
-    argv += _uv_execute_argv(env_files, payload_path, gpu_runtime, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
+    argv += _uv_execute_argv(
+        env_files,
+        payload_path,
+        cpu_indices=cpu_indices,
+        accelerator_type=accelerator_type,
+        accelerator_indices=accelerator_indices,
+    )
     argv += [JOB_LOG_PATH_ARG, str(log_path)]
     return argv
 
@@ -1203,10 +1207,10 @@ def _uv_bin() -> str:
 def _uv_execute_argv(
     env_files: list[Path] | tuple[Path, ...],
     payload_path: Path,
-    gpu_runtime: GpuRuntime,
     *,
     cpu_indices: list[int] | None,
-    gpu_indices: list[int] | None,
+    accelerator_type: AcceleratorType,
+    accelerator_indices: list[int] | None,
 ) -> list[str]:
     """Build the ``uv run --no-project -m misen.utils.execute ...`` argv.
 
@@ -1223,10 +1227,8 @@ def _uv_execute_argv(
         "misen.utils.execute",
         "--payload",
         str(payload_path),
-        "--gpu-runtime",
-        gpu_runtime,
         *_indices_argv("cpu-indices", cpu_indices),
-        *_indices_argv("gpu-indices", gpu_indices),
+        *_accelerator_argv(accelerator_type, accelerator_indices),
     ]
 
 
@@ -1235,6 +1237,13 @@ def _indices_argv(flag: str, indices: list[int] | None) -> list[str]:
     if indices is None or len(indices) == 0:
         return []
     return [f"--{flag}", *(str(i) for i in indices)]
+
+
+def _accelerator_argv(accelerator_type: AcceleratorType, indices: list[int] | None) -> list[str]:
+    """Render an explicit accelerator binding, preserving ``[]`` versus ``None``."""
+    if indices is None:
+        return []
+    return ["--accelerator-type", accelerator_type, "--accelerator-indices", *(str(i) for i in indices)]
 
 
 def _pixi_run_prefix(pixi_bin: str, manifest_path: Path) -> list[str]:

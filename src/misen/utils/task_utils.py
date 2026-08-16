@@ -21,7 +21,7 @@ from rich.console import Console as RichConsole
 
 from misen.exceptions import HashError
 from misen.sentinels import SCRATCH_DIR, is_runtime_sentinel
-from misen.task_metadata import Resources
+from misen.task_metadata import aggregate_resources
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashing import ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
@@ -217,35 +217,9 @@ def collect_task_dependencies(args: tuple[Any, ...], kwargs: Mapping[str, Any]) 
     return frozenset(_merge_equivalent_tasks(leaf for leaf in leaves if isinstance(leaf, Task)))
 
 
-def _merge_task_resources(left: Resources, right: Resources) -> Resources:
-    """Return one resource request large enough to satisfy either input."""
-    gpu_runtimes = {resources["gpu_runtime"] for resources in (left, right) if resources["gpus"] > 0}
-    match len(gpu_runtimes):
-        case 0:
-            gpu_runtime = left["gpu_runtime"]
-        case 1:
-            (gpu_runtime,) = gpu_runtimes
-        case _:
-            msg = f"Incompatible gpu_runtime requirements for equivalent tasks: {gpu_runtimes}"
-            raise ValueError(msg)
-
-    return Resources(
-        time=max(left["time"], right["time"]),
-        memory=max(left["memory"], right["memory"]),
-        cpus=max(left["cpus"], right["cpus"]),
-        gpus=max(left["gpus"], right["gpus"]),
-        gpu_memory=(
-            None
-            if left["gpu_memory"] is None and right["gpu_memory"] is None
-            else max(value for value in (left["gpu_memory"], right["gpu_memory"]) if value is not None)
-        ),
-        gpu_runtime=gpu_runtime,
-    )
-
-
 def _merge_equivalent_task(existing: Task[Any], candidate: Task[Any]) -> Task[Any]:
     """Merge scheduler-facing resources for two task-equal handles."""
-    merged_resources = _merge_task_resources(existing.resources, candidate.resources)
+    merged_resources = aggregate_resources((existing.resources, candidate.resources), sum_time=False)
     if merged_resources == existing.resources:
         return existing
     return existing.with_resources(**merged_resources)

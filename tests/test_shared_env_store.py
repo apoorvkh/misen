@@ -419,9 +419,9 @@ def test_env_overrides_composition(built_snapshot: ProjectSnapshot, module_works
     _, argv, env_overrides, log_path = built_snapshot.prepare_job(
         _StubWorkUnit(),  # type: ignore[arg-type]
         module_workspace,
-        "cuda",
         cpu_indices=None,
-        gpu_indices=None,
+        accelerator_type="rocm",
+        accelerator_indices=[],
     )
     assert built_snapshot.prewarmed is not None
     assert env_overrides["VIRTUAL_ENV"] == str(built_snapshot.prewarmed.overlay_venv_dir)
@@ -431,6 +431,8 @@ def test_env_overrides_composition(built_snapshot: ProjectSnapshot, module_works
     # Direct dispatch: no bootstrap wrapper, straight to the worker module.
     assert "misen.utils.bootstrap_env" not in argv
     assert "misen.utils.execute" in argv
+    assert argv[argv.index("--accelerator-type") + 1] == "rocm"
+    assert argv[argv.index("--accelerator-indices") + 1].startswith("--")
     payload_path = Path(argv[argv.index("--payload") + 1])
     assert payload_path.read_bytes() == b"payload"
     assert argv[argv.index("--job-log-path") + 1] == str(log_path)

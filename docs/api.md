@@ -19,6 +19,7 @@ change without notice.
         - submit
         - result
         - scratch_dir
+        - with_resources
 
 # @meta decorator
 

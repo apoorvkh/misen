@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import cloudpickle
 import tyro
 
-from misen.task_metadata import GpuRuntime
+from misen.task_metadata import AcceleratorType
 from misen.utils.resource_binding import apply_resource_binding
 
 if TYPE_CHECKING:
@@ -27,8 +27,8 @@ def execute(
     payload: Path,
     *,
     cpu_indices: list[int] | None = None,
-    gpu_indices: list[int] | None = None,
-    gpu_runtime: GpuRuntime = "cuda",
+    accelerator_type: AcceleratorType = "cuda",
+    accelerator_indices: list[int] | None = None,
     job_log_path: Path | None = None,
 ) -> None:
     """Execute a cloudpickle work-unit payload file.
@@ -41,18 +41,18 @@ def execute(
         cpu_indices: CPU logical-core indices to bind via
             :func:`os.sched_setaffinity`. Pass ``None`` when the scheduler
             (e.g. SLURM) already pins CPUs for this process.
-        gpu_indices: GPU device indices to mask via the runtime's visibility
-            environment variables. Pass ``None`` when the scheduler already
-            masks GPUs (e.g. SLURM cgroups).
-        gpu_runtime: Runtime selecting which visibility env vars to set.
+        accelerator_type: Accelerator backend whose visibility should be bound.
+        accelerator_indices: Device indices assigned by a host-level executor,
+            ``[]`` to hide all maskable devices, or ``None`` to preserve
+            scheduler-provided isolation.
         job_log_path: Path where the parent executor is writing this worker's
             combined stdout/stderr log. When provided, the workspace can stream
             the log while the worker is still running.
     """
     apply_resource_binding(
         cpu_indices=cpu_indices,
-        gpu_indices=gpu_indices,
-        gpu_runtime=gpu_runtime,
+        accelerator_type=accelerator_type,
+        accelerator_indices=accelerator_indices,
     )
 
     bundle = cloudpickle.loads(payload.read_bytes())

@@ -6,7 +6,11 @@ from misen import Resources, Task, meta
 from misen.utils.work_unit import build_work_graph
 
 
-@meta(id="noop_task", cache=False, resources=Resources(gpus=1, gpu_memory=16))
+@meta(
+    id="noop_task",
+    cache=False,
+    resources=Resources(accelerators=4, accelerator_memory=40),
+)
 def noop_task(x: int) -> int:
     return x
 
@@ -33,17 +37,17 @@ def resource_override_pair(values: tuple[int, int]) -> int:
 
 def test_with_resources_overrides_only_named_fields() -> None:
     task = Task(noop_task, x=1)
-    patched = task.with_resources(gpu_memory=40)
+    patched = task.with_resources(accelerators=2, accelerator_memory=80)
 
-    assert patched.resources["gpu_memory"] == 40
-    assert patched.resources["gpus"] == task.resources["gpus"]
+    assert patched.resources["accelerators"] == 2
+    assert patched.resources["accelerator_memory"] == 80
     assert patched.resources["memory"] == task.resources["memory"]
     assert patched.resources["cpus"] == task.resources["cpus"]
 
 
 def test_with_resources_preserves_task_identity() -> None:
     task = Task(noop_task, x=1)
-    patched = task.with_resources(gpu_memory=40)
+    patched = task.with_resources(accelerators=2, accelerator_memory=80)
 
     assert patched.task_hash() == task.task_hash()
     assert patched.meta is task.meta
@@ -54,17 +58,26 @@ def test_with_resources_preserves_task_identity() -> None:
 
 def test_with_resources_returns_new_instance_and_does_not_mutate() -> None:
     task = Task(noop_task, x=1)
-    original_gpu_memory = task.resources["gpu_memory"]
-    patched = task.with_resources(gpu_memory=40)
+    original_accelerators = task.resources["accelerators"]
+    patched = task.with_resources(accelerators=2, accelerator_memory=80)
 
     assert patched is not task
-    assert task.resources["gpu_memory"] == original_gpu_memory
+    assert task.resources["accelerators"] == original_accelerators
+
+
+def test_with_resources_can_remove_accelerator_requirement() -> None:
+    task = Task(noop_task, x=1)
+
+    patched = task.with_resources(accelerators=0, accelerator_memory=None)
+
+    assert patched.resources["accelerators"] == 0
+    assert patched.resources["accelerator_memory"] is None
 
 
 def test_with_resources_rejects_unknown_field() -> None:
     task = Task(noop_task, x=1)
     with pytest.raises(TypeError):
-        task.with_resources(not_a_field=1)  # ty:ignore[unknown-argument]
+        task.with_resources(not_a_field=1)
 
 
 def test_dependency_collection_merges_resource_overrides_for_equal_tasks() -> None:

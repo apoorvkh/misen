@@ -24,6 +24,25 @@ def _slurm_test_task(x: int = 0) -> int:
     return x
 
 
+@meta(id="slurm_gpu_test_task", cache=False, resources={"accelerators": 2})
+def _slurm_gpu_test_task() -> None:
+    return None
+
+
+@meta(
+    id="slurm_gpu_constrained_test_task",
+    cache=False,
+    resources={"accelerators": 2, "accelerator_memory": 80},
+)
+def _slurm_gpu_constrained_test_task() -> None:
+    return None
+
+
+@meta(id="slurm_tpu_test_task", cache=False, resources={"accelerators": 1, "accelerator_type": "tpu"})
+def _slurm_tpu_test_task() -> None:
+    return None
+
+
 def _make_slurm_job(slurm_id: str, x: int) -> SlurmJob:
     work_unit = WorkUnit(root=Task(_slurm_test_task, x=x), dependencies=set())
     workspace = cast("Workspace", MagicMock(spec=Workspace))
@@ -50,6 +69,33 @@ class _RunRecorder:
         binary = cmd[0].rsplit("/", 1)[-1]
         stdout = self._replies.get(binary, "")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=stdout, stderr="")
+
+
+def _dispatch_task(
+    task: Task[Any],
+    executor: SlurmExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[list[str], MagicMock]:
+    """Dispatch one task through mocked sbatch and return its command."""
+    workspace = cast("Workspace", MagicMock(spec=Workspace))
+    snapshot = MagicMock()
+    snapshot.prepare_job.return_value = ("job-local", ["python", "-m", "worker"], {}, tmp_path / "slurm.log")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+
+    def run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="123\n", stderr="")
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", run)
+    executor._dispatch(  # noqa: SLF001
+        work_unit=WorkUnit(root=task, dependencies=set()),
+        dependencies=set(),
+        workspace=workspace,
+        snapshot=snapshot,
+    )
+    return commands[0], snapshot
 
 
 def test_slurm_bulk_state_runs_one_squeue_call_for_many_jobs(monkeypatch) -> None:
@@ -158,10 +204,9 @@ def test_slurm_dispatch_delegates_resource_isolation_to_slurm(monkeypatch, tmp_p
         snapshot=snapshot,
     )
 
-    # SLURM cgroups already mask GPUs and pin CPU affinity, so the worker
-    # leaves the inherited environment alone.
+    # SLURM handles accelerator visibility and CPU affinity.
     assert snapshot.prepare_job.call_args.kwargs["cpu_indices"] is None
-    assert snapshot.prepare_job.call_args.kwargs["gpu_indices"] is None
+    assert snapshot.prepare_job.call_args.kwargs["accelerator_indices"] is None
 
 
 def test_slurm_dispatch_kills_jobs_with_invalid_dependencies(monkeypatch, tmp_path) -> None:
@@ -193,6 +238,47 @@ def test_slurm_dispatch_kills_jobs_with_invalid_dependencies(monkeypatch, tmp_pa
     assert "--kill-on-invalid-dep=yes" in commands[1]
     dependency_index = commands[1].index("--dependency")
     assert commands[1][dependency_index + 1] == "afterok:42"
+
+
+def test_slurm_dispatch_maps_plain_gpu_count_directly(monkeypatch, tmp_path) -> None:
+    command, _ = _dispatch_task(Task(_slurm_gpu_test_task), SlurmExecutor(), monkeypatch, tmp_path)
+
+    assert "--gpus-per-node=2" in command
+
+
+def test_slurm_rules_resolve_constrained_accelerator(monkeypatch, tmp_path) -> None:
+    executor = SlurmExecutor(
+        rules=[
+            {
+                "when": {"accelerator_memory": 80, "accelerator_type": "cuda"},
+                "set": {"gpu-type": "a100-80gb"},
+            }
+        ]
+    )
+
+    command, _ = _dispatch_task(Task(_slurm_gpu_constrained_test_task), executor, monkeypatch, tmp_path)
+
+    assert "--gpus-per-node=a100-80gb:2" in command
+
+
+def test_slurm_rejects_unmapped_gpu_constraints(tmp_path) -> None:
+    work_unit = WorkUnit(root=Task(_slurm_gpu_constrained_test_task), dependencies=set())
+    workspace = cast("Workspace", MagicMock(spec=Workspace))
+    snapshot = MagicMock()
+    snapshot.prepare_job.return_value = ("job-local", ["python", "-m", "worker"], {}, tmp_path / "slurm.log")
+
+    with pytest.raises(ValueError, match="rules do not cover"):
+        SlurmExecutor()._dispatch(  # noqa: SLF001
+            work_unit=work_unit,
+            dependencies=set(),
+            workspace=workspace,
+            snapshot=snapshot,
+        )
+
+
+def test_slurm_rejects_tpus(monkeypatch, tmp_path) -> None:
+    with pytest.raises(ValueError, match="does not support 'tpu'"):
+        _dispatch_task(Task(_slurm_tpu_test_task), SlurmExecutor(), monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize(

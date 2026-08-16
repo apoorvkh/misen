@@ -142,9 +142,9 @@ def test_staging_contents_and_key_stability(tmp_path: Path, counted_run: list[li
         snapshot.prepare_job(
             _StubWorkUnit(),  # type: ignore[arg-type]
             workspace,
-            "cuda",
             cpu_indices=None,
-            gpu_indices=None,
+            accelerator_type="cuda",
+            accelerator_indices=None,
         )
 
     # Identical code -> identical content key (SOURCE_DATE_EPOCH pins the
@@ -304,7 +304,7 @@ def test_worker_shell_bootstrap_resolves_configured_tools(tmp_path: Path) -> Non
         snapshot_key=None,
         payload=str(tmp_path / "payload"),
         env_files=[],
-        worker_args=["--gpu-runtime", "cuda", JOB_LOG_PATH_ARG, str(tmp_path / "job.log")],
+        worker_args=[JOB_LOG_PATH_ARG, str(tmp_path / "job.log")],
     )
     assert '${env_file_paths[@]+"${env_file_paths[@]}"}' in script
     result = subprocess.run(  # noqa: S603
@@ -406,9 +406,9 @@ def test_bootstrap_dispatch_argv(tmp_path: Path) -> None:
     _job_id, argv, env_overrides, log_path = snapshot.prepare_job(
         _StubWorkUnit(),  # type: ignore[arg-type]
         workspace,
-        "cuda",
         cpu_indices=[0, 1],
-        gpu_indices=None,
+        accelerator_type="rocm",
+        accelerator_indices=[],
     )
     # Path transport: one self-contained shell program, with no transport.
     assert env_overrides == {}
@@ -419,14 +419,28 @@ def test_bootstrap_dispatch_argv(tmp_path: Path) -> None:
     assert str(snapshot.project_dir) in shell
     assert "/scratch/envs" in shell
     assert "--cpu-indices 0 1" in shell
+    assert "--accelerator-type rocm" in shell
+    assert "--accelerator-indices" in shell
     assert str(log_path) in shell
 
 
 # ---------- bootstrap (worker side, real uv) ----------
 
 
-def _run_materializer(snapshot: ProjectSnapshot, store_root: Path | str, payload_path: str) -> None:
+def _run_materializer(
+    snapshot: ProjectSnapshot,
+    store_root: Path | str,
+    payload_path: str,
+    *,
+    accelerator_type: str = "cuda",
+    accelerator_indices: list[int] | None = None,
+) -> None:
     """Invoke the path-only worker materializer directly."""
+    accelerator_args = (
+        []
+        if accelerator_indices is None
+        else ["--accelerator-type", accelerator_type, "--accelerator-indices", *map(str, accelerator_indices)]
+    )
     tyro.cli(
         materialize_env.main,
         args=[
@@ -436,8 +450,7 @@ def _run_materializer(snapshot: ProjectSnapshot, store_root: Path | str, payload
             str(store_root),
             "--payload",
             payload_path,
-            "--gpu-runtime",
-            "cuda",
+            *accelerator_args,
             JOB_LOG_PATH_ARG,
             str(Path(store_root) / "job.log"),
         ],
@@ -453,11 +466,14 @@ def test_bootstrap_builds_reuses_and_execs(
     snapshot = ProjectSnapshot(workspace=workspace, prewarm=False)
     payload_ref = workspace.put_job_file(snapshot.submission_id, "JOB.pkl", b"payload")
 
-    _run_materializer(snapshot, store_root, payload_ref)
+    _run_materializer(snapshot, store_root, payload_ref, accelerator_type="rocm", accelerator_indices=[])
     path, argv, env = captured_exec[-1]
     assert path == argv[0] == _uv_bin()
     assert "misen.utils.execute" in argv
     assert argv[argv.index("--payload") + 1] == payload_ref  # disk refs are paths
+    assert argv[argv.index("--accelerator-type") + 1] == "rocm"
+    accelerator_flag = argv.index("--accelerator-indices")
+    assert argv[accelerator_flag + 1].startswith("--")
 
     overlay_venv = Path(env["VIRTUAL_ENV"])
     assert overlay_venv.is_relative_to(store_root / "overlay-envs")
@@ -536,8 +552,6 @@ def test_materializer_removes_corrupt_transported_snapshot(tmp_path: Path) -> No
                 str(store_root),
                 "--payload",
                 payload,
-                "--gpu-runtime",
-                "cuda",
                 JOB_LOG_PATH_ARG,
                 str(store_root / "job.log"),
             ],
@@ -583,7 +597,7 @@ def test_bash_transport_fetches_before_materialization(tmp_path: Path, monkeypat
         snapshot_key=snapshot.snapshot_key,
         payload=payload_ref,
         env_files=[env_ref],
-        worker_args=["--gpu-runtime", "cuda", JOB_LOG_PATH_ARG, str(store_root / "job.log")],
+        worker_args=[JOB_LOG_PATH_ARG, str(store_root / "job.log")],
     )
     assert '${env_file_refs[@]+"${!env_file_refs[@]}"}' in bootstrap
     result = subprocess.run([bash_bin, "-c", bootstrap], check=True, capture_output=True, text=True)  # noqa: S603

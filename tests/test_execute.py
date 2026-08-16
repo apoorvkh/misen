@@ -29,18 +29,20 @@ class _RecordingWorkspace:
         yield
 
 
-def test_execute_forwards_indices_to_resource_binding(tmp_path, monkeypatch) -> None:
+def test_execute_forwards_assigned_resources_to_binding(tmp_path, monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     payload_marker = tmp_path / "payload-ran.txt"
 
     def fake_apply_resource_binding(
-        *, cpu_indices: object, gpu_indices: object, gpu_runtime: str
+        *, cpu_indices: object, accelerator_type: object, accelerator_indices: object
     ) -> None:
-        calls.append({
-            "cpu_indices": cpu_indices,
-            "gpu_indices": gpu_indices,
-            "gpu_runtime": gpu_runtime,
-        })
+        calls.append(
+            {
+                "cpu_indices": cpu_indices,
+                "accelerator_type": accelerator_type,
+                "accelerator_indices": accelerator_indices,
+            }
+        )
 
     monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
 
@@ -49,15 +51,22 @@ def test_execute_forwards_indices_to_resource_binding(tmp_path, monkeypatch) -> 
 
     payload_path = tmp_path / "payload.pkl"
     payload_path.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": payload_fn}))
+    loads = execute_mod.cloudpickle.loads
+
+    def checked_loads(data: bytes) -> object:
+        assert calls  # Binding must happen before payload imports/deserialization.
+        return loads(data)
+
+    monkeypatch.setattr(execute_mod.cloudpickle, "loads", checked_loads)
 
     execute_mod.execute(
         payload=payload_path,
         cpu_indices=[1, 2],
-        gpu_indices=[0],
-        gpu_runtime="cuda",
+        accelerator_type="rocm",
+        accelerator_indices=[],
     )
 
-    assert calls == [{"cpu_indices": [1, 2], "gpu_indices": [0], "gpu_runtime": "cuda"}]
+    assert calls == [{"cpu_indices": [1, 2], "accelerator_type": "rocm", "accelerator_indices": []}]
     assert payload_marker.read_text(encoding="utf-8") == "ran"
 
 
@@ -67,19 +76,21 @@ def test_execute_passes_none_indices_when_scheduler_isolates(tmp_path, monkeypat
     payload_path.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": lambda: None}))
 
     def fake_apply_resource_binding(
-        *, cpu_indices: object, gpu_indices: object, gpu_runtime: str
+        *, cpu_indices: object, accelerator_type: object, accelerator_indices: object
     ) -> None:
-        calls.append({
-            "cpu_indices": cpu_indices,
-            "gpu_indices": gpu_indices,
-            "gpu_runtime": gpu_runtime,
-        })
+        calls.append(
+            {
+                "cpu_indices": cpu_indices,
+                "accelerator_type": accelerator_type,
+                "accelerator_indices": accelerator_indices,
+            }
+        )
 
     monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
 
     execute_mod.execute(payload=payload_path)
 
-    assert calls == [{"cpu_indices": None, "gpu_indices": None, "gpu_runtime": "cuda"}]
+    assert calls == [{"cpu_indices": None, "accelerator_type": "cuda", "accelerator_indices": None}]
 
 
 def test_execute_streams_explicit_job_log_path(tmp_path) -> None:

@@ -157,6 +157,39 @@ class SlurmExecutor(Executor[SlurmJob]):
         resources = work_unit.resources
         label = work_unit_label(work_unit)
         logger.info("Submitting SLURM work unit %s with %d dependency job(s).", label, len(dependencies))
+        flags = dict(self.default_flags)
+        flags.update(
+            {
+                key: value
+                for key, value in (
+                    ("partition", self.partition),
+                    ("account", self.account),
+                    ("qos", self.qos),
+                    ("constraint", self.constraint),
+                )
+                if value is not None
+            }
+        )
+        matched_resource_keys: set[str] = set()
+        for rule in self.rules:
+            if all(_condition_matches(resources[key], condition) for key, condition in rule.when.items()):
+                matched_resource_keys.update(rule.when)
+                flags.update(rule.set)
+
+        gpu_type = flags.pop("gpu-type", None)
+        if resources["accelerators"] > 0:
+            accelerator_type = resources["accelerator_type"]
+            if accelerator_type not in {"cuda", "rocm", "xpu"}:
+                msg = f"SlurmExecutor does not support {accelerator_type!r} accelerators."
+                raise ValueError(msg)
+            required_keys = {"accelerator_memory"} if resources["accelerator_memory"] is not None else set()
+            if accelerator_type != "cuda":
+                required_keys.add("accelerator_type")
+            if missing := required_keys - matched_resource_keys:
+                msg = f"SlurmExecutor rules do not cover {sorted(missing)} for resources {resources!r}."
+                raise ValueError(msg)
+            count = resources["accelerators"]
+            flags["gpus-per-node"] = f"{gpu_type}:{count}" if gpu_type else count
 
         sbatch_cmd = [
             _resolve_slurm_cmd("sbatch"),
@@ -174,28 +207,6 @@ class SlurmExecutor(Executor[SlurmJob]):
             "--time",
             str(resources["time"]),
         ]
-
-        flags = dict(self.default_flags)
-        flags.update(
-            {
-                key: value
-                for key, value in (
-                    ("partition", self.partition),
-                    ("account", self.account),
-                    ("qos", self.qos),
-                    ("constraint", self.constraint),
-                )
-                if value is not None
-            }
-        )
-        for rule in self.rules:
-            if all(_condition_matches(resources[key], condition) for key, condition in rule.when.items()):
-                flags.update(rule.set)
-
-        gpu_type = flags.pop("gpu-type", None)
-        if resources["gpus"] > 0:
-            flags["gpus-per-node"] = f"{gpu_type}:{resources['gpus']}" if gpu_type else resources["gpus"]
-
         for flag in sorted(flags):
             value = flags[flag]
             if value is None or value is False:
@@ -224,9 +235,9 @@ class SlurmExecutor(Executor[SlurmJob]):
         job_id, argv, env_overrides, log_path = prepare(
             work_unit=work_unit,
             workspace=workspace,
-            gpu_runtime=resources["gpu_runtime"],
             cpu_indices=None,
-            gpu_indices=None,
+            accelerator_type=resources["accelerator_type"],
+            accelerator_indices=None,
         )
 
         # ``argv`` already carries ``--job-log-path`` so the worker can
@@ -268,7 +279,14 @@ class SlurmExecutor(Executor[SlurmJob]):
         )
 
 
-_ResourceKey: TypeAlias = Literal["time", "memory", "cpus", "gpus", "gpu_memory", "gpu_runtime"]
+_ResourceKey: TypeAlias = Literal[
+    "time",
+    "memory",
+    "cpus",
+    "accelerators",
+    "accelerator_type",
+    "accelerator_memory",
+]
 _OperatorName: TypeAlias = Literal["eq", "ne", "lt", "le", "gt", "ge", "contains", "is_", "is_not"]
 _SetValue: TypeAlias = str | int | float | bool | None | list[str]
 

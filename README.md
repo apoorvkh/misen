@@ -181,18 +181,41 @@ class TrainingSweep(Experiment):
 Declare what a task needs:
 
 ```python
-@meta(id="...", cache=True, resources={"gpus": 1, "memory": 32})
+from misen import Task, meta
+
+@meta(
+    cache=True,
+    resources={
+        "memory": 32,
+        "accelerators": 4,
+        "accelerator_type": "cuda",
+        "accelerator_memory": 40,
+    },
+)
 def train(lr: float, dim: int) -> nn.Module: ...
 ```
 
-Defaults: 1 CPU, 8 GiB RAM, 0 GPUs. Fields: `time`, `memory`, `cpus`, `gpus`, `gpu_memory`, `gpu_runtime` (`"cuda" | "rocm" | "xpu"`).
+Defaults: 1 CPU, 8 GiB host RAM, 60 minutes, and 0 accelerators. The accelerator fields are `accelerators`, `accelerator_type`, and `accelerator_memory` in GiB per device. `AcceleratorType` is `Literal["cuda", "rocm", "xpu", "mps", "tpu"]`; its default is `"cuda"`.
 
-At runtime, `misen` allocates at least the resources you request and binds them to the task process. `LocalExecutor` masks GPUs via `CUDA_VISIBLE_DEVICES` and pins CPU affinity; `SlurmExecutor` lets SLURM's cgroups handle isolation. Either way, your task code reads the same runtime view — `os.sched_getaffinity(0)` for CPU cores, `range(torch.cuda.device_count())` for GPUs.
+The type is concrete rather than `"gpu"` or `"auto"`: task code normally supports a particular backend. A resource function can choose the type from task arguments when an implementation supports several backends.
+
+An importing project can replace the request when it knows another execution-equivalent shape is appropriate, without changing task identity:
+
+```python
+task_from_project_a = Task(train, lr=0.001, dim=512)
+task_for_project_b = task_from_project_a.with_resources(accelerators=2, accelerator_memory=80)
+```
+
+Resource functions can compute the request from task arguments when model size or tensor parallelism is argument-specific. The request describes how the task intends to run; executors translate it into site-specific allocation flags. Hardware names such as a SLURM GRES type therefore stay out of task metadata.
+
+When several non-cacheable tasks execute sequentially in one work unit, Misen takes the maximum accelerator count and memory requirement; accelerator-using tasks must agree on `accelerator_type`.
+
+At runtime, `LocalExecutor` subdivides maskable GPU-family devices and the final worker applies their visibility immediately before loading task code. A TPU task must request the complete configured pool, which Misen reserves exclusively; framework-specific TPU activation remains the task environment's responsibility. Local memory-per-device constraints are rejected because the current inventory cannot verify them. `SlurmExecutor` maps supported GPU-family counts directly and uses cluster-specific rules to recognize memory and non-default type constraints; an unrecognized constraint is rejected rather than silently under-provisioned. TPU and MPS requests are currently rejected by `SlurmExecutor`. SLURM's cgroups handle isolation.
 
 CPU affinity and cgroup membership are inherited by children, so subprocesses (`subprocess`, `multiprocessing`) and native threading libraries automatically stay within the allotment. Three patterns to keep in mind:
 
 - **Sizing:** `os.cpu_count()` reports the whole machine. Use `len(os.sched_getaffinity(0))` for pool sizes, `n_jobs`, DataLoader workers, etc.
-- **Native threading libs (OpenMP, MKL, OpenBLAS, …):** `LocalExecutor` exports `OMP_NUM_THREADS` and friends to match the assignment. `SlurmExecutor` touches nothing — if you want OpenMP saturation matched to your CPU request, either configure your cluster's `srun` to propagate `SLURM_CPUS_PER_TASK → OMP_NUM_THREADS`, or set it yourself early in the task: `os.environ.setdefault("OMP_NUM_THREADS", str(len(os.sched_getaffinity(0))))`.
+- **Native threading libs (OpenMP, MKL, OpenBLAS, …):** `LocalExecutor` exports `OMP_NUM_THREADS` and friends to match the assignment. `SlurmExecutor` leaves thread counts unset — if you want OpenMP saturation matched to your CPU request, either configure your cluster's `srun` to propagate `SLURM_CPUS_PER_TASK → OMP_NUM_THREADS`, or set it yourself early in the task: `os.environ.setdefault("OMP_NUM_THREADS", str(len(os.sched_getaffinity(0))))`.
 - **Libraries that reset affinity at import** (some MKL/NumPy builds, certain CUDA runtimes): re-pin after the offending import with `os.sched_setaffinity(0, os.sched_getaffinity(0))`.
 
 For a per-task scratch directory, give the function a plain `Path` parameter and bind the `SCRATCH_DIR` sentinel to it when constructing the task: `Task(train, scratch_dir=SCRATCH_DIR)`. The signature stays misen-agnostic — you can call the function directly with any directory in a test or notebook — and `misen` resolves the sentinel to a fresh directory at execution time, excluding it from the task's identity automatically (no `@meta(exclude=...)` needed). Sentinels must be top-level `Task(...)` arguments: using `SCRATCH_DIR` as a function-signature default or nesting it inside a container raises a `TypeError` when the `Task` is constructed.
@@ -204,7 +227,7 @@ To flow files written into the scratch directory (model checkpoints, generated i
 ```python
 from misen import FileMap, SCRATCH_DIR, Task, meta
 
-@meta(cache=True, resources={"gpus": 1})
+@meta(cache=True, resources={"accelerators": 1})
 def train(scratch_dir: Path) -> FileMap:
     # training loop writes ckpt_<step>.pt and tb_logs/ into scratch_dir
     return (FileMap()
@@ -237,7 +260,19 @@ Switch backends from the CLI or a config file — no code changes:
 python -m my_project.experiments.training --executor-type slurm
 ```
 
-For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`, `qos`, `constraint`, plus any `default_flags`). For GPUs on a local machine, declare what's available to the executor via `num_cuda_gpus` / `cuda_gpu_indices` (same for `rocm` and `xpu`).
+For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`, `qos`, `constraint`, plus any `default_flags`). Executor `rules` match the resource fields directly, then set local flags such as `gpu-type`, `partition`, or `constraint`. For example, this site declares how to satisfy Project B's request above:
+
+```toml
+[[executor.rules]]
+[executor.rules.when]
+accelerator_memory = 80
+accelerator_type = "cuda"
+[executor.rules.set]
+gpu-type = "a100-80gb"
+partition = "gpu"
+```
+
+Accelerator count with the default CUDA type needs no rule; specified memory or a non-default type must be covered by matching rules. Configure `LocalExecutor` with `accelerators`, `accelerator_type`, and optional `accelerator_indices`. TPU jobs must request the complete configured count. MPS has no visibility-mask environment variable, so its configured capacity controls scheduling but cannot provide process-level device isolation.
 
 Before dispatching, `misen` takes a **snapshot** of your project: your code (each local package built to a wheel, or an sdist for packages with native extensions) plus dependency metadata (`pyproject.toml`, `uv.lock`, `.python-version`, and pixi manifests). The snapshot is content-hashed and published into the **workspace**, so resubmitting unchanged code stores nothing new, and remote jobs fetch code through the same storage that already carries results and logs — no shared filesystem needed beyond what the workspace itself uses. Jobs stay pinned to the code you submitted while you keep editing. Copies of `.env` files and per-job payloads travel separately as submission-scoped workspace files; they can hold secrets and are retained until workspace pruning or manual removal, while the content-addressed snapshot never contains secrets.
 

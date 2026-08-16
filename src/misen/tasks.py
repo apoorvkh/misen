@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, Unp
 
 from misen.exceptions import CacheError
 from misen.sentinels import SCRATCH_DIR
-from misen.task_metadata import Resources, TaskMetadata, resolve_task_metadata
+from misen.task_metadata import Resources, TaskMetadata, _normalize_resources, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object, task_function_signature
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
@@ -161,7 +161,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         """Create a copy of this task with selected :class:`Resources` fields replaced.
 
         Useful when an upstream-authored task either declares conservative
-        resources or does not know its precise requirements (e.g. GPU memory);
+        resources or does not know its precise requirements (e.g. accelerator memory);
         a downstream caller can override only the fields they need, leaving
         the rest intact. Task identity (``task_hash``, ``meta``, ``args``,
         ``dependencies``) is preserved — only the resource request is adjusted.
@@ -176,12 +176,9 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         Raises:
             TypeError: If an override names a field not on :class:`Resources`.
+            ValueError: If the resulting accelerator request is invalid.
         """
-        invalid = set(overrides) - set(Resources.__annotations__)
-        if invalid:
-            msg = f"Unknown Resources fields: {sorted(invalid)}"
-            raise TypeError(msg)
-        new_resources = cast("Resources", {**self.resources, **overrides})
+        new_resources = _normalize_resources(cast("Resources", {**self.resources, **overrides}))
 
         state = self.__getstate__()
         state["resources"] = new_resources

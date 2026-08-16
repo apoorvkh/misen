@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from misen.utils.serde import Serializer
 
 __all__ = [
-    "GpuRuntime",
+    "AcceleratorType",
     "Resources",
     "TaskMetadata",
     "aggregate_resources",
@@ -43,8 +43,7 @@ __all__ = [
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-GpuRuntime: TypeAlias = Literal["cuda", "rocm", "xpu"]
+AcceleratorType: TypeAlias = Literal["cuda", "rocm", "xpu", "mps", "tpu"]
 
 
 class Resources(TypedDict, total=False):
@@ -54,71 +53,89 @@ class Resources(TypedDict, total=False):
         time: Requested wall-clock time in minutes.
         memory: Memory in GiB.
         cpus: CPU cores.
-        gpus: GPU count.
-        gpu_memory: Optional requested GPU memory in GiB.
-        gpu_runtime: Requested GPU runtime.
+        accelerators: Number of accelerator devices.
+        accelerator_type: Concrete accelerator backend.
+        accelerator_memory: Minimum memory in GiB per device.
     """
 
     time: int
     memory: int
     cpus: int
-    gpus: int
-    gpu_memory: int | None
-    gpu_runtime: GpuRuntime
+    accelerators: int
+    accelerator_type: AcceleratorType
+    accelerator_memory: int | None
 
 
 _DEFAULT_RESOURCES: Resources = {
     "time": 60,
     "memory": 8,
     "cpus": 1,
-    "gpus": 0,
-    "gpu_memory": None,
-    "gpu_runtime": "cuda",
+    "accelerators": 0,
+    "accelerator_type": "cuda",
+    "accelerator_memory": None,
 }
 
 
-def aggregate_resources(resources: Iterable[Resources]) -> Resources:
+def _normalize_resources(resources: Resources) -> Resources:
+    """Fill defaults and validate a resource request."""
+    unknown = set(resources) - Resources.__annotations__.keys()
+    if unknown:
+        msg = f"Unknown Resources fields: {sorted(unknown)}"
+        raise TypeError(msg)
+
+    normalized = cast("Resources", {**_DEFAULT_RESOURCES, **resources})
+    if normalized["accelerator_type"] not in ("cuda", "rocm", "xpu", "mps", "tpu"):
+        msg = f"Unsupported accelerator type: {normalized['accelerator_type']!r}."
+        raise ValueError(msg)
+    count = normalized["accelerators"]
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        msg = "accelerators must be a nonnegative integer."
+        raise ValueError(msg)
+    memory = normalized["accelerator_memory"]
+    if memory is not None and (isinstance(memory, bool) or not isinstance(memory, int) or memory < 1):
+        msg = "accelerator_memory must be None or a positive integer number of GiB per device."
+        raise ValueError(msg)
+    if count == 0 and memory is not None:
+        msg = "accelerator_memory requires accelerators > 0."
+        raise ValueError(msg)
+    return normalized
+
+
+def aggregate_resources(resources: Iterable[Resources], *, sum_time: bool = True) -> Resources:
     """Combine multiple resource requests into one conservative request.
 
-    CPU/memory/GPU counts use ``max`` (pick the largest request), runtimes
-    are summed, and ``gpu_runtime`` must agree across GPU-using requests.
+    CPU, memory, and accelerator counts use ``max``. Accelerator-using tasks
+    must agree on their type.
 
     Args:
-        resources: Iterable of fully-populated :class:`Resources` to merge.
+        resources: Resource requests to normalize and merge.
+        sum_time: Sum wall-clock limits for sequential work, or take their
+            maximum when merging alternative handles for the same task.
 
     Returns:
         A single :class:`Resources` that satisfies every input request.
 
     Raises:
-        ValueError: If the iterable is empty or GPU-using requests disagree
-            on ``gpu_runtime``.
+        TypeError: If a request contains an unknown field.
+        ValueError: If the iterable is empty or active accelerator types conflict.
     """
-    resource_list = list(resources)
+    resource_list = [_normalize_resources(resource) for resource in resources]
     if not resource_list:
         msg = "aggregate_resources requires at least one Resources instance."
         raise ValueError(msg)
-
-    gpu_runtimes = {r["gpu_runtime"] for r in resource_list if r["gpus"] > 0}
-    match len(gpu_runtimes):
-        case 0:
-            gpu_runtime: GpuRuntime = "cuda"
-        case 1:
-            (gpu_runtime,) = gpu_runtimes
-        case _:
-            msg = f"Incompatible gpu_runtime requirements: {gpu_runtimes}"
-            raise ValueError(msg)
+    accelerator_types = sorted({r["accelerator_type"] for r in resource_list if r["accelerators"] > 0})
+    if len(accelerator_types) > 1:
+        msg = f"Incompatible accelerator types: {accelerator_types}."
+        raise ValueError(msg)
+    accelerator_memories = [r["accelerator_memory"] for r in resource_list if r["accelerator_memory"] is not None]
 
     return Resources(
-        time=sum(r["time"] for r in resource_list),
+        time=(sum if sum_time else max)(r["time"] for r in resource_list),
         memory=max(r["memory"] for r in resource_list),
         cpus=max(r["cpus"] for r in resource_list),
-        gpus=max(r["gpus"] for r in resource_list),
-        gpu_memory=(
-            None
-            if all(r["gpu_memory"] is None for r in resource_list)
-            else max(r["gpu_memory"] for r in resource_list if r["gpu_memory"] is not None)
-        ),
-        gpu_runtime=gpu_runtime,
+        accelerators=max(r["accelerators"] for r in resource_list),
+        accelerator_type=accelerator_types[0] if accelerator_types else "cuda",
+        accelerator_memory=max(accelerator_memories) if accelerator_memories else None,
     )
 
 
@@ -148,7 +165,7 @@ class TaskMetadata(Struct, frozen=True):
 
     def resolve_resources(self, *args: Any, **kwargs: Any) -> Resources:
         """Compute resource requirements for this task, merging with defaults."""
-        return cast("Resources", {**_DEFAULT_RESOURCES, **self.resources(*args, **kwargs)})
+        return _normalize_resources(self.resources(*args, **kwargs))
 
 
 def meta(

@@ -9,13 +9,11 @@ from typing import TYPE_CHECKING
 import psutil
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from misen.task_metadata import GpuRuntime
+    from misen.task_metadata import AcceleratorType
 
 __all__ = ["apply_resource_binding"]
 
-_GPU_MASK_VARS: Mapping[GpuRuntime, tuple[str, ...]] = {
+_ACCELERATOR_MASK_VARS: dict[AcceleratorType, tuple[str, ...]] = {
     "cuda": ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"),
     "rocm": ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"),
     "xpu": ("ZE_AFFINITY_MASK",),
@@ -40,17 +38,14 @@ _DYNAMIC_THREAD_DISABLE_ENV = {
 
 def apply_resource_binding(
     cpu_indices: list[int] | None,
-    gpu_indices: list[int] | None,
-    gpu_runtime: GpuRuntime,
+    accelerator_type: AcceleratorType = "cuda",
+    accelerator_indices: list[int] | None = None,
 ) -> None:
     """Bind current process to assigned resources.
 
-    Each resource type is bound only when the executor passes explicit indices.
-    Backends that delegate isolation to a scheduler (e.g. ``SlurmExecutor``,
-    where SLURM cgroups already mask GPUs and pin CPU affinity) pass ``None``
-    so the worker leaves the inherited environment untouched. The runtime view
-    (``CUDA_VISIBLE_DEVICES``, ``os.sched_getaffinity``) is the standardized
-    interface user code reads to discover its allotment.
+    Each resource type is bound only when an executor passes explicit indices.
+    Backends that delegate isolation to a scheduler (e.g. ``SlurmExecutor``)
+    pass ``None`` so the worker preserves inherited affinity and visibility.
     """
     for key, value in _DYNAMIC_THREAD_DISABLE_ENV.items():
         os.environ[key] = value
@@ -61,10 +56,10 @@ def apply_resource_binding(
             os.environ[key] = cpu_count_str
         _apply_cpu_affinity(cpu_indices)
 
-    if gpu_indices is not None:
-        gpu_mask = ",".join(str(index) for index in gpu_indices)
-        for key in _GPU_MASK_VARS[gpu_runtime]:
-            os.environ[key] = gpu_mask
+    if accelerator_indices is not None:
+        mask = ",".join(map(str, accelerator_indices))
+        for key in _ACCELERATOR_MASK_VARS.get(accelerator_type, ()):
+            os.environ[key] = mask
 
 
 def _apply_cpu_affinity(cpu_indices: list[int]) -> None:

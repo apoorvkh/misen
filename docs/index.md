@@ -11,7 +11,7 @@ between the main abstractions.
 
 The intended public API is:
 
-- `@meta`, `TaskMetadata`, `Resources`
+- `@meta`, `TaskMetadata`, `Resources`, `AcceleratorType`
 - `Task`
 - `Workspace` (`DiskWorkspace` by default)
 - `Executor` (`LocalExecutor`, `InProcessExecutor`, `SlurmExecutor`)
@@ -79,11 +79,12 @@ applied by Python at call time and would bypass the argument resolver,
 leaking the raw sentinel object into the function body.
 
 To discover the resources allotted to a task at runtime, read what the
-runtime sees: `os.sched_getaffinity(0)` for CPU cores and the GPU runtime's
-visibility view (e.g. `range(torch.cuda.device_count())`). The same task
-definition runs locally or on SLURM — `LocalExecutor` masks GPUs via
-`CUDA_VISIBLE_DEVICES` and pins CPU affinity, while `SlurmExecutor` lets
-SLURM's cgroups handle isolation.
+runtime sees: `os.sched_getaffinity(0)` for CPU cores and the accelerator's
+visibility view (e.g. `range(torch.cuda.device_count())`), or the PJRT/XLA
+device inventory for a TPU task. The same task
+definition runs locally or on SLURM — `LocalExecutor` applies the configured
+accelerator type's visibility mask when one exists and pins CPU affinity, while
+`SlurmExecutor` lets SLURM's cgroups handle isolation.
 
 ## Serialization
 

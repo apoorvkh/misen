@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from misen.executor import Executor, Job
+from misen.task_metadata import AcceleratorType  # noqa: TC001  # needed by msgspec during config decoding
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from io import FileIO
     from types import FrameType
 
-    from misen.task_metadata import GpuRuntime, Resources
+    from misen.task_metadata import Resources
     from misen.utils.snapshot import ProjectSnapshot
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
@@ -51,8 +52,8 @@ class LocalJob(Job):
         "_log_fp",
         "_process",
         "_started_at",
+        "assigned_accelerator_indices",
         "assigned_cpu_indices",
-        "assigned_gpu_indices",
         "dependencies",
         "snapshot",
         "workspace",
@@ -71,7 +72,7 @@ class LocalJob(Job):
         self.snapshot = snapshot
         self.workspace = workspace
         self.assigned_cpu_indices: list[int] = []
-        self.assigned_gpu_indices: list[int] = []
+        self.assigned_accelerator_indices: list[int] = []
         self._process: subprocess.Popen[bytes] | None = None
         self._log_fp: FileIO | None = None
         self._cached_state: _JobState = "pending"
@@ -107,14 +108,14 @@ class LocalJob(Job):
         *,
         log_fp: FileIO,
         cpu_indices: list[int],
-        gpu_indices: list[int],
+        accelerator_indices: list[int],
     ) -> None:
         """Attach subprocess/log handles and mark the job running."""
         with self._lock:
             self._process = process
             self._log_fp = log_fp
             self.assigned_cpu_indices = list(cpu_indices)
-            self.assigned_gpu_indices = list(gpu_indices)
+            self.assigned_accelerator_indices = list(accelerator_indices)
             self._cached_state = "running"
             self._started_at = time.monotonic()
             logger.info(
@@ -178,12 +179,9 @@ class LocalExecutor(Executor[LocalJob]):
     max_memory: int | Literal["all"] = "all"
     num_cpus: int | Literal["all"] = "all"
     cpu_indices: list[int] | None = None
-    num_cuda_gpus: int = 0
-    cuda_gpu_indices: list[int] | None = None
-    num_rocm_gpus: int = 0
-    rocm_gpu_indices: list[int] | None = None
-    num_xpu_gpus: int = 0
-    xpu_gpu_indices: list[int] | None = None
+    accelerators: int = 0
+    accelerator_indices: list[int] | None = None
+    accelerator_type: AcceleratorType = "cuda"
     prewarm_envs: bool = True
     enforce_time_limits: bool = False
 
@@ -220,46 +218,48 @@ class LocalExecutor(Executor[LocalJob]):
                 raise ValueError(msg)
             cpu_indices = sorted(set(self.cpu_indices))
 
-        gpu_indices_by_runtime: dict[str, list[int]] = {}
-        for runtime, count, indices in (
-            ("cuda", self.num_cuda_gpus, self.cuda_gpu_indices),
-            ("rocm", self.num_rocm_gpus, self.rocm_gpu_indices),
-            ("xpu", self.num_xpu_gpus, self.xpu_gpu_indices),
-        ):
-            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-                msg = f"num_{runtime}_gpus must be a nonnegative integer."
+        if self.accelerator_type not in ("cuda", "rocm", "xpu", "mps", "tpu"):
+            msg = f"Unsupported accelerator type: {self.accelerator_type!r}."
+            raise ValueError(msg)
+        if isinstance(self.accelerators, bool) or not isinstance(self.accelerators, int) or self.accelerators < 0:
+            msg = "accelerators must be a nonnegative integer."
+            raise ValueError(msg)
+        if self.accelerators and self.accelerator_indices is not None:
+            msg = "accelerators and accelerator_indices should not both be passed to LocalExecutor."
+            raise ValueError(msg)
+        if self.accelerator_indices is None:
+            accelerator_indices = list(range(self.accelerators)) if self.accelerator_type != "tpu" else []
+        else:
+            if self.accelerator_type == "tpu":
+                msg = "LocalExecutor does not support accelerator_indices for TPUs."
                 raise ValueError(msg)
-            if indices is not None:
-                if count:
-                    msg = f"num_{runtime}_gpus and {runtime}_gpu_indices should not both be passed to LocalExecutor."
-                    raise ValueError(msg)
-                if any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in indices):
-                    msg = f"{runtime}_gpu_indices must contain nonnegative integer GPU indices."
-                    raise ValueError(msg)
-                gpu_indices_by_runtime[runtime] = sorted(set(indices))
-            else:
-                gpu_indices_by_runtime[runtime] = list(range(count))
+            if any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in self.accelerator_indices):
+                msg = "accelerator_indices must contain nonnegative integer indices."
+                raise ValueError(msg)
+            accelerator_indices = sorted(set(self.accelerator_indices))
+        accelerator_count = self.accelerators or len(accelerator_indices)
+        if self.accelerator_type == "mps" and accelerator_indices not in ([], [0]):
+            msg = "MPS exposes a single GPU at index 0."
+            raise ValueError(msg)
 
         self._resource_budget = _ResourceBudget(
             memory=self.max_memory,
             cpus=len(cpu_indices),
-            cuda_gpus=len(gpu_indices_by_runtime["cuda"]),
-            rocm_gpus=len(gpu_indices_by_runtime["rocm"]),
-            xpu_gpus=len(gpu_indices_by_runtime["xpu"]),
+            accelerators=accelerator_count,
+            accelerator_type=self.accelerator_type,
         )
         self._scheduler = _LocalScheduler(
             available_budget=self._resource_budget,
             available_cpu_indices=cpu_indices,
-            available_gpu_indices=gpu_indices_by_runtime,
+            available_accelerator_indices=accelerator_indices,
             enforce_time_limits=self.enforce_time_limits,
         )
         logger.info(
-            "Initialized LocalExecutor budget: memory=%sGiB cpus=%d cuda_gpus=%d rocm_gpus=%d xpu_gpus=%d.",
+            "Initialized LocalExecutor budget: memory=%sGiB cpus=%d accelerators=%d type=%s.",
             self._resource_budget.memory,
             self._resource_budget.cpus,
-            self._resource_budget.cuda_gpus,
-            self._resource_budget.rocm_gpus,
-            self._resource_budget.xpu_gpus,
+            self._resource_budget.accelerators,
+            self._resource_budget.accelerator_type,
         )
 
     def _dispatch(
@@ -271,15 +271,17 @@ class LocalExecutor(Executor[LocalJob]):
     ) -> LocalJob:
         """Queue a work unit in the local scheduler."""
         resources = work_unit.resources
+        if resources["accelerator_memory"] is not None:
+            msg = "LocalExecutor cannot verify accelerator memory."
+            raise ValueError(msg)
         if not self._resource_budget.fits(resources):
             msg = (
                 "Requested resources exceed LocalExecutor limits: "
                 f"requested cpus={resources['cpus']}, memory={resources['memory']}, "
-                f"gpus={resources['gpus']} (runtime={resources['gpu_runtime']}); "
+                f"accelerators={resources['accelerators']} (type={resources['accelerator_type']}); "
                 f"limits cpus={self._resource_budget.cpus}, memory={self._resource_budget.memory}, "
-                f"cuda_gpus={self._resource_budget.cuda_gpus}, "
-                f"rocm_gpus={self._resource_budget.rocm_gpus}, "
-                f"xpu_gpus={self._resource_budget.xpu_gpus}."
+                f"accelerators={self._resource_budget.accelerators} "
+                f"(type={self._resource_budget.accelerator_type})."
             )
             raise ValueError(msg)
 
@@ -307,22 +309,20 @@ class LocalExecutor(Executor[LocalJob]):
 class _ResourceBudget:
     memory: int
     cpus: int
-    cuda_gpus: int
-    rocm_gpus: int
-    xpu_gpus: int
+    accelerators: int
+    accelerator_type: AcceleratorType
 
     def fits(self, resources: Resources) -> bool:
-        match resources["gpu_runtime"]:
-            case "cuda":
-                gpus = self.cuda_gpus
-            case "rocm":
-                gpus = self.rocm_gpus
-            case "xpu":
-                gpus = self.xpu_gpus
-            case runtime:
-                msg = f"Unsupported GPU runtime: {runtime!r}."
-                raise ValueError(msg)
-        return resources["cpus"] <= self.cpus and resources["memory"] <= self.memory and resources["gpus"] <= gpus
+        if resources["cpus"] > self.cpus or resources["memory"] > self.memory:
+            return False
+        if resources["accelerators"] == 0:
+            return True
+        count_fits = (
+            resources["accelerators"] == self.accelerators
+            if resources["accelerator_type"] == "tpu"
+            else resources["accelerators"] <= self.accelerators
+        )
+        return resources["accelerator_type"] == self.accelerator_type and count_fits
 
     def add(self, resources: Resources) -> _ResourceBudget:
         return self._adjust(resources, 1)
@@ -331,14 +331,11 @@ class _ResourceBudget:
         return self._adjust(resources, -1)
 
     def _adjust(self, resources: Resources, sign: Literal[-1, 1]) -> _ResourceBudget:
-        runtime = resources["gpu_runtime"]
-        gpu_delta = resources["gpus"] * sign
         return _ResourceBudget(
             memory=self.memory + resources["memory"] * sign,
             cpus=self.cpus + resources["cpus"] * sign,
-            cuda_gpus=self.cuda_gpus + (gpu_delta if runtime == "cuda" else 0),
-            rocm_gpus=self.rocm_gpus + (gpu_delta if runtime == "rocm" else 0),
-            xpu_gpus=self.xpu_gpus + (gpu_delta if runtime == "xpu" else 0),
+            accelerators=self.accelerators + resources["accelerators"] * sign,
+            accelerator_type=self.accelerator_type,
         )
 
 
@@ -350,9 +347,9 @@ class _LocalScheduler:
         "_pending",
         "_running",
         "_thread",
+        "available_accelerator_indices",
         "available_budget",
         "available_cpu_indices",
-        "available_gpu_indices",
         "enforce_time_limits",
     )
     _logger = logging.getLogger(__name__)
@@ -362,12 +359,12 @@ class _LocalScheduler:
         *,
         available_budget: _ResourceBudget,
         available_cpu_indices: list[int],
-        available_gpu_indices: dict[str, list[int]],
+        available_accelerator_indices: list[int],
         enforce_time_limits: bool = False,
     ) -> None:
         self.available_budget = available_budget
         self.available_cpu_indices = list(available_cpu_indices)
-        self.available_gpu_indices = {runtime: list(indices) for runtime, indices in available_gpu_indices.items()}
+        self.available_accelerator_indices = list(available_accelerator_indices)
         self.enforce_time_limits = enforce_time_limits
         self._pending: list[LocalJob] = []
         self._running: set[LocalJob] = set()
@@ -423,11 +420,7 @@ class _LocalScheduler:
 
             self._running.remove(job)
             self.available_budget = self.available_budget.add(job.resources)
-            self._release_allocations(
-                job.assigned_cpu_indices,
-                job.resources["gpu_runtime"],
-                job.assigned_gpu_indices,
-            )
+            self._release_allocations(job.assigned_cpu_indices, job.assigned_accelerator_indices)
             finished_any = True
             if state == "done":
                 self._logger.info("LocalScheduler observed job completion for %s.", job.work_unit)
@@ -459,13 +452,13 @@ class _LocalScheduler:
             allocations = self._reserve_indices(job.resources)
             if allocations is None:
                 continue
-            cpu_indices, gpu_indices = allocations
+            cpu_indices, accelerator_indices = allocations
 
             try:
-                self._launch_job(job, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
+                self._launch_job(job, cpu_indices=cpu_indices, accelerator_indices=accelerator_indices)
             except Exception:
                 self._logger.exception("Failed to launch local job for %s.", job.work_unit)
-                self._mark_pending_failed(job, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
+                self._mark_pending_failed(job, cpu_indices=cpu_indices, accelerator_indices=accelerator_indices)
                 progress_made = True
                 continue
 
@@ -475,7 +468,7 @@ class _LocalScheduler:
             progress_made = True
         return progress_made
 
-    def _launch_job(self, job: LocalJob, *, cpu_indices: list[int], gpu_indices: list[int]) -> None:
+    def _launch_job(self, job: LocalJob, *, cpu_indices: list[int], accelerator_indices: list[int]) -> None:
         log_fp: FileIO | None = None
         process: subprocess.Popen[bytes] | None = None
         try:
@@ -483,17 +476,17 @@ class _LocalScheduler:
             job.job_id, argv, env_overrides, job.log_path = prepare(
                 work_unit=job.work_unit,
                 workspace=job.workspace,
-                gpu_runtime=job.resources["gpu_runtime"],
                 cpu_indices=cpu_indices,
-                gpu_indices=gpu_indices,
+                accelerator_type=self.available_budget.accelerator_type,
+                accelerator_indices=accelerator_indices,
             )
             log_fp = job.log_path.open("ab", buffering=0)
             self._logger.debug(
-                "Launching local subprocess for %s with job_id=%s cpu_indices=%s gpu_indices=%s log=%s.",
+                "Launching local subprocess for %s with job_id=%s cpu_indices=%s accelerator_indices=%s log=%s.",
                 job.work_unit,
                 job.job_id,
                 cpu_indices,
-                gpu_indices,
+                accelerator_indices,
                 job.log_path,
             )
             process = subprocess.Popen(  # noqa: S603
@@ -508,7 +501,12 @@ class _LocalScheduler:
                 stderr=subprocess.STDOUT,
                 preexec_fn=_PREEXEC_FN,  # noqa: PLW1509
             )
-            job.set_process(process, log_fp=log_fp, cpu_indices=cpu_indices, gpu_indices=gpu_indices)
+            job.set_process(
+                process,
+                log_fp=log_fp,
+                cpu_indices=cpu_indices,
+                accelerator_indices=accelerator_indices,
+            )
         except Exception:
             if process is not None and process.poll() is None:
                 with contextlib.suppress(OSError):
@@ -532,30 +530,29 @@ class _LocalScheduler:
         cpu_indices = self.available_cpu_indices[:cpu_count]
         del self.available_cpu_indices[:cpu_count]
 
-        gpu_pool = self.available_gpu_indices[resources["gpu_runtime"]]
-        gpu_count = resources["gpus"]
-        if len(gpu_pool) < gpu_count:
+        accelerator_count = resources["accelerators"] if resources["accelerator_type"] != "tpu" else 0
+        if len(self.available_accelerator_indices) < accelerator_count:
             for index in cpu_indices:
                 insort(self.available_cpu_indices, index)
             return None
-        gpu_indices = gpu_pool[:gpu_count]
-        del gpu_pool[:gpu_count]
-        return cpu_indices, gpu_indices
+        accelerator_indices = self.available_accelerator_indices[:accelerator_count]
+        del self.available_accelerator_indices[:accelerator_count]
+        return cpu_indices, accelerator_indices
 
-    def _release_allocations(self, cpu_indices: list[int], gpu_runtime: GpuRuntime, gpu_indices: list[int]) -> None:
+    def _release_allocations(self, cpu_indices: list[int], accelerator_indices: list[int]) -> None:
         for index in cpu_indices:
             insort(self.available_cpu_indices, index)
-        for index in gpu_indices:
-            insort(self.available_gpu_indices[gpu_runtime], index)
+        for index in accelerator_indices:
+            insort(self.available_accelerator_indices, index)
 
     def _mark_pending_failed(
         self,
         job: LocalJob,
         *,
         cpu_indices: list[int] | None = None,
-        gpu_indices: list[int] | None = None,
+        accelerator_indices: list[int] | None = None,
     ) -> None:
-        self._release_allocations(cpu_indices or [], job.resources["gpu_runtime"], gpu_indices or [])
+        self._release_allocations(cpu_indices or [], accelerator_indices or [])
         job.mark_failed()
         if job in self._pending:
             self._pending.remove(job)

@@ -285,10 +285,10 @@ def _format_resources(resources: Resources | None) -> Text:
         return text
     text.append(f"{resources['cpus']} CPU")
     text.append(f" · {resources['memory']} GiB")
-    if resources["gpus"] > 0:
-        text.append(f" · {resources['gpus']} {resources['gpu_runtime']} GPU")
-        if resources["gpu_memory"] is not None:
-            text.append(f" ({resources['gpu_memory']} GiB)")
+    if resources["accelerators"] > 0:
+        text.append(f" · {resources['accelerators']}x {resources['accelerator_type']}")
+        if resources["accelerator_memory"] is not None:
+            text.append(f" (≥{resources['accelerator_memory']} GiB/device)")
     text.append(f" · {resources['time']}m")
     return text
 

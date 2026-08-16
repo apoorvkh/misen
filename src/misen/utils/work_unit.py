@@ -35,7 +35,7 @@ class WorkUnit:
 
     Tasks inside a WorkUnit execute sequentially in dependency order.
     Scheduler-facing resources are aggregated conservatively across contained
-    tasks (max for CPU/memory/GPU counts; sum for finite runtime).
+    tasks (max for CPU/memory/accelerator counts; sum for finite runtime).
     """
 
     __slots__ = ("dependencies", "graph", "resources", "root")
@@ -146,15 +146,17 @@ class WorkUnit:
             Cloudpickle payload bytes containing ``{"workspace": ..., "fn": ...}``
             where ``fn`` is a zero-arg callable.
         """
-        return cloudpickle.dumps({
-            "workspace": workspace,
-            "fn": functools.partial(
-                WorkUnit.execute,
-                graph=self.graph,
-                workspace=workspace,
-                job_id=job_id,
-            ),
-        })
+        return cloudpickle.dumps(
+            {
+                "workspace": workspace,
+                "fn": functools.partial(
+                    WorkUnit.execute,
+                    graph=self.graph,
+                    workspace=workspace,
+                    job_id=job_id,
+                ),
+            }
+        )
 
 
 def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
