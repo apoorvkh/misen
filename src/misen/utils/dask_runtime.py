@@ -18,8 +18,15 @@ DASK_CPUS_ENV = "MISEN_DASK_CPUS"
 DASK_MEMORY_GIB_ENV = "MISEN_DASK_MEMORY_GIB"
 DEFAULT_DASK_STARTUP_TIMEOUT = 600
 MIN_DASK_WORKERS = 2
-_DASK_HTTP_ADDRESS = "127.0.0.1:0"
+_DASK_HTTP_ADDRESS = "127.0.0.1:0"  # fail closed if Dask bypasses the no-HTTP override
 _DASK_SHUTDOWN_TIMEOUT = 30
+
+
+class _NoHttpServer:
+    """Work around dask/distributed#8136 by disabling its HTTP service."""
+
+    def start_http_server(self, *_args: object, **_kwargs: object) -> None:
+        """Do not open an HTTP listener."""
 
 
 def managed_cluster_script(
@@ -176,18 +183,24 @@ def run_role_from_env() -> bool:
 
 async def _run_scheduler(scheduler_file: Path) -> None:
     """Run a scheduler on a dynamic port and publish its address atomically."""
-    from distributed import Scheduler
+    import dask
+    from distributed import Scheduler as DaskScheduler
+
+    class Scheduler(_NoHttpServer, DaskScheduler):
+        """Dask scheduler with no HTTP service."""
 
     scheduler_file.parent.mkdir(parents=True, exist_ok=True)
-    temporary = scheduler_file.with_name(f".{scheduler_file.name}.{os.getpid()}.tmp")
-    try:
-        async with Scheduler(
+    with dask.config.set({"distributed.scheduler.http.routes": []}):
+        scheduler = Scheduler(
             port=0,
             local_directory=str(scheduler_file.parent),
             dashboard=False,
             dashboard_address=_DASK_HTTP_ADDRESS,
             allowed_failures=0,
-        ) as scheduler:
+        )
+    temporary = scheduler_file.with_name(f".{scheduler_file.name}.{os.getpid()}.tmp")
+    try:
+        async with scheduler:
             loop = asyncio.get_running_loop()
             shutdown = asyncio.Event()
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -230,18 +243,23 @@ async def _run_scheduler(scheduler_file: Path) -> None:
 
 async def _run_worker(address: str, *, nthreads: int, memory_gib: int) -> None:
     """Run one non-restarting Dask worker until its scheduler closes."""
-    from distributed import Worker
+    import dask
+    from distributed import Worker as DaskWorker
+
+    class Worker(_NoHttpServer, DaskWorker):
+        """Dask worker with no HTTP service."""
 
     timeout = positive_int_env(DASK_STARTUP_TIMEOUT_ENV, default=DEFAULT_DASK_STARTUP_TIMEOUT)
-    async with Worker(
-        address,
-        nthreads=nthreads,
-        memory_limit=f"{memory_gib} GiB",
-        death_timeout=timeout,
-        dashboard=False,
-        dashboard_address=_DASK_HTTP_ADDRESS,
-    ) as worker:
-        await worker.finished()
+    with dask.config.set({"distributed.worker.http.routes": []}):
+        async with Worker(
+            address,
+            nthreads=nthreads,
+            memory_limit=f"{memory_gib} GiB",
+            death_timeout=timeout,
+            dashboard=False,
+            dashboard_address=_DASK_HTTP_ADDRESS,
+        ) as worker:
+            await worker.finished()
 
 
 def _required_env(name: str) -> str:

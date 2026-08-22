@@ -125,10 +125,13 @@ def test_scheduler_and_two_worker_roles_form_a_private_cluster(tmp_path: Path) -
         )
         with Client(address) as client:
             client.wait_for_workers(2, timeout=10)
-            metadata = list(client.scheduler_info()["workers"].values())
+            scheduler_info = client.scheduler_info()
+            metadata = list(scheduler_info["workers"].values())
             expected = pow(2, 5)
+            assert scheduler_info["services"] == {}
             assert len(metadata) == len(workers)
             assert all(worker["memory_limit"] == 1024**3 for worker in metadata)
+            assert all(worker["services"] == {} for worker in metadata)
             assert client.submit(pow, 2, 5).result() == expected
 
         scheduler.terminate()
@@ -140,14 +143,20 @@ def test_scheduler_and_two_worker_roles_form_a_private_cluster(tmp_path: Path) -
         _stop(scheduler)
 
 
-def test_runtime_dashboards_are_private(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_runtime_dashboards_are_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, tuple[tuple[object, ...], dict[str, object]]] = {}
+    http_started: list[str] = []
 
     class FakeServer:
         address = "tcp://127.0.0.1:1234"
 
         def __init__(self, role: str, *args: object, **kwargs: object) -> None:
+            self.role = role
             captured[role] = (args, kwargs)
+            self.start_http_server()
+
+        def start_http_server(self) -> None:
+            http_started.append(self.role)
 
         async def __aenter__(self) -> Self:
             return self
@@ -158,8 +167,16 @@ def test_runtime_dashboards_are_private(monkeypatch: pytest.MonkeyPatch, tmp_pat
         async def finished(self) -> None:
             return None
 
-    monkeypatch.setattr(distributed, "Scheduler", lambda **kwargs: FakeServer("scheduler", **kwargs))
-    monkeypatch.setattr(distributed, "Worker", lambda *args, **kwargs: FakeServer("worker", *args, **kwargs))
+    class FakeScheduler(FakeServer):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__("scheduler", **kwargs)
+
+    class FakeWorker(FakeServer):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__("worker", *args, **kwargs)
+
+    monkeypatch.setattr(distributed, "Scheduler", FakeScheduler)
+    monkeypatch.setattr(distributed, "Worker", FakeWorker)
 
     asyncio.run(dask_runtime._run_scheduler(tmp_path / "scheduler-address"))  # noqa: SLF001
     asyncio.run(dask_runtime._run_worker("tcp://scheduler", nthreads=1, memory_gib=1))  # noqa: SLF001
@@ -167,6 +184,7 @@ def test_runtime_dashboards_are_private(monkeypatch: pytest.MonkeyPatch, tmp_pat
     for _, kwargs in captured.values():
         assert kwargs["dashboard"] is False
         assert kwargs["dashboard_address"] == "127.0.0.1:0"
+    assert not http_started
     assert captured["scheduler"][1]["local_directory"] == str(tmp_path)
 
 
