@@ -18,6 +18,8 @@ DASK_CPUS_ENV = "MISEN_DASK_CPUS"
 DASK_MEMORY_GIB_ENV = "MISEN_DASK_MEMORY_GIB"
 DEFAULT_DASK_STARTUP_TIMEOUT = 600
 MIN_DASK_WORKERS = 2
+_DASK_HTTP_ADDRESS = "127.0.0.1:0"
+_DASK_SHUTDOWN_TIMEOUT = 30
 
 
 def managed_cluster_script(
@@ -183,7 +185,7 @@ async def _run_scheduler(scheduler_file: Path) -> None:
             port=0,
             local_directory=str(scheduler_file.parent),
             dashboard=False,
-            dashboard_address=None,
+            dashboard_address=_DASK_HTTP_ADDRESS,
             allowed_failures=0,
         ) as scheduler:
             loop = asyncio.get_running_loop()
@@ -193,6 +195,15 @@ async def _run_scheduler(scheduler_file: Path) -> None:
 
             async def close_on_signal() -> None:
                 await shutdown.wait()
+                for address in list(scheduler.workers):
+                    scheduler.close_worker(address)
+                try:
+                    async with asyncio.timeout(_DASK_SHUTDOWN_TIMEOUT):
+                        # Scheduler exposes no awaitable worker-removal event.
+                        while scheduler.workers:  # noqa: ASYNC110
+                            await asyncio.sleep(0.05)
+                except TimeoutError:
+                    pass
                 await scheduler.close(reason="executor shutdown")
 
             shutdown_task = asyncio.create_task(close_on_signal())
@@ -228,7 +239,7 @@ async def _run_worker(address: str, *, nthreads: int, memory_gib: int) -> None:
         memory_limit=f"{memory_gib} GiB",
         death_timeout=timeout,
         dashboard=False,
-        dashboard_address=None,
+        dashboard_address=_DASK_HTTP_ADDRESS,
     ) as worker:
         await worker.finished()
 

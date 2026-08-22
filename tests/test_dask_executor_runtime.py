@@ -140,7 +140,7 @@ def test_scheduler_and_two_worker_roles_form_a_private_cluster(tmp_path: Path) -
         _stop(scheduler)
 
 
-def test_runtime_http_listeners_are_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_runtime_dashboards_are_private(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, tuple[tuple[object, ...], dict[str, object]]] = {}
 
     class FakeServer:
@@ -166,7 +166,7 @@ def test_runtime_http_listeners_are_disabled(monkeypatch: pytest.MonkeyPatch, tm
 
     for _, kwargs in captured.values():
         assert kwargs["dashboard"] is False
-        assert kwargs["dashboard_address"] is None
+        assert kwargs["dashboard_address"] == "127.0.0.1:0"
     assert captured["scheduler"][1]["local_directory"] == str(tmp_path)
 
 
