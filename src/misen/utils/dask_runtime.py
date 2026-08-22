@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import signal
 from pathlib import Path
 from textwrap import dedent
 
@@ -118,7 +119,25 @@ def managed_cluster_script(
             printf 'misen: Dask runtime exited while the work unit was running\n' >&2
             exit 1
         fi
-        wait "$coordinator_pid"
+        coordinator_status=0
+        wait "$coordinator_pid" || coordinator_status=$?
+        coordinator_pid=
+
+        # Closing the scheduler asks every worker to exit cleanly, allowing
+        # the attached launcher (for example, srun) to finish normally.
+        kill "$scheduler_pid" 2>/dev/null || true
+        scheduler_status=0
+        wait "$scheduler_pid" || scheduler_status=$?
+        scheduler_pid=
+        worker_status=0
+        wait "$worker_pid" || worker_status=$?
+        worker_pid=
+
+        if (( scheduler_status != 0 || worker_status != 0 )); then
+            printf 'misen: Dask runtime failed during shutdown\n' >&2
+            exit 1
+        fi
+        exit "$coordinator_status"
         """
     )
 
@@ -163,12 +182,37 @@ async def _run_scheduler(scheduler_file: Path) -> None:
         async with Scheduler(
             port=0,
             local_directory=str(scheduler_file.parent),
+            dashboard=False,
             dashboard_address=None,
             allowed_failures=0,
         ) as scheduler:
-            temporary.write_text(scheduler.address)
-            temporary.replace(scheduler_file)
-            await scheduler.finished()
+            loop = asyncio.get_running_loop()
+            shutdown = asyncio.Event()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, shutdown.set)
+
+            async def close_on_signal() -> None:
+                await shutdown.wait()
+                await scheduler.close(reason="executor shutdown")
+
+            shutdown_task = asyncio.create_task(close_on_signal())
+            finished_task = asyncio.create_task(scheduler.finished())
+            try:
+                temporary.write_text(scheduler.address)
+                temporary.replace(scheduler_file)
+                done, _ = await asyncio.wait(
+                    (shutdown_task, finished_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                await asyncio.gather(*done)
+                if shutdown.is_set():
+                    await shutdown_task
+            finally:
+                shutdown_task.cancel()
+                finished_task.cancel()
+                await asyncio.gather(shutdown_task, finished_task, return_exceptions=True)
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.remove_signal_handler(sig)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -183,6 +227,7 @@ async def _run_worker(address: str, *, nthreads: int, memory_gib: int) -> None:
         nthreads=nthreads,
         memory_limit=f"{memory_gib} GiB",
         death_timeout=timeout,
+        dashboard=False,
         dashboard_address=None,
     ) as worker:
         await worker.finished()

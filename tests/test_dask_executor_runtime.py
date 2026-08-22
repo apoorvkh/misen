@@ -37,19 +37,25 @@ _ROLE_COMMAND = [
 
 _FAKE_ROLE_SOURCE = """
 import os
+import signal
 import sys
 import time
 from pathlib import Path
 
 role = os.environ.get("MISEN_DASK_ROLE")
 if role == "scheduler":
-    Path(os.environ["MISEN_DASK_SCHEDULER_FILE"]).write_text("tcp://fake-scheduler")
-    time.sleep(60)
+    scheduler_file = Path(os.environ["MISEN_DASK_SCHEDULER_FILE"])
+    shutdown_file = scheduler_file.with_suffix(".shutdown")
+    signal.signal(signal.SIGTERM, lambda *_: shutdown_file.touch())
+    scheduler_file.write_text(str(shutdown_file))
+    while not shutdown_file.exists():
+        time.sleep(0.05)
 elif role == "worker":
     exit_code = int(os.environ.get("MISEN_TEST_WORKER_EXIT", "0"))
     if exit_code:
         sys.exit(exit_code)
-    time.sleep(60)
+    while not Path(os.environ["MISEN_DASK_SCHEDULER_ADDRESS"]).exists():
+        time.sleep(0.05)
 else:
     time.sleep(float(os.environ.get("MISEN_TEST_COORDINATOR_DELAY", "0")))
     sys.exit(int(os.environ.get("MISEN_TEST_COORDINATOR_EXIT", "0")))
@@ -124,6 +130,10 @@ def test_scheduler_and_two_worker_roles_form_a_private_cluster(tmp_path: Path) -
             assert len(metadata) == len(workers)
             assert all(worker["memory_limit"] == 1024**3 for worker in metadata)
             assert client.submit(pow, 2, 5).result() == expected
+
+        scheduler.terminate()
+        assert scheduler.wait(timeout=10) == 0
+        assert all(worker.wait(timeout=10) == 0 for worker in workers)
     finally:
         for worker in workers:
             _stop(worker)
@@ -155,6 +165,7 @@ def test_runtime_http_listeners_are_disabled(monkeypatch: pytest.MonkeyPatch, tm
     asyncio.run(dask_runtime._run_worker("tcp://scheduler", nthreads=1, memory_gib=1))  # noqa: SLF001
 
     for _, kwargs in captured.values():
+        assert kwargs["dashboard"] is False
         assert kwargs["dashboard_address"] is None
     assert captured["scheduler"][1]["local_directory"] == str(tmp_path)
 
