@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
+from misen.sentinels import DASK_CLIENT
 from misen.task_metadata import Resources, aggregate_resources
 from misen.utils.nested import map_nested_leaves
+from misen.utils.runtime_values import RuntimeValues
 from misen.utils.task_utils import build_task_dependency_graph
 
 if TYPE_CHECKING:
@@ -35,15 +37,16 @@ class WorkUnit:
 
     Tasks inside a WorkUnit execute sequentially in dependency order.
     Scheduler-facing resources are aggregated conservatively across contained
-    tasks (max for CPU/memory/accelerator counts; sum for finite runtime).
+    tasks (max for node/CPU/memory/accelerator counts; sum for finite runtime).
     """
 
-    __slots__ = ("dependencies", "graph", "resources", "root")
+    __slots__ = ("dependencies", "graph", "resources", "root", "uses_dask_client")
 
     root: Task
     graph: DependencyGraph[Task]
     resources: Resources
     dependencies: set[WorkUnit]
+    uses_dask_client: bool
 
     def __init__(self, root: Task, dependencies: set[WorkUnit]) -> None:
         """Initialize a WorkUnit rooted at the given task.
@@ -60,7 +63,21 @@ class WorkUnit:
         self.graph = build_task_dependency_graph(task=root, exclude_cacheable=True)
 
         # Compute one scheduler request that satisfies every task in the unit.
-        self.resources = aggregate_resources(task.resources for task in self.graph.nodes())
+        tasks = self.graph.nodes()
+        self.resources = aggregate_resources(task.resources for task in tasks)
+        dask_topologies = {
+            _dask_topology(task.resources)
+            for task in tasks
+            if task._requests_runtime_value(DASK_CLIENT)  # noqa: SLF001
+        }
+        self.uses_dask_client = bool(dask_topologies)
+        if any(nodes == 1 for nodes, *_ in dask_topologies):
+            msg = "DASK_CLIENT requires nodes > 1."
+            raise ValueError(msg)
+        allocation = _dask_topology(self.resources)
+        if dask_topologies and dask_topologies != {allocation}:
+            msg = f"DASK_CLIENT tasks must request the WorkUnit's exact topology {allocation!r}."
+            raise ValueError(msg)
 
     def __hash__(self) -> int:
         """Return hash keyed by root task identity."""
@@ -108,27 +125,29 @@ class WorkUnit:
 
             return map_nested_leaves(arg, resolve_leaf)
 
-        ordered_tasks: list[Task[Any]] = list(graph)
-        for i, task in enumerate(ordered_tasks):
-            # Keep only transient results still needed by future in-unit tasks.
-            remaining_deps = {
-                dependency for remaining_task in ordered_tasks[i:] for dependency in remaining_task.dependencies
-            }
-            task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
+        with RuntimeValues() as runtime_values:
+            ordered_tasks: list[Task[Any]] = list(graph)
+            for i, task in enumerate(ordered_tasks):
+                # Keep only transient results still needed by future in-unit tasks.
+                remaining_deps = {
+                    dependency for remaining_task in ordered_tasks[i:] for dependency in remaining_task.dependencies
+                }
+                task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
 
-            # Rebuild the task with resolved in-unit non-cacheable dependencies.
-            # Cacheable dependencies are still loaded through Workspace in Task.result.
-            executable_task = task.with_resolved_args(
-                args=tuple(resolve_arg(arg) for arg in task.args),
-                kwargs={name: resolve_arg(arg) for name, arg in task.kwargs.items()},
-            )
-            task_results[task] = executable_task.result(
-                workspace=workspace,
-                compute_if_uncached=True,
-                compute_uncached_deps=False,
-                _job_id=job_id,
-                _log_task=task,
-            )
+                # Rebuild the task with resolved in-unit non-cacheable dependencies.
+                # Cacheable dependencies are still loaded through Workspace in Task.result.
+                executable_task = task.with_resolved_args(
+                    args=tuple(resolve_arg(arg) for arg in task.args),
+                    kwargs={name: resolve_arg(arg) for name, arg in task.kwargs.items()},
+                )
+                task_results[task] = executable_task.result(
+                    workspace=workspace,
+                    compute_if_uncached=True,
+                    compute_uncached_deps=False,
+                    _job_id=job_id,
+                    _log_task=task,
+                    _runtime_values=runtime_values,
+                )
 
     def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
         """Serialize executable payload for backend dispatch.
@@ -186,3 +205,13 @@ def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
         work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
 
     return work_graph
+
+
+def _dask_topology(resources: Resources) -> tuple[int, int, str | None]:
+    """Return the allocation-shaping subset of a resource request."""
+    accelerators = resources["accelerators"]
+    return (
+        resources["nodes"],
+        accelerators,
+        resources["accelerator_type"] if accelerators else None,
+    )

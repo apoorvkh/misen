@@ -17,6 +17,7 @@ import cloudpickle
 import tyro
 
 from misen.task_metadata import AcceleratorType
+from misen.utils.dask_runtime import run_role_from_env
 from misen.utils.resource_binding import apply_resource_binding
 
 if TYPE_CHECKING:
@@ -54,6 +55,8 @@ def execute(
         accelerator_type=accelerator_type,
         accelerator_indices=accelerator_indices,
     )
+    if run_role_from_env():
+        return
 
     bundle = cloudpickle.loads(payload.read_bytes())
     workspace = bundle["workspace"]

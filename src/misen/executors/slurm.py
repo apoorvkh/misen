@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 import msgspec
 
 from misen.executor import Executor, Job, JobState
+from misen.utils.dask_runtime import DEFAULT_DASK_STARTUP_TIMEOUT, managed_cluster_script
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import prepare_live_job
 
@@ -131,6 +132,7 @@ class SlurmExecutor(Executor[SlurmJob]):
     account: str | None = None
     qos: str | None = None
     constraint: str | None = None
+    dask_startup_timeout: int = DEFAULT_DASK_STARTUP_TIMEOUT
     default_flags: dict[str, _SetValue] = msgspec.field(default_factory=dict)
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
 
@@ -138,6 +140,13 @@ class SlurmExecutor(Executor[SlurmJob]):
         """Normalize config and validate submit/worker filesystem topology."""
         self.default_flags = msgspec.convert(self.default_flags, type=dict[str, _SetValue])
         self.rules = msgspec.convert(self.rules, type=list[_SlurmRule])
+        if (
+            isinstance(self.dask_startup_timeout, bool)
+            or not isinstance(self.dask_startup_timeout, int)
+            or self.dask_startup_timeout < 1
+        ):
+            msg = "dask_startup_timeout must be a positive integer number of seconds."
+            raise ValueError(msg)
         if self.snapshot and self.prewarm_envs and self.env_store_dir is None:
             msg = (
                 "prewarm_envs on SlurmExecutor requires env_store_dir on a shared "
@@ -176,6 +185,10 @@ class SlurmExecutor(Executor[SlurmJob]):
                 matched_resource_keys.update(rule.when)
                 flags.update(rule.set)
 
+        if reserved := sorted(_EXECUTOR_OWNED_SBATCH_FLAGS & flags.keys()):
+            msg = f"Slurm flags {reserved} are controlled by SlurmExecutor and cannot be overridden."
+            raise ValueError(msg)
+
         gpu_type = flags.pop("gpu-type", None)
         if resources["accelerators"] > 0:
             accelerator_type = resources["accelerator_type"]
@@ -197,7 +210,7 @@ class SlurmExecutor(Executor[SlurmJob]):
             "--job-name",
             f"misen-{work_unit.root.task_hash().short_b32()}",
             "--nodes",
-            "1",
+            str(resources["nodes"]),
             "--ntasks-per-node",
             "1",
             "--cpus-per-task",
@@ -243,16 +256,34 @@ class SlurmExecutor(Executor[SlurmJob]):
         # ``argv`` already carries ``--job-log-path`` so the worker can
         # wrap its lifecycle in ``workspace.streaming_job_log(...)``;
         # ``--output`` points SLURM's stdout capture at the same file.
-        wrapped = [
-            "env",
-            *(f"{key}={value}" for key, value in env_overrides.items()),
-            *argv,
-        ]
-        sbatch_cmd.extend(["--output", str(log_path), "--export", "ALL", "--wrap", shlex.join(wrapped)])
+        wrapped = ["env", *(f"{key}={value}" for key, value in env_overrides.items()), *argv]
         debug_argv = [*argv]
         if debug_argv[:2] == ["bash", "-c"] and len(debug_argv) > 2:  # noqa: PLR2004
             debug_argv[2] = "<redacted bootstrap script>"
         debug_wrapped = ["env", *(f"{key}={value}" for key, value in env_overrides.items()), *debug_argv]
+        if work_unit.uses_dask_client:
+            wrapped = [
+                "bash",
+                "-c",
+                managed_cluster_script(
+                    wrapped,
+                    [
+                        "srun",
+                        f"--nodes={resources['nodes']}",
+                        f"--ntasks={resources['nodes']}",
+                        "--ntasks-per-node=1",
+                        f"--cpus-per-task={resources['cpus']}",
+                        "--overlap",
+                        "--kill-on-bad-exit=1",
+                    ],
+                    workers=resources["nodes"],
+                    cpus=resources["cpus"],
+                    memory_gib=resources["memory"],
+                    startup_timeout=self.dask_startup_timeout,
+                ),
+            ]
+            debug_wrapped = ["bash", "-c", "<redacted Dask cluster script>"]
+        sbatch_cmd.extend(["--output", str(log_path), "--export", "ALL", "--wrap", shlex.join(wrapped)])
         logger.debug("sbatch command for %s: %s", label, shlex.join([*sbatch_cmd[:-1], shlex.join(debug_wrapped)]))
 
         try:
@@ -283,12 +314,21 @@ _ResourceKey: TypeAlias = Literal[
     "time",
     "memory",
     "cpus",
+    "nodes",
     "accelerators",
     "accelerator_type",
     "accelerator_memory",
 ]
 _OperatorName: TypeAlias = Literal["eq", "ne", "lt", "le", "gt", "ge", "contains", "is_", "is_not"]
 _SetValue: TypeAlias = str | int | float | bool | None | list[str]
+_EXECUTOR_OWNED_SBATCH_FLAGS = frozenset(
+    """
+    cpus-per-gpu cpus-per-task cpus-per-tres dependency export gpus gpus-per-node
+    gpus-per-socket gpus-per-task gres job-name kill-on-invalid-dep mem mem-per-cpu
+    mem-per-gpu mem-per-tres nodes ntasks ntasks-per-gpu ntasks-per-node output
+    parsable time tres-per-job tres-per-node tres-per-socket tres-per-task wrap
+    """.split()  # noqa: SIM905
+)
 
 
 class _ResourcePredicate(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True):

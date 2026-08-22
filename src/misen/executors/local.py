@@ -271,6 +271,9 @@ class LocalExecutor(Executor[LocalJob]):
     ) -> LocalJob:
         """Queue a work unit in the local scheduler."""
         resources = work_unit.resources
+        if resources["nodes"] != 1:
+            msg = "LocalExecutor supports only single-node tasks."
+            raise ValueError(msg)
         if resources["accelerator_memory"] is not None:
             msg = "LocalExecutor cannot verify accelerator memory."
             raise ValueError(msg)

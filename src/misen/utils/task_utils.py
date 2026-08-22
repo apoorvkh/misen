@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
     from misen.task_metadata import TaskMetadata
     from misen.tasks import Task
+    from misen.utils.runtime_values import RuntimeValues
     from misen.workspace import Workspace
 
 __all__ = [
@@ -242,6 +243,7 @@ def execute_task(
     log_task: Task[Any] | None = None,
     *,
     scratch_dir: Path | None = None,
+    runtime_values: RuntimeValues | None = None,
 ) -> R:
     """Execute task function under log capture.
 
@@ -257,6 +259,8 @@ def execute_task(
             if the task does not request one. The caller owns lifecycle:
             cleanup on success and (for non-cacheable tasks) on failure
             happens in :meth:`misen.tasks.Task.result`.
+        runtime_values: Work-unit-scoped runtime values used to resolve
+            sentinels other than ``SCRATCH_DIR``.
 
     Returns:
         The task's result value.
@@ -264,6 +268,7 @@ def execute_task(
     argument_resolver = _build_argument_resolver(
         dependency_results=dependency_results,
         scratch_dir=scratch_dir,
+        runtime_values=runtime_values,
     )
 
     resolved_args = tuple(argument_resolver(value) for value in task.args)
@@ -373,6 +378,7 @@ def _build_argument_resolver(
     dependency_results: dict[Task[Any], Any],
     *,
     scratch_dir: Path | None,
+    runtime_values: RuntimeValues | None,
 ) -> Callable[[Any], Any]:
     """Build argument resolver for runtime task execution.
 
@@ -380,6 +386,7 @@ def _build_argument_resolver(
         dependency_results: Immediate dependency result map.
         scratch_dir: Pre-created scratch directory if the task requested
             one via ``SCRATCH_DIR``; ``None`` otherwise.
+        runtime_values: Work-unit-scoped values for other sentinels.
 
     Returns:
         Callable mapping arbitrary nested argument structures into runtime
@@ -393,6 +400,11 @@ def _build_argument_resolver(
                 msg = "SCRATCH_DIR sentinel resolved but no scratch directory was provided to execute_task."
                 raise RuntimeError(msg)
             return scratch_dir
+        if is_runtime_sentinel(value):
+            if runtime_values is None:
+                msg = f"{value!r} can only be resolved while executing a WorkUnit through an Executor."
+                raise RuntimeError(msg)
+            return runtime_values.resolve(value)
         return map_nested_leaves(
             value,
             lambda leaf: dependency_results[leaf] if isinstance(leaf, Task) else leaf,

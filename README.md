@@ -195,7 +195,7 @@ from misen import Task, meta
 def train(lr: float, dim: int) -> nn.Module: ...
 ```
 
-Defaults: 1 CPU, 8 GiB host RAM, 60 minutes, and 0 accelerators. The accelerator fields are `accelerators`, `accelerator_type`, and `accelerator_memory` in GiB per device. `AcceleratorType` is `Literal["cuda", "rocm", "xpu", "mps", "tpu"]`; its default is `"cuda"`.
+Defaults: 1 node, 1 CPU, 8 GiB host RAM, 60 minutes, and 0 accelerators. Time, nodes, CPUs, and memory are positive integer quantities; CPU, memory, and accelerator counts are per node. The accelerator fields are `accelerators`, `accelerator_type`, and `accelerator_memory` in GiB per device. `AcceleratorType` is `Literal["cuda", "rocm", "xpu", "mps", "tpu"]`; its default is `"cuda"`.
 
 The type is concrete rather than `"gpu"` or `"auto"`: task code normally supports a particular backend. A resource function can choose the type from task arguments when an implementation supports several backends.
 
@@ -208,7 +208,7 @@ task_for_project_b = task_from_project_a.with_resources(accelerators=2, accelera
 
 Resource functions can compute the request from task arguments when model size or tensor parallelism is argument-specific. The request describes how the task intends to run; executors translate it into site-specific allocation flags. Hardware names such as a SLURM GRES type therefore stay out of task metadata.
 
-When several non-cacheable tasks execute sequentially in one work unit, Misen takes the maximum accelerator count and memory requirement; accelerator-using tasks must agree on `accelerator_type`.
+When several non-cacheable tasks execute sequentially in one work unit, Misen takes the maximum node, CPU, memory, and accelerator requirements; accelerator-using tasks must agree on `accelerator_type`.
 
 At runtime, `LocalExecutor` subdivides maskable GPU-family devices and the final worker applies their visibility immediately before loading task code. A TPU task must request the complete configured pool, which Misen reserves exclusively; framework-specific TPU activation remains the task environment's responsibility. Local memory-per-device constraints are rejected because the current inventory cannot verify them. `SlurmExecutor` maps supported GPU-family counts directly and uses cluster-specific rules to recognize memory and non-default type constraints; an unrecognized constraint is rejected rather than silently under-provisioned. TPU and MPS requests are currently rejected by `SlurmExecutor`. SLURM's cgroups handle isolation.
 
@@ -248,19 +248,71 @@ Keys may be `str`, `int`, `float`, `bool`, or `None`. Exclusions apply eagerly (
 
 **Selective access and granularity.** A `FileMap` is *one* cached result holding all its files. On a shared filesystem (`DiskWorkspace` on NFS), reading a single entry (`files[step]`) touches just that one file — loading a `FileMap` reads only its manifest, never the file contents — so accessing one checkpoint out of many is cheap. On `CloudWorkspace`, a result is fetched as a unit, so the first access materializes *all* of a `FileMap`'s files. If you have many large checkpoints and a downstream task on another machine needs only one, give each checkpoint its own cached task (so each is an independently-fetched result) rather than bundling them into one `FileMap` — this is a DAG-shaping choice, not a property of the type. (Per-entry lazy fetch on cloud would be a general `CloudWorkspace` improvement, independent of `FileMap`.)
 
-The **Executor** decides where tasks run:
+The **Executor** decides where tasks run. `LocalExecutor` and `InProcessExecutor` currently accept only single-node requests; `SlurmExecutor` maps `nodes` to the corresponding allocation flag.
 
 - `LocalExecutor` — parallel on your machine (default)
 - `InProcessExecutor` — single-process, useful in notebooks and tests
 - `SlurmExecutor` — submits each work unit as a SLURM job
 
-Switch backends from the CLI or a config file — no code changes:
+For a multi-node Slurm allocation, the task body still runs exactly once on the first node. Bind `DASK_CLIENT` to use Misen's managed worker group, or omit it when the task intentionally manages its own allocation-scoped runtime. In the latter case, the task also owns remote-process bootstrap; a node-local, non-prewarmed Misen environment exists only on the coordinator node, while a shared prewarmed environment can be invoked directly with tools such as `srun`.
 
-```bash
-python -m my_project.experiments.training --executor-type slurm
+### Distributed tasks with Dask
+
+Bind `DASK_CLIENT` as a top-level task argument when a multi-node task needs the workers in its allocation. The function itself receives an ordinary [`distributed.Client`](https://distributed.dask.org/en/stable/client.html), so it has no Misen-specific runtime API and can be tested with any Dask client. For example, save this two-node smoke test as `src/my_project/experiments/multinode.py`:
+
+```python
+import socket
+
+from distributed import Client
+from misen import DASK_CLIENT, Experiment, Task, meta
+
+
+def hostname() -> str:
+    return socket.gethostname()
+
+
+@meta(cache=False, resources={"nodes": 2, "cpus": 2, "memory": 2, "time": 10})
+def check_workers(client: Client) -> dict[str, str]:
+    workers = client.run(hostname)
+    if len(workers) != 2 or len(set(workers.values())) != 2:
+        raise RuntimeError(f"Expected two workers on distinct hosts, got {workers!r}")
+    print(f"Dask workers: {workers}")
+    return workers
+
+
+class MultiNodeSmokeTest(Experiment):
+    def tasks(self) -> dict[str, Task]:
+        return {"workers": Task(check_workers, DASK_CLIENT)}
+
+
+if __name__ == "__main__":
+    MultiNodeSmokeTest.cli()
 ```
 
-For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`, `qos`, `constraint`, plus any `default_flags`). Executor `rules` match the resource fields directly, then set local flags such as `gpu-type`, `partition`, or `constraint`. For example, this site declares how to satisfy Project B's request above:
+Fill the task id, then submit it from a project directory visible to the Slurm batch node:
+
+```bash
+uv run misen fill src/my_project/experiments/multinode.py
+uv run -m my_project.experiments.multinode --executor slurm run --no-tui
+```
+
+Add cluster-specific options such as `--executor.partition <name>` when needed. A successful run prints two worker addresses mapped to two distinct hostnames.
+
+`DASK_CLIENT` requires `nodes > 1`. Misen provisions a private Dask runtime only for pending work units that bind this sentinel. Its client connection opens when the first uncached function resolves the sentinel, is shared by every requesting task in the work unit, and closes when that work unit finishes; task code must not close the client or shut down the cluster. The client represents the work unit's complete fixed allocation, with one Dask worker per node. Every task using it in the same work unit must therefore request exactly the work unit's node and accelerator topology. `cpus`, `memory`, and `accelerators` are per-node quantities.
+
+Gather futures into ordinary serializable values before returning—Dask clients and futures are tied to the live allocation and are not task results. `SlurmExecutor` currently realizes `DASK_CLIENT`; `LocalExecutor` and `InProcessExecutor` remain single-node executors and reject it. Unit tests can call the task function directly with a local Dask client.
+
+The coordinator runs once on the first node and should stay lightweight while work executes through the client. Each node has one multi-threaded Dask worker; pure-Python CPU work therefore gains process parallelism across nodes, while within-node execution follows Dask's normal threading semantics. Slurm nodes must share a trusted, mutually reachable compute network because this initial implementation uses Dask's default TCP transport and interface selection.
+
+Runtime resources do not contribute to task identity. If node count or accelerator topology affects the logical result, make that choice an ordinary task argument (and therefore part of the task hash) and derive `resources` from it with a resource callback.
+
+Select a compatible backend from the CLI or a config file:
+
+```bash
+python -m my_project.experiments.training --executor slurm
+```
+
+For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`, `qos`, `constraint`, `dask_startup_timeout`, plus any `default_flags`). `dask_startup_timeout` is the positive per-phase number of seconds to wait first for the managed scheduler and then for its workers (default 600). Executor `rules` match the resource fields directly, then set local flags such as `gpu-type`, `partition`, or `constraint`. Allocation-shaping flags such as `nodes`, `cpus-per-task`, `mem`, `time`, and `gpus-per-node` are owned by Misen and cannot be overridden this way. For example, this site declares how to satisfy Project B's request above:
 
 ```toml
 [[executor.rules]]
@@ -284,7 +336,9 @@ Environments are **materialized from** snapshots into a content-keyed **env stor
 
 Notes:
 
-- Every workspace implements `Workspace.bootstrap_transport()`: path-backed workspaces return `None`, while remote workspaces return Bash source. Misen embeds that source in the one worker bootstrap and invokes it with `MISEN_TRANSPORT_OPERATION`, `MISEN_TRANSPORT_REF`, and `MISEN_TRANSPORT_DEST`, plus resolved `MISEN_UV_BIN` and optional project Pixi as `MISEN_PIXI_BIN`. A transport resolves any additional tools it needs itself. Python-backed workspaces can write their fetcher as a normal self-contained function and use `misen.utils.bootstrap_transport.render_python_transport()` to extract it, embed non-secret JSON context, and declare `uv run --with` dependencies automatically. After all data is local, Misen verifies the snapshot and builds or reuses its environment.
+- Every workspace implements `Workspace.bootstrap_transport()`: path-backed workspaces return `None`, while remote workspaces return Bash source. Misen embeds that source in each submitted worker bootstrap and invokes it with `MISEN_TRANSPORT_OPERATION`, `MISEN_TRANSPORT_REF`, and `MISEN_TRANSPORT_DEST`, plus resolved `MISEN_UV_BIN` and optional project Pixi as `MISEN_PIXI_BIN`. A transport resolves any additional tools it needs itself. Python-backed workspaces can write their fetcher as a normal self-contained function and use `misen.utils.bootstrap_transport.render_python_transport()` to extract it, embed non-secret JSON context, and declare `uv run --with` dependencies automatically. After all data is local, Misen verifies the snapshot and builds or reuses its environment.
+- A managed multi-node Dask job runs that same idempotent bootstrap for the scheduler and coordinator on the first node, plus one worker on every node. Cold per-node materialization counts against `dask_startup_timeout`; custom transports must therefore allow the same immutable refs to be fetched concurrently and more than once.
+- Slurm still requires its job working directory and job-log path to be visible on the batch node. A remote snapshot/job-file transport removes those data-plane path requirements, but a fully path-free Slurm logging/bootstrap flow remains future work.
 - Non-prewarmed workers must already provide Bash and `uv`, plus `pixi` when the project has a `pixi.lock`. The per-job bootstrap validates these prerequisites but does not install them. Provision them once through the executor image, cluster module, container, node setup, or scheduler prologue; this keeps every job's bootstrap small and deterministic.
 - Bootstrap shell text may be visible in executor or scheduler command lines, so transports must not embed credentials. `CloudWorkspace` reads worker credentials from the ambient environment or workload identity; its generic `config` mapping is intentionally rejected for worker bootstrap dispatch. Dedicated non-secret locator fields such as `endpoint` and `s3_region` remain supported.
 - When the default uv/pixi caches sit on a different filesystem than the env store (typical on clusters: home vs. data disk), `misen` points builds at a cache co-located with the store so environments hardlink instead of copying gigabytes. An explicitly set `UV_CACHE_DIR` / `PIXI_CACHE_DIR` is always respected.

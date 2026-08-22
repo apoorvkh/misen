@@ -51,9 +51,10 @@ class Resources(TypedDict, total=False):
 
     Attributes:
         time: Requested wall-clock time in minutes.
-        memory: Memory in GiB.
-        cpus: CPU cores.
-        accelerators: Number of accelerator devices.
+        memory: Memory in GiB per node.
+        cpus: CPU cores per node.
+        nodes: Compute nodes.
+        accelerators: Accelerator devices per node.
         accelerator_type: Concrete accelerator backend.
         accelerator_memory: Minimum memory in GiB per device.
     """
@@ -61,6 +62,7 @@ class Resources(TypedDict, total=False):
     time: int
     memory: int
     cpus: int
+    nodes: int
     accelerators: int
     accelerator_type: AcceleratorType
     accelerator_memory: int | None
@@ -70,6 +72,7 @@ _DEFAULT_RESOURCES: Resources = {
     "time": 60,
     "memory": 8,
     "cpus": 1,
+    "nodes": 1,
     "accelerators": 0,
     "accelerator_type": "cuda",
     "accelerator_memory": None,
@@ -84,6 +87,11 @@ def _normalize_resources(resources: Resources) -> Resources:
         raise TypeError(msg)
 
     normalized = cast("Resources", {**_DEFAULT_RESOURCES, **resources})
+    for name in ("time", "memory", "cpus", "nodes"):
+        value = normalized[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            msg = f"{name} must be a positive integer."
+            raise ValueError(msg)
     if normalized["accelerator_type"] not in ("cuda", "rocm", "xpu", "mps", "tpu"):
         msg = f"Unsupported accelerator type: {normalized['accelerator_type']!r}."
         raise ValueError(msg)
@@ -104,8 +112,8 @@ def _normalize_resources(resources: Resources) -> Resources:
 def aggregate_resources(resources: Iterable[Resources], *, sum_time: bool = True) -> Resources:
     """Combine multiple resource requests into one conservative request.
 
-    CPU, memory, and accelerator counts use ``max``. Accelerator-using tasks
-    must agree on their type.
+    Node, CPU, memory, and accelerator counts use ``max``. Accelerator-using
+    tasks must agree on their type.
 
     Args:
         resources: Resource requests to normalize and merge.
@@ -133,6 +141,7 @@ def aggregate_resources(resources: Iterable[Resources], *, sum_time: bool = True
         time=(sum if sum_time else max)(r["time"] for r in resource_list),
         memory=max(r["memory"] for r in resource_list),
         cpus=max(r["cpus"] for r in resource_list),
+        nodes=max(r["nodes"] for r in resource_list),
         accelerators=max(r["accelerators"] for r in resource_list),
         accelerator_type=accelerator_types[0] if accelerator_types else "cuda",
         accelerator_memory=max(accelerator_memories) if accelerator_memories else None,

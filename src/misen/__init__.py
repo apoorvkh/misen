@@ -21,7 +21,7 @@ from misen.exceptions import (
 )
 from misen.executor import Executor
 from misen.experiment import Experiment
-from misen.sentinels import SCRATCH_DIR
+from misen.sentinels import DASK_CLIENT, SCRATCH_DIR
 from misen.task_metadata import AcceleratorType, Resources, meta
 from misen.tasks import Task
 from misen.utils.file_map import FileMap
@@ -36,6 +36,7 @@ if logging.getLevelName(TRACE_LEVEL) != "TRACE":
 logging.getLogger("misen").addHandler(logging.NullHandler())
 
 __all__ = [
+    "DASK_CLIENT",
     "SCRATCH_DIR",
     "TRACE_LEVEL",
     "AcceleratorType",

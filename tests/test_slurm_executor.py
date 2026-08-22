@@ -1,7 +1,10 @@
 """SLURM executor behavior that doesn't require an actual cluster."""
+# ruff: noqa: ANN001, D103, FBT001, PLR2004, S101
 
 from __future__ import annotations
 
+import logging
+import shlex
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -10,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import misen.executors.slurm as slurm_module
-from misen import Task, meta
+from misen import DASK_CLIENT, Task, meta
 from misen.executors.slurm import SlurmExecutor, SlurmJob
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
@@ -29,6 +32,11 @@ def _slurm_gpu_test_task() -> None:
     return None
 
 
+@meta(id="slurm_multinode_test_task", cache=False, resources={"nodes": 3})
+def _slurm_multinode_test_task() -> None:
+    return None
+
+
 @meta(
     id="slurm_gpu_constrained_test_task",
     cache=False,
@@ -41,6 +49,11 @@ def _slurm_gpu_constrained_test_task() -> None:
 @meta(id="slurm_tpu_test_task", cache=False, resources={"accelerators": 1, "accelerator_type": "tpu"})
 def _slurm_tpu_test_task() -> None:
     return None
+
+
+@meta(id="slurm_dask_test_task", cache=False)
+def _slurm_dask_test_task(client: object) -> None:
+    del client
 
 
 def _make_slurm_job(slurm_id: str, x: int) -> SlurmJob:
@@ -244,6 +257,76 @@ def test_slurm_dispatch_maps_plain_gpu_count_directly(monkeypatch, tmp_path) -> 
     command, _ = _dispatch_task(Task(_slurm_gpu_test_task), SlurmExecutor(), monkeypatch, tmp_path)
 
     assert "--gpus-per-node=2" in command
+
+
+def test_slurm_dispatch_requests_task_nodes(monkeypatch, tmp_path) -> None:
+    command, _ = _dispatch_task(Task(_slurm_multinode_test_task), SlurmExecutor(), monkeypatch, tmp_path)
+
+    nodes_index = command.index("--nodes")
+    assert command[nodes_index + 1] == "3"
+    assert shlex.split(command[command.index("--wrap") + 1]) == ["env", "python", "-m", "worker"]
+
+
+def test_slurm_dask_dispatch_bootstraps_one_private_worker_per_node(monkeypatch, tmp_path) -> None:
+    task = Task(_slurm_dask_test_task, DASK_CLIENT).with_resources(nodes=2, cpus=3)
+    command, _ = _dispatch_task(task, SlurmExecutor(dask_startup_timeout=45), monkeypatch, tmp_path)
+
+    wrapped = shlex.split(command[command.index("--wrap") + 1])
+    assert wrapped[:2] == ["bash", "-c"]
+    script = wrapped[2]
+    assert "MISEN_DASK_ROLE=scheduler" in script
+    assert "MISEN_DASK_ROLE=worker" in script
+    assert "MISEN_DASK_ROLE=coordinator" not in script
+    assert "--nodes=2" in script
+    assert "--ntasks=2" in script
+    assert "--cpus-per-task=3" in script
+    assert "--overlap" in script
+    assert "MISEN_DASK_STARTUP_TIMEOUT=45" in script
+    assert "MISEN_DASK_MEMORY_GIB=8" in script
+    assert "SLURM_PROCID" not in script
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "cpus-per-gpu",
+        "cpus-per-tres",
+        "gpus",
+        "gpus-per-task",
+        "gpus-per-socket",
+        "gres",
+        "mem-per-tres",
+        "nodes",
+        "ntasks-per-gpu",
+        "tres-per-job",
+        "tres-per-node",
+        "tres-per-socket",
+        "tres-per-task",
+    ],
+)
+def test_slurm_rejects_flags_controlled_by_the_executor(flag, monkeypatch, tmp_path) -> None:
+    executor = SlurmExecutor(default_flags={flag: "conflict"})
+
+    with pytest.raises(ValueError, match="controlled by SlurmExecutor"):
+        _dispatch_task(Task(_slurm_multinode_test_task), executor, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("timeout", [True, 0, -1, 1.5])
+def test_slurm_validates_dask_startup_timeout_eagerly(timeout: Any) -> None:
+    with pytest.raises(ValueError, match="dask_startup_timeout must be a positive integer"):
+        SlurmExecutor(dask_startup_timeout=timeout)
+
+
+def test_slurm_dask_debug_log_redacts_the_actual_wrapper(monkeypatch, tmp_path, caplog) -> None:
+    task = Task(_slurm_dask_test_task, DASK_CLIENT).with_resources(nodes=2)
+
+    with caplog.at_level(logging.DEBUG, logger=slurm_module.__name__):
+        _dispatch_task(task, SlurmExecutor(), monkeypatch, tmp_path)
+
+    message = next(record.message for record in caplog.records if record.message.startswith("sbatch command"))
+    assert "bash -c" in message
+    assert "<redacted Dask cluster script>" in message
+    assert "MISEN_DASK_ROLE" not in message
 
 
 def test_slurm_rules_resolve_constrained_accelerator(monkeypatch, tmp_path) -> None:

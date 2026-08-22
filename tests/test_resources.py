@@ -39,6 +39,7 @@ def _resolved(**overrides: Any) -> Resources:
 def test_device_defaults() -> None:
     resources = Task(_default_resources).resources
 
+    assert resources["nodes"] == 1
     assert resources["accelerators"] == 0
     assert resources["accelerator_memory"] is None
     assert resources["accelerator_type"] == "cuda"
@@ -58,12 +59,13 @@ def test_accelerator_type_can_be_computed_from_task_arguments() -> None:
 
 
 def test_device_requirements_are_merged() -> None:
-    first = _resolved(time=10, accelerators=4, accelerator_memory=40)
-    second = _resolved(time=20, accelerators=2, accelerator_memory=80)
+    first = _resolved(time=10, nodes=2, accelerators=4, accelerator_memory=40)
+    second = _resolved(time=20, nodes=4, accelerators=2, accelerator_memory=80)
 
     aggregate = aggregate_resources([first, second])
 
     assert aggregate["time"] == 30
+    assert aggregate["nodes"] == 4
     assert aggregate["accelerators"] == 4
     assert aggregate["accelerator_memory"] == 80
 
@@ -81,3 +83,10 @@ def test_aggregation_rejects_different_accelerator_types() -> None:
 def test_accelerator_memory_requires_a_device() -> None:
     with pytest.raises(ValueError, match="requires accelerators > 0"):
         Task(_default_resources).with_resources(accelerator_memory=40)
+
+
+@pytest.mark.parametrize("name", ["time", "memory", "cpus", "nodes"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_scalar_resources_must_be_positive_integers(name: str, value: object) -> None:
+    with pytest.raises(ValueError, match=rf"{name} must be a positive integer"):
+        Task(_default_resources).with_resources(**{name: value})

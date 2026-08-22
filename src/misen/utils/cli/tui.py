@@ -283,10 +283,14 @@ def _format_resources(resources: Resources | None) -> Text:
     if resources is None:
         text.append("(none)", style="dim italic")
         return text
-    text.append(f"{resources['cpus']} CPU")
-    text.append(f" · {resources['memory']} GiB")
+    nodes = resources["nodes"]
+    per_node = "/node" if nodes > 1 else ""
+    if nodes > 1:
+        text.append(f"{nodes} nodes · ")
+    text.append(f"{resources['cpus']} CPU{per_node}")
+    text.append(f" · {resources['memory']} GiB{per_node}")
     if resources["accelerators"] > 0:
-        text.append(f" · {resources['accelerators']}x {resources['accelerator_type']}")
+        text.append(f" · {resources['accelerators']}x {resources['accelerator_type']}{per_node}")
         if resources["accelerator_memory"] is not None:
             text.append(f" (≥{resources['accelerator_memory']} GiB/device)")
     text.append(f" · {resources['time']}m")

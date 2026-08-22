@@ -4,6 +4,7 @@ These markers are bound as top-level ``Task(...)`` arguments and resolved at
 execution time inside :func:`misen.utils.task_utils.execute_task`:
 
 - ``SCRATCH_DIR`` -> per-task scratch directory path
+- ``DASK_CLIENT`` -> multi-node allocation-scoped :class:`distributed.Client`
 
 Sentinel-valued arguments are excluded from task identity automatically (the
 injected value varies per workspace/machine). Misuse is rejected when the
@@ -22,7 +23,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-__all__ = ["SCRATCH_DIR", "is_runtime_sentinel"]
+    from distributed import Client
+
+__all__ = ["DASK_CLIENT", "SCRATCH_DIR", "is_runtime_sentinel"]
 
 
 class _RuntimeSentinel:
@@ -59,3 +62,6 @@ def is_runtime_sentinel(value: object) -> bool:
 
 SCRATCH_DIR = cast("Path", _RuntimeSentinel("SCRATCH_DIR"))
 """Sentinel indicating "inject this task's runtime scratch directory"."""
+
+DASK_CLIENT = cast("Client", _RuntimeSentinel("DASK_CLIENT"))
+"""Sentinel indicating "inject this multi-node work unit's Dask client"."""

@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from misen.executor import Executor, Job
     from misen.utils.graph import DependencyGraph
     from misen.utils.locks import LockLike
+    from misen.utils.runtime_values import RuntimeValues
     from misen.workspace import Workspace
 
 __all__ = ["Task"]
@@ -176,7 +177,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         Raises:
             TypeError: If an override names a field not on :class:`Resources`.
-            ValueError: If the resulting accelerator request is invalid.
+            ValueError: If the resulting resource request is invalid.
         """
         new_resources = _normalize_resources(cast("Resources", {**self.resources, **overrides}))
 
@@ -320,6 +321,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         compute_uncached_deps: bool = False,
         _job_id: str | None = None,
         _log_task: Task[Any] | None = None,
+        _runtime_values: RuntimeValues | None = None,
     ) -> R:
         """Compute (or retrieve) this Task's result.
 
@@ -331,6 +333,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 dependencies.
             _job_id: Optional executor job identifier for log grouping.
             _log_task: Optional original task to use for runtime log identity.
+            _runtime_values: Runtime values shared by the containing work unit.
 
         Returns:
             Result of ``func(*resolved_args, **resolved_kwargs)``.
@@ -396,6 +399,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 compute_if_uncached=True,
                 compute_uncached_deps=True,
                 _job_id=_job_id,
+                _runtime_values=_runtime_values,
             )
             for dependency in self.dependencies
         }
@@ -424,6 +428,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                     job_id=_job_id,
                     log_task=_log_task,
                     scratch_dir=scratch_dir,
+                    runtime_values=_runtime_values,
                 )
                 save_task_result(task=self, result=result, workspace=workspace)
                 logger.debug("Persisted task result metadata for %s.", self)
@@ -446,7 +451,11 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
     def _requests_scratch_dir(self) -> bool:
         """Return whether this task's bound arguments include the SCRATCH_DIR sentinel."""
-        return SCRATCH_DIR in itertools.chain(self.args, self.kwargs.values())
+        return self._requests_runtime_value(SCRATCH_DIR)
+
+    def _requests_runtime_value(self, sentinel: object) -> bool:
+        """Return whether a runtime sentinel is bound directly to this task."""
+        return any(value is sentinel for value in itertools.chain(self.args, self.kwargs.values()))
 
     def _create_scratch_dir(self, workspace: Workspace) -> Path:
         """Return a fresh scratch directory: workspace-backed for cacheable tasks, tempdir otherwise."""

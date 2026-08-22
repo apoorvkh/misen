@@ -29,6 +29,13 @@ change without notice.
 
 ::: misen.task_metadata.Resources
 
+# Runtime sentinels
+
+`SCRATCH_DIR` injects a per-task `pathlib.Path`. `DASK_CLIENT` injects an
+allocation-scoped `distributed.Client` for supported multi-node executors.
+Both are bound as top-level `Task(...)` arguments and excluded from task
+identity.
+
 # DiskWorkspace
 
 ::: misen.workspaces.disk.DiskWorkspace

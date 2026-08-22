@@ -13,6 +13,7 @@ The intended public API is:
 
 - `@meta`, `TaskMetadata`, `Resources`, `AcceleratorType`
 - `Task`
+- `SCRATCH_DIR`, `DASK_CLIENT`
 - `Workspace` (`DiskWorkspace` by default)
 - `Executor` (`LocalExecutor`, `InProcessExecutor`, `SlurmExecutor`)
 - `Experiment`
@@ -67,24 +68,31 @@ Sentinels are bound as top-level `Task(...)` arguments and resolved at
 execution time:
 
 - `SCRATCH_DIR` -> per-task scratch directory
+- `DASK_CLIENT` -> the ordinary `distributed.Client` for a managed multi-node
+  allocation
 
-Function signatures stay misen-agnostic: the parameter is a plain `Path`,
-and the sentinel is bound at task construction —
-`Task(train, scratch_dir=SCRATCH_DIR)`. Sentinel-valued arguments are
-excluded from task identity automatically (the injected path varies per
-workspace/machine). Misuse fails at graph-build time: a sentinel left as an
+Function signatures stay misen-agnostic: parameters are ordinary `Path` or
+`distributed.Client` objects, and the sentinel is bound at task construction,
+for example `Task(train, scratch_dir=SCRATCH_DIR)`. Sentinel-valued arguments
+are excluded from task identity automatically because the injected value
+varies per allocation. Misuse fails at graph-build time: a sentinel left as an
 unbound function-signature default, or nested inside a container argument,
 raises `TypeError` when the `Task` is constructed — signature defaults are
-applied by Python at call time and would bypass the argument resolver,
-leaking the raw sentinel object into the function body.
+applied by Python at call time and would bypass the argument resolver, leaking
+the raw sentinel object into the function body.
+
+`DASK_CLIENT` requires a task request with `nodes > 1` and is currently
+realized by `SlurmExecutor`. Misen starts one worker per allocated node and
+executes the task body once on the coordinator. `LocalExecutor` and
+`InProcessExecutor` intentionally remain single-node executors.
 
 To discover the resources allotted to a task at runtime, read what the
 runtime sees: `os.sched_getaffinity(0)` for CPU cores and the accelerator's
 visibility view (e.g. `range(torch.cuda.device_count())`), or the PJRT/XLA
-device inventory for a TPU task. The same task
-definition runs locally or on SLURM — `LocalExecutor` applies the configured
-accelerator type's visibility mask when one exists and pins CPU affinity, while
-`SlurmExecutor` lets SLURM's cgroups handle isolation.
+device inventory for a TPU task. For resource requests supported by both
+backends, the same task definition runs locally or on SLURM: `LocalExecutor`
+applies the configured accelerator type's visibility mask when one exists and
+pins CPU affinity, while `SlurmExecutor` lets SLURM's cgroups handle isolation.
 
 ## Serialization
 

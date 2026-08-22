@@ -11,6 +11,7 @@ from operator import is_
 from typing import TYPE_CHECKING
 
 from misen.executor import CompletedJob, Executor
+from misen.sentinels import DASK_CLIENT
 from misen.tasks import Task
 from misen.utils.graph import DependencyGraph
 from misen.utils.snapshot import apply_env_files_temporarily, token_base32
@@ -70,6 +71,12 @@ class InProcessExecutor(Executor[CompletedJob]):
         union = Task((lambda *_: None), *tasks)
         task_graph = build_task_dependency_graph(task=union)
         task_graph.remove_node_by_value(union, cmp=is_, first=True)
+        if any(
+            task.resources["nodes"] != 1 or task._requests_runtime_value(DASK_CLIENT)  # noqa: SLF001
+            for task in task_graph.nodes()
+        ):
+            msg = "InProcessExecutor supports only single-node tasks and cannot provide DASK_CLIENT."
+            raise ValueError(msg)
 
         with apply_env_files_temporarily():
             WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id)

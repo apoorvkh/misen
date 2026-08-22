@@ -8,6 +8,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Apoorv Khandelwal", email = "mail@apoorvkh.com" }]
 dependencies = [
   "cloudpickle>=3.0",
+  "distributed>=2024.1.0",
   "msgspec>=0.20.0",
   "psutil>=6.0; sys_platform != 'linux'",  # cpu affinity
   "rustworkx>=0.15.0",

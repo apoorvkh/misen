@@ -17,6 +17,7 @@ into the msgpack leaf, ndarrays land in the numpy leaf, etc.).
 """
 
 import importlib.util
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -27,8 +28,14 @@ from misen.utils.type_registry import qualified_type_name
 
 __all__ = ["dask_serializers", "dask_serializers_by_type"]
 
-dask_serializers: list[type[Serializer]] = []
-dask_serializers_by_type: dict[str, type[Serializer]] = {}
+dask_serializers: list[type[BaseSerializer]] = []
+dask_serializers_by_type: dict[str, type[BaseSerializer]] = {}
+
+
+def _is_collection(obj: Any, module_name: str, type_name: str) -> bool:
+    """Lazily match a public Dask collection type and its subclasses."""
+    module = sys.modules.get(module_name)
+    return module is not None and isinstance(obj, getattr(module, type_name))
 
 
 if importlib.util.find_spec("dask") is not None:
@@ -38,9 +45,7 @@ if importlib.util.find_spec("dask") is not None:
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import dask.dataframe as dd
-
-            return isinstance(obj, dd.DataFrame)
+            return _is_collection(obj, "dask.dataframe", "DataFrame")
 
         @staticmethod
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
@@ -67,9 +72,7 @@ if importlib.util.find_spec("dask") is not None:
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import dask.array as da
-
-            return isinstance(obj, da.Array)
+            return _is_collection(obj, "dask.array", "Array")
 
         @staticmethod
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
@@ -105,9 +108,7 @@ if importlib.util.find_spec("dask") is not None:
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import dask.bag as db
-
-            return isinstance(obj, db.Bag)
+            return _is_collection(obj, "dask.bag", "Bag")
 
         @classmethod
         def encode(cls, obj: Any, ctx: EncodeCtx) -> Node:

@@ -59,6 +59,22 @@ def test_local_executor_rejects_unverifiable_memory_requirement() -> None:
         )
 
 
+def test_local_executor_rejects_multiple_nodes() -> None:
+    executor = LocalExecutor()
+    resources = _resources(nodes=2)
+
+    with pytest.raises(ValueError, match="only single-node"):
+        executor._dispatch(  # noqa: SLF001
+            work_unit=WorkUnit(
+                root=Task(_local_resource_test).with_resources(**resources),
+                dependencies=set(),
+            ),
+            dependencies=set(),
+            workspace=cast("Workspace", None),
+            snapshot=None,
+        )
+
+
 def test_local_executor_provides_one_exclusive_tpu_pool() -> None:
     executor = LocalExecutor(accelerators=4, accelerator_type="tpu")
     request = _resources(accelerators=4, accelerator_type="tpu")
