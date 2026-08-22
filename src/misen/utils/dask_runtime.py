@@ -23,6 +23,7 @@ def managed_cluster_script(
     command: list[str],
     worker_launcher: list[str],
     *,
+    environment: dict[str, str],
     workers: int,
     cpus: int,
     memory_gib: int,
@@ -31,7 +32,8 @@ def managed_cluster_script(
     """Wrap a command in a leader-managed fixed-size Dask cluster.
 
     ``worker_launcher`` must run the appended command once per allocation
-    member, remain attached while they run, and fail if any member exits.
+    member, propagate its environment, remain attached while they run, and
+    fail if any member exits.
     """
     if not command or not worker_launcher:
         msg = "Dask commands and worker launchers must be nonempty."
@@ -50,6 +52,9 @@ def managed_cluster_script(
         raise ValueError(msg)
     command_array = shlex.join(command)
     launcher_array = shlex.join(worker_launcher)
+    environment_exports = "\n        ".join(
+        f"export {shlex.quote(f'{name}={value}')}" for name, value in environment.items()
+    )
     return dedent(
         f"""\
         set -euo pipefail
@@ -71,7 +76,8 @@ def managed_cluster_script(
 
         command=({command_array})
         worker_launcher=({launcher_array})
-        env {DASK_ROLE_ENV}=scheduler {DASK_SCHEDULER_FILE_ENV}="$scheduler_file" "${{command[@]}}" &
+        {environment_exports}
+        {DASK_ROLE_ENV}=scheduler {DASK_SCHEDULER_FILE_ENV}="$scheduler_file" "${{command[@]}}" &
         scheduler_pid=$!
 
         deadline=$((SECONDS + {startup_timeout}))
@@ -90,15 +96,14 @@ def managed_cluster_script(
         export {DASK_SCHEDULER_ADDRESS_ENV}="$scheduler_address"
         export {DASK_STARTUP_TIMEOUT_ENV}={startup_timeout}
 
-        "${{worker_launcher[@]}}" env \\
-            {DASK_ROLE_ENV}=worker \\
+        {DASK_ROLE_ENV}=worker \\
             {DASK_CPUS_ENV}={cpus} \\
             {DASK_MEMORY_GIB_ENV}={memory_gib} \\
+            "${{worker_launcher[@]}}" \\
             "${{command[@]}}" &
         worker_pid=$!
 
-        env \\
-            {DASK_EXPECTED_WORKERS_ENV}={workers} \\
+        {DASK_EXPECTED_WORKERS_ENV}={workers} \\
             "${{command[@]}}" &
         coordinator_pid=$!
 
@@ -157,8 +162,8 @@ async def _run_scheduler(scheduler_file: Path) -> None:
     try:
         async with Scheduler(
             port=0,
-            dashboard=False,
-            dashboard_address="127.0.0.1:0",
+            local_directory=str(scheduler_file.parent),
+            dashboard_address=None,
             allowed_failures=0,
         ) as scheduler:
             temporary.write_text(scheduler.address)
@@ -178,8 +183,7 @@ async def _run_worker(address: str, *, nthreads: int, memory_gib: int) -> None:
         nthreads=nthreads,
         memory_limit=f"{memory_gib} GiB",
         death_timeout=timeout,
-        dashboard=False,
-        dashboard_address="127.0.0.1:0",
+        dashboard_address=None,
     ) as worker:
         await worker.finished()
 

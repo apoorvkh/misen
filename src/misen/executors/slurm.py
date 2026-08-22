@@ -266,7 +266,7 @@ class SlurmExecutor(Executor[SlurmJob]):
                 "bash",
                 "-c",
                 managed_cluster_script(
-                    wrapped,
+                    argv,
                     [
                         "srun",
                         f"--nodes={resources['nodes']}",
@@ -276,6 +276,7 @@ class SlurmExecutor(Executor[SlurmJob]):
                         "--overlap",
                         "--kill-on-bad-exit=1",
                     ],
+                    environment=env_overrides,
                     workers=resources["nodes"],
                     cpus=resources["cpus"],
                     memory_gib=resources["memory"],

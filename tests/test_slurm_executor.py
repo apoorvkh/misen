@@ -284,6 +284,7 @@ def test_slurm_dask_dispatch_bootstraps_one_private_worker_per_node(monkeypatch,
     assert "MISEN_DASK_STARTUP_TIMEOUT=45" in script
     assert "MISEN_DASK_MEMORY_GIB=8" in script
     assert "SLURM_PROCID" not in script
+    assert not any(line.lstrip().startswith("env ") for line in script.splitlines())
 
 
 @pytest.mark.parametrize(

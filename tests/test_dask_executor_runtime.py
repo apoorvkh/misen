@@ -71,8 +71,9 @@ def _bash() -> str:
 
 def _managed_script(*environment: str, workers: int = 2) -> str:
     return managed_cluster_script(
-        ["env", *environment, sys.executable, "-c", _FAKE_ROLE_SOURCE],
-        ["env"],
+        [sys.executable, "-c", _FAKE_ROLE_SOURCE],
+        [_bash(), "-c", 'exec "$@"', "_"],
+        environment=dict(item.split("=", 1) for item in environment),
         workers=workers,
         cpus=1,
         memory_gib=1,
@@ -129,7 +130,7 @@ def test_scheduler_and_two_worker_roles_form_a_private_cluster(tmp_path: Path) -
         _stop(scheduler)
 
 
-def test_runtime_http_listeners_are_minimal_and_loopback_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_runtime_http_listeners_are_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, tuple[tuple[object, ...], dict[str, object]]] = {}
 
     class FakeServer:
@@ -154,8 +155,8 @@ def test_runtime_http_listeners_are_minimal_and_loopback_only(monkeypatch: pytes
     asyncio.run(dask_runtime._run_worker("tcp://scheduler", nthreads=1, memory_gib=1))  # noqa: SLF001
 
     for _, kwargs in captured.values():
-        assert kwargs["dashboard"] is False
-        assert kwargs["dashboard_address"] == "127.0.0.1:0"
+        assert kwargs["dashboard_address"] is None
+    assert captured["scheduler"][1]["local_directory"] == str(tmp_path)
 
 
 def test_no_dask_role_leaves_normal_worker_execution_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,8 +167,9 @@ def test_no_dask_role_leaves_normal_worker_execution_unchanged(monkeypatch: pyte
 
 def test_managed_cluster_script_safely_embeds_commands() -> None:
     script = managed_cluster_script(
-        ["env", "VALUE=spaces and 'quotes'", "bash", "-c", "printf '%s\\n' \"$VALUE\""],
+        ["bash", "-c", "printf '%s\\n' \"$VALUE\""],
         ["worker launcher", "--flag=spaces and 'quotes'"],
+        environment={"VALUE": "spaces and 'quotes'"},
         workers=2,
         cpus=4,
         memory_gib=8,
@@ -177,6 +179,7 @@ def test_managed_cluster_script_safely_embeds_commands() -> None:
     subprocess.run([_bash(), "-n"], input=script, text=True, check=True)
     assert "MISEN_DASK_MEMORY_GIB=8" in script
     assert "MISEN_DASK_ROLE=coordinator" not in script
+    assert not any(line.lstrip().startswith("env ") for line in script.splitlines())
 
 
 def test_managed_cluster_script_rejects_a_single_worker() -> None:
