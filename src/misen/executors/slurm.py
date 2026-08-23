@@ -87,21 +87,20 @@ class SlurmJob(Job):
         states: dict[str, JobState] = dict.fromkeys(by_id, "unknown")
         remaining = set(by_id)
 
-        squeue_out = _run_slurm_query("squeue", ["-h", "-j", ",".join(sorted(remaining)), "-o", "%i %T"])
-        for sid, raw in _parse_id_state_rows(squeue_out):
-            if sid in by_id:
-                states[sid] = _normalize_slurm_state(raw, in_queue=True)
-                remaining.discard(sid)
+        def collect(command: str, args: list[str], *, in_queue: bool) -> None:
+            for sid, raw in _parse_id_state_rows(_run_slurm_query(command, args)):
+                if sid in by_id:
+                    states[sid] = _normalize_slurm_state(raw, in_queue=in_queue)
+                    remaining.discard(sid)
+
+        collect("squeue", ["-h", "-j", ",".join(sorted(remaining)), "-o", "%i %T"], in_queue=True)
 
         if remaining:
-            sacct_out = _run_slurm_query(
+            collect(
                 "sacct",
                 ["-n", "-X", "-j", ",".join(sorted(remaining)), "--format=JobIDRaw,State"],
+                in_queue=False,
             )
-            for sid, raw in _parse_id_state_rows(sacct_out):
-                if sid in by_id:
-                    states[sid] = _normalize_slurm_state(raw, in_queue=False)
-                    remaining.discard(sid)
 
         result: dict[Job, JobState] = {}
         for sid, group in by_id.items():
@@ -423,21 +422,15 @@ def _resolve_slurm_cmd(name: str) -> str:
 def _run_slurm_query(command: str, args: list[str]) -> str:
     """Invoke a SLURM CLI tool and return stdout, or ``""`` if the call failed."""
     try:
-        binary = _resolve_slurm_cmd(command)
-    except FileNotFoundError:
-        return ""
-    try:
         result = subprocess.run(  # noqa: S603
-            [binary, *args],
+            [_resolve_slurm_cmd(command), *args],
             check=False,
             capture_output=True,
             text=True,
         )
     except OSError:
         return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout
+    return result.stdout if result.returncode == 0 else ""
 
 
 def _parse_id_state_rows(output: str) -> list[tuple[str, str]]:

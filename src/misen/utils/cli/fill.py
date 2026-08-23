@@ -7,6 +7,7 @@ import fnmatch
 import os
 import secrets
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -231,7 +232,7 @@ def iter_build_python_files(root: Path) -> Iterator[Path]:
         included_files.update(_iter_python_files_matching_pattern(root=config.project_root, pattern=pattern))
 
     for file_path in sorted(included_files):
-        if not _is_within_root(file_path, config.project_root):
+        if not file_path.is_relative_to(config.project_root):
             continue
         if _is_source_excluded(
             relative_path=file_path.relative_to(config.project_root),
@@ -282,16 +283,9 @@ def _load_build_selection_config(root: Path) -> BuildSelectionConfig:
 
 
 def _load_pyproject_data(pyproject_file: Path) -> dict[str, Any]:
-    import importlib
-
     try:
-        toml_module = importlib.import_module("tomllib")
-    except ModuleNotFoundError:
-        toml_module = importlib.import_module("tomli")
-
-    try:
-        return toml_module.loads(pyproject_file.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, toml_module.TOMLDecodeError) as exc:
+        return tomllib.loads(pyproject_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         msg = f"Failed parsing {pyproject_file}: {exc}"
         raise BuildSelectionError(msg) from exc
 
@@ -303,9 +297,7 @@ def _resolve_module_names(
     namespace: bool,
 ) -> list[str] | None:
     if raw_module_name is None:
-        if namespace:
-            return None
-        return [default_module_name]
+        return None if namespace else [default_module_name]
     if isinstance(raw_module_name, str):
         return [raw_module_name]
     if isinstance(raw_module_name, list):
@@ -390,10 +382,6 @@ def _path_subpaths(relative_posix: str) -> Iterator[str]:
             yield "/".join(parts[start:stop])
 
 
-def _is_within_root(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
-
-
 def _as_dict(value: object) -> dict[str, Any]:
     return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
 
@@ -424,17 +412,11 @@ def _is_placeholder_id(value: cst.BaseExpression) -> bool:
 
 
 def _insert_id_arg(args: list[cst.Arg], id_arg: cst.Arg) -> list[cst.Arg]:
-    insertion_index = 0
-    while insertion_index < len(args):
-        arg = args[insertion_index]
-        if arg.keyword is None and arg.star == "":
-            insertion_index += 1
-            continue
-        break
-
-    if insertion_index < len(args):
-        return [*args[:insertion_index], id_arg, *args[insertion_index:]]
-    return [*args, id_arg]
+    insertion_index = next(
+        (index for index, arg in enumerate(args) if arg.keyword is not None or arg.star != ""),
+        len(args),
+    )
+    return [*args[:insertion_index], id_arg, *args[insertion_index:]]
 
 
 def _make_id_arg(value: str) -> cst.Arg:
@@ -450,7 +432,7 @@ def _make_id_string(value: str) -> cst.SimpleString:
 
 
 def _default_uuid_factory() -> str:
-    return str(base64.b32encode(secrets.token_bytes(6)).decode("ascii").rstrip("="))
+    return base64.b32encode(secrets.token_bytes(6)).decode("ascii").rstrip("=")
 
 
 def _id_assign_equal() -> cst.AssignEqual:

@@ -18,10 +18,8 @@ _UV_INSTALLER_URL = f"https://astral.sh/uv/{UV_VERSION}/install.sh"
 _UV_MIN_MAJOR, _UV_MIN_MINOR, _UV_MIN_PATCH = UV_MIN_VERSION.split(".")
 
 
-# This resolver is embedded in worker bootstraps and also used on the
-# submitter. The versioned Astral installer selects the platform artifact and
-# verifies its checksum where ``sha256sum`` is available. Installing into a
-# temporary directory keeps the shared cache free of partial executables.
+# Shared by worker bootstraps and the submitter. The versioned installer picks
+# the platform artifact; a temporary directory prevents partial cache entries.
 _UV_RESOLVER = dedent(
     rf"""
     uv_is_supported() {{
@@ -132,15 +130,9 @@ def find_or_install_uv() -> str:
         raise RuntimeError(msg)
     script = f"set -euo pipefail\n{ensure_uv_script('', _managed_store_root())}\nprintf '%s\\n' \"$MISEN_UV_BIN\""
     try:
-        result = subprocess.run(  # noqa: S603
-            [bash, "-c", script],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        result = subprocess.run([bash, "-c", script], check=True, capture_output=True, text=True)  # noqa: S603
     except subprocess.CalledProcessError as e:
-        detail = (e.stderr or e.stdout).strip()
-        msg = detail or f"Could not locate or install uv >= {UV_MIN_VERSION}."
+        msg = (e.stderr or e.stdout).strip() or f"Could not locate or install uv >= {UV_MIN_VERSION}."
         raise RuntimeError(msg) from e
     path = result.stdout.strip()
     if not path:

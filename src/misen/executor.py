@@ -187,8 +187,9 @@ class Executor(Configurable, Generic[JobT]):
                         raise
                     progress_bar(1)
 
-        dispatched_task_count = sum(len(wu.graph.nodes()) for wu in pending_work_units)
-        completed_task_count = sum(len(wu.graph.nodes()) for wu in work_units) - dispatched_task_count
+        task_counts = {work_unit: len(work_unit.graph.nodes()) for work_unit in work_units}
+        dispatched_task_count = sum(task_counts[work_unit] for work_unit in pending_work_units)
+        completed_task_count = sum(task_counts.values()) - dispatched_task_count
         summary = f"Submitted {num_dispatch} job(s) / {dispatched_task_count} task(s) to {executor_name}"
         if num_complete > 0:
             summary += f" ({num_complete} job(s) / {completed_task_count} task(s) already complete)"
@@ -210,11 +211,10 @@ class Executor(Configurable, Generic[JobT]):
             logger.info("%s waiting for %d job(s) to reach terminal states.", executor_name, len(blocking_jobs))
             # One batched query per tick (e.g. a single squeue+sacct pair
             # for all SLURM jobs) instead of per-job polling.
-            while True:
-                states = bulk_job_states(blocking_jobs)
-                if all(state in ("done", "failed") for state in states.values()):
-                    break
+            states = bulk_job_states(blocking_jobs)
+            while any(state not in ("done", "failed") for state in states.values()):
                 time.sleep(0.5)
+                states = bulk_job_states(blocking_jobs)
             logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
 
             failed_jobs = [job for job, state in states.items() if state == "failed"]
@@ -311,9 +311,7 @@ class Job(ABC):
         Args:
             poll_s: Polling interval in seconds.
         """
-        while True:
-            if self.state() in ("done", "failed"):
-                return
+        while self.state() not in ("done", "failed"):
             time.sleep(poll_s)
 
 
@@ -332,13 +330,11 @@ def bulk_job_states(jobs: Iterable[Job]) -> dict[Job, JobState]:
     for klass, group in by_class.items():
         try:
             states = klass.bulk_state(group)
-        except (FileNotFoundError, OSError, RuntimeError):
-            for job in group:
-                result[job] = "unknown"
-            continue
-        for job in group:
-            state = states.get(job, "unknown")
-            result[job] = state if state in _VALID_JOB_STATES else "unknown"
+        except (OSError, RuntimeError):
+            states = {}
+        result.update(
+            {job: state if (state := states.get(job, "unknown")) in _VALID_JOB_STATES else "unknown" for job in group}
+        )
     return result
 
 

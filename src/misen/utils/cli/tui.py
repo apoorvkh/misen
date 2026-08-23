@@ -82,7 +82,7 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
     named_tasks = experiment.normalized_tasks()
     tasks = set(named_tasks.values())
     console = Console(stderr=True, soft_wrap=True)
-    final_states: dict[Job, JobState] = {}
+    final_states: dict[Job, JobState]
     with _runtime_job_board_suppressed():
         job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
         if not job_graph.nodes():
@@ -1166,7 +1166,6 @@ def _watch_live_tree(
             time.sleep(poll_interval_s)
             states = bulk_job_states(jobs)
             live.update(_build_session_rich_tree(named_tasks, job_graph, states))
-        live.update(_build_session_rich_tree(named_tasks, job_graph, states))
 
 
 def _watch_line_events(

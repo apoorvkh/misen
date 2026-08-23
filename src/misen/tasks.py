@@ -141,21 +141,12 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             A new Task sharing func/meta/signature/resources from ``self``
             but with updated args, kwargs, dependencies, and task_hash.
         """
-        state = self.__getstate__()
-        state["args"] = args
-        state["kwargs"] = MappingProxyType(kwargs)
-        state["dependencies"] = collect_task_dependencies(args, kwargs)
-        hashed_args = hash_task_arguments(
-            signature=self._signature,
+        return self._clone(
             args=args,
-            kwargs=kwargs,
-            meta=self.meta,
+            kwargs=MappingProxyType(kwargs),
+            dependencies=collect_task_dependencies(args, kwargs),
+            _task_hash=self._hash_for_arguments(args, kwargs),
         )
-        state["_task_hash"] = TaskHash.from_object((self.meta.id, hashed_args))
-        state["_frozen"] = True
-        new: Task[R] = object.__new__(Task)
-        new.__setstate__(state)
-        return new
 
     def with_resources(self, **overrides: Unpack[Resources]) -> Task[R]:
         """Create a copy of this task with selected :class:`Resources` fields replaced.
@@ -180,12 +171,16 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         """
         new_resources = _normalize_resources(cast("Resources", {**self.resources, **overrides}))
 
+        return self._clone(resources=new_resources)
+
+    def _clone(self, **changes: Any) -> Task[R]:
+        """Copy this task without repeating construction-time introspection."""
         state = self.__getstate__()
-        state["resources"] = new_resources
+        state.update(changes)
         state["_frozen"] = True
-        new: Task[R] = object.__new__(Task)
-        new.__setstate__(state)
-        return new
+        clone: Task[R] = object.__new__(Task)
+        clone.__setstate__(state)
+        return clone
 
     def __repr__(self) -> str:
         """Return a Python-call-like representation of the task."""
@@ -371,19 +366,21 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         # Fast path: return cached payload for cacheable tasks.
         if self.meta.cache:
-            if (result := workspace.results.get(self)) is not None:
+            try:
+                result = workspace.results[self]
+            except KeyError:
+                logger.log(TRACE_LEVEL, "Cache miss for %s.", self)
+            else:
                 logger.log(TRACE_LEVEL, "Cache hit for %s.", self)
                 return result
 
-            logger.log(TRACE_LEVEL, "Cache miss for %s.", self)
             if not compute_if_uncached:
                 msg = f"{self} is not cached."
                 logger.warning("Task result requested without compute_if_uncached and cache is missing for %s.", self)
                 raise CacheError(msg)
 
         # Guardrail: only recurse into dependencies when explicitly requested.
-        if not compute_uncached_deps and not self.are_deps_cached(workspace=workspace):
-            uncached_deps = list(self.uncached_deps(workspace=workspace))
+        if not compute_uncached_deps and (uncached_deps := list(self.uncached_deps(workspace=workspace))):
             logger.debug(
                 "Task %s has %d uncached dependency(ies) while compute_uncached_deps is disabled.",
                 self,
@@ -514,10 +511,14 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         """
         if hasattr(self, "_task_hash"):
             return self._task_hash
+        return self._hash_for_arguments(self.args, self.kwargs)
+
+    def _hash_for_arguments(self, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> TaskHash:
+        """Hash a set of arguments using this task's stable metadata."""
         hashed_args = hash_task_arguments(
             signature=self._signature,
-            args=self.args,
-            kwargs=self.kwargs,
+            args=args,
+            kwargs=kwargs,
             meta=self.meta,
         )
         return TaskHash.from_object((self.meta.id, hashed_args))

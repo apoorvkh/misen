@@ -12,6 +12,8 @@ from typing import Annotated, Any, cast
 
 import tyro
 
+from misen.utils.cli import system_exit_code
+
 __all__ = []
 
 
@@ -58,19 +60,6 @@ TopLevelCommand = (
 )
 
 
-def _system_exit_code(exc: SystemExit) -> int:
-    """Normalize ``SystemExit.code`` into a stable integer exit code."""
-    code = exc.code
-    if code is None:
-        return 0
-    if isinstance(code, int):
-        return code
-    try:
-        return int(code)
-    except (TypeError, ValueError):
-        return 1
-
-
 def main(argv: list[str] | None = None) -> int:
     """Execute the ``misen`` CLI."""
     args_list = list(sys.argv[1:] if argv is None else argv)
@@ -78,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             tyro.cli(cast("Any", TopLevelCommand), args=["--help"])
         except SystemExit as exc:
-            return _system_exit_code(exc)
+            return system_exit_code(exc)
         return 0
 
     parsed, unknown_args = cast(

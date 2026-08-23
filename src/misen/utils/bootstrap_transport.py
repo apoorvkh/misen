@@ -51,9 +51,8 @@ def _extract_transport_function(function: Callable[..., None]) -> tuple[str, str
         msg = "Python transports must be synchronous, source-backed Python functions."
         raise TypeError(msg)
 
-    expected_parameters = ("context", "operation", "ref", "destination")
     parameters = inspect.signature(function).parameters
-    if tuple(parameters) != expected_parameters or any(
+    if tuple(parameters) != ("context", "operation", "ref", "destination") or any(
         parameter.kind is not inspect.Parameter.POSITIONAL_OR_KEYWORD
         or parameter.default is not inspect.Parameter.empty
         for parameter in parameters.values()
@@ -88,11 +87,9 @@ def _extract_transport_function(function: Callable[..., None]) -> tuple[str, str
         msg = f"Could not read source for Python transport {function.__qualname__!r}."
         raise ValueError(msg) from e
     tree = ast.parse(source)
-    definitions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    if len(tree.body) != 1 or len(definitions) != 1 or not isinstance(definitions[0], ast.FunctionDef):
+    if len(tree.body) != 1 or not isinstance(definition := tree.body[0], ast.FunctionDef):
         msg = f"Python transport {function.__qualname__!r} must contain exactly one function definition."
         raise ValueError(msg)
-    definition = definitions[0]
     definition.decorator_list = []
     return definition.name, ast.unparse(ast.fix_missing_locations(definition))
 
@@ -121,7 +118,6 @@ def render_python_transport(
     if isinstance(requirements, str) or any(not isinstance(item, str) or not item.strip() for item in requirements):
         msg = "Python transport requirements must be non-empty PEP 508 strings."
         raise TypeError(msg)
-    requirement_list = list(requirements)
     try:
         encoded_context = json.dumps(dict(context), sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as e:
@@ -153,7 +149,7 @@ def render_python_transport(
         )
     )
     compile(program, f"<{name}-transport>", "exec")
-    dependency_args = _array([value for requirement in requirement_list for value in ("--with", requirement)])
+    dependency_args = _array([value for requirement in requirements for value in ("--with", requirement)])
     return _shell_block(
         f"""
         python_transport=(
@@ -228,24 +224,13 @@ def worker_bootstrap_script(
     ]
 
     if requires_pixi:
-        blocks.append(
-            _shell_block(
-                f"""
-                MISEN_PIXI_BIN="$(resolve_tool {_quote(pixi_bin or "")} pixi)"
-                export MISEN_PIXI_BIN
-                """
-            )
-        )
+        blocks.append(f'MISEN_PIXI_BIN="$(resolve_tool {_quote(pixi_bin or "")} pixi)"\nexport MISEN_PIXI_BIN')
 
     if transport_script is None:
         blocks.append(
-            _shell_block(
-                f"""
-                project_dir={_quote(project_dir or "")}
-                payload_path={_quote(payload)}
-                env_file_paths=({_array(env_files)})
-                """
-            )
+            f"project_dir={_quote(project_dir or '')}\n"
+            f"payload_path={_quote(payload)}\n"
+            f"env_file_paths=({_array(env_files)})"
         )
     else:
         transport_key = hashlib.sha256(transport_script.encode()).hexdigest()
@@ -267,62 +252,49 @@ def worker_bootstrap_script(
                             "$BASH" -euo pipefail -c "$transport_script"
                     }
 
-                    fetch_snapshot() {
-                        local ref="$1"
-                        local target="$2"
-                        [[ -d "$target" ]] && return 0
+                    fetch_transport() {
+                        local operation="$1"
+                        local ref="$2"
+                        local target="$3"
+                        local kind="$4"
+                        if [[ "$kind" == directory && -d "$target" ]] || [[ "$kind" == file && -f "$target" ]]; then
+                            return 0
+                        fi
 
                         mkdir -p -- "$(dirname -- "$target")"
                         local temp_root
                         temp_root="$(mktemp -d "${target}.tmp.XXXXXX")"
-                        local temp_target="$temp_root/snapshot"
+                        local temp_target="$temp_root/$operation"
 
-                        if ! run_transport snapshot "$ref" "$temp_target"; then
-                            rm -rf -- "$temp_root"
-                            return 1
-                        fi
-                        if [[ ! -d "$temp_target" ]]; then
-                            printf 'misen bootstrap: snapshot transport did not create a directory\n' >&2
+                        if ! run_transport "$operation" "$ref" "$temp_target"; then
                             rm -rf -- "$temp_root"
                             return 1
                         fi
 
-                        if mv -T -- "$temp_target" "$target" 2>/dev/null; then
-                            :
-                        elif [[ -d "$target" ]]; then
-                            :
-                        elif [[ ! -e "$target" ]]; then
-                            mv -- "$temp_target" "$target"
+                        if [[ "$kind" == directory ]]; then
+                            if [[ ! -d "$temp_target" ]]; then
+                                printf 'misen bootstrap: %s transport did not create a directory\n' "$operation" >&2
+                                rm -rf -- "$temp_root"
+                                return 1
+                            fi
+                            if mv -T -- "$temp_target" "$target" 2>/dev/null || [[ -d "$target" ]]; then
+                                :
+                            elif [[ ! -e "$target" ]]; then
+                                mv -- "$temp_target" "$target"
+                            else
+                                printf 'misen bootstrap: could not publish fetched snapshot\n' >&2
+                                rm -rf -- "$temp_root"
+                                return 1
+                            fi
                         else
-                            printf 'misen bootstrap: could not publish fetched snapshot\n' >&2
-                            rm -rf -- "$temp_root"
-                            return 1
+                            if [[ ! -f "$temp_target" ]]; then
+                                printf 'misen bootstrap: %s transport did not create a file\n' "$operation" >&2
+                                rm -rf -- "$temp_root"
+                                return 1
+                            fi
+                            chmod 0600 -- "$temp_target" 2>/dev/null || true
+                            mv -f -- "$temp_target" "$target"
                         fi
-                        rm -rf -- "$temp_root"
-                    }
-
-                    fetch_job_file() {
-                        local ref="$1"
-                        local target="$2"
-                        [[ -f "$target" ]] && return 0
-
-                        mkdir -p -- "$(dirname -- "$target")"
-                        local temp_root
-                        temp_root="$(mktemp -d "${target}.tmp.XXXXXX")"
-                        local temp_target="$temp_root/job-file"
-
-                        if ! run_transport job-file "$ref" "$temp_target"; then
-                            rm -rf -- "$temp_root"
-                            return 1
-                        fi
-                        if [[ ! -f "$temp_target" ]]; then
-                            printf 'misen bootstrap: job-file transport did not create a file\n' >&2
-                            rm -rf -- "$temp_root"
-                            return 1
-                        fi
-
-                        chmod 0600 -- "$temp_target" 2>/dev/null || true
-                        mv -f -- "$temp_target" "$target"
                         rm -rf -- "$temp_root"
                     }
                     """
@@ -331,19 +303,19 @@ def worker_bootstrap_script(
                     f"""
                     snapshot_key={_quote(snapshot_key or "")}
                     project_dir="$store_root/snapshots/$snapshot_key"
-                    fetch_snapshot "$snapshot_key" "$project_dir"
+                    fetch_transport snapshot "$snapshot_key" "$project_dir" directory
 
                     job_file_root="$store_root/job-files/{transport_key}"
                     payload_ref={_quote(payload)}
                     payload_path="$job_file_root/{payload_key}"
-                    fetch_job_file "$payload_ref" "$payload_path"
+                    fetch_transport job-file "$payload_ref" "$payload_path" file
 
                     env_file_refs=({_array(env_files)})
                     env_file_keys=({_array(env_file_keys)})
                     env_file_paths=()
                     for i in "${{env_file_refs[@]+"${{!env_file_refs[@]}}"}}"; do
                         path="$job_file_root/${{env_file_keys[$i]}}"
-                        fetch_job_file "${{env_file_refs[$i]}}" "$path"
+                        fetch_transport job-file "${{env_file_refs[$i]}}" "$path" file
                         env_file_paths+=("$path")
                     done
                     """

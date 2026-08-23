@@ -27,7 +27,7 @@ from misen.utils.nested import iter_nested_leaves, map_nested_leaves
 from misen.utils.runtime_events import runtime_event, task_label
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Mapping
     from inspect import Signature
     from pathlib import Path
     from types import BuiltinFunctionType, FunctionType
@@ -77,11 +77,6 @@ def hash_task_arguments(
         Arguments bound to runtime sentinels (e.g. ``SCRATCH_DIR``) are
         excluded from the result: the injected value varies per
         workspace/machine and must not contribute to task identity.
-
-    Raises:
-        RuntimeError: If a sentinel value reaches hash calculation anyway
-            (internal invariant; sentinel misuse is rejected at ``Task``
-            construction by :func:`validate_task_sentinels`).
     """
     from misen.tasks import Task
 
@@ -93,19 +88,7 @@ def hash_task_arguments(
             return value.result_hash(workspace=workspace) if hash_task_by_result else value.task_hash()
         return value
 
-    def argument_hash(value: Any) -> TaskHash | ResultHash:
-        if isinstance(value, Task):
-            return cast("TaskHash | ResultHash", leaf_representation(value))
-
-        if is_runtime_sentinel(value):
-            msg = f"Sentinel {value!r} unexpectedly reached argument hashing; sentinels never contribute to identity."
-            raise RuntimeError(msg)
-
-        return ResultHash.from_object(map_nested_leaves(value, leaf_representation))
-
     def include_argument(name: str, value: Any) -> bool:
-        # Runtime-injected values (e.g. SCRATCH_DIR) never contribute to task
-        # identity: the injected value varies per workspace/machine.
         if is_runtime_sentinel(value):
             return False
         return name not in meta.exclude and (name not in meta.defaults or meta.defaults[name] != value)
@@ -116,7 +99,11 @@ def hash_task_arguments(
         if not include_argument(name, value):
             continue
         try:
-            arg_hash = argument_hash(value)
+            arg_hash = (
+                cast("TaskHash | ResultHash", leaf_representation(value))
+                if isinstance(value, Task)
+                else ResultHash.from_object(map_nested_leaves(value, leaf_representation))
+            )
         except HashError as exc:
             prefix = f"Task '{meta.id}' argument '{name}' required unsupported hashing behavior. "
             if meta.cache:
@@ -213,24 +200,17 @@ def collect_task_dependencies(args: tuple[Any, ...], kwargs: Mapping[str, Any]) 
 
     values = itertools.chain(args, kwargs.values())
     leaves = itertools.chain.from_iterable(map(iter_nested_leaves, values))
-    return frozenset(_merge_equivalent_tasks(leaf for leaf in leaves if isinstance(leaf, Task)))
+    merged: dict[Task[Any], Task[Any]] = {}
+    for task in (leaf for leaf in leaves if isinstance(leaf, Task)):
+        existing = merged.get(task)
+        merged[task] = task if existing is None else _merge_equivalent_task(existing, task)
+    return frozenset(merged.values())
 
 
 def _merge_equivalent_task(existing: Task[Any], candidate: Task[Any]) -> Task[Any]:
     """Merge scheduler-facing resources for two task-equal handles."""
     merged_resources = aggregate_resources((existing.resources, candidate.resources), sum_time=False)
-    if merged_resources == existing.resources:
-        return existing
-    return existing.with_resources(**merged_resources)
-
-
-def _merge_equivalent_tasks(tasks: Iterable[Task[Any]]) -> list[Task[Any]]:
-    """Deduplicate task-equal handles without losing resource overrides."""
-    merged: dict[Task[Any], Task[Any]] = {}
-    for task in tasks:
-        existing = merged.get(task)
-        merged[task] = task if existing is None else _merge_equivalent_task(existing, task)
-    return list(merged.values())
+    return existing if merged_resources == existing.resources else existing.with_resources(**merged_resources)
 
 
 def execute_task(
@@ -284,27 +264,28 @@ def execute_task(
     if sync_scratch_dir:
         workspace.start_scratch_dir_sync(task=task)
     try:
-        with log_path.open("a", buffering=1, encoding="utf-8") as task_log:
-            with capture_all_output(task_log, tee_to_stdout=True):
-                try:
-                    result = task.func(*resolved_args, **resolved_kwargs)
-                except Exception as exc:
-                    from rich.console import Console as RichConsole
+        with (
+            log_path.open("a", buffering=1, encoding="utf-8") as task_log,
+            capture_all_output(task_log, tee_to_stdout=True),
+        ):
+            try:
+                result = task.func(*resolved_args, **resolved_kwargs)
+            except Exception as exc:
+                from rich.console import Console as RichConsole
 
-                    RichConsole(stderr=True).print_exception()
-                    logger.exception("Task failed: %s after %.2fs.", debug_name, time.perf_counter() - started_at)
-                    runtime_event(
-                        f"Task failed: {display} in {(time.perf_counter() - started_at):.2f}s",
-                        style="bold red",
-                    )
-                    raise exc.with_traceback(None) from None
+                elapsed_s = time.perf_counter() - started_at
+                RichConsole(stderr=True).print_exception()
+                logger.exception("Task failed: %s after %.2fs.", debug_name, elapsed_s)
+                runtime_event(f"Task failed: {display} in {elapsed_s:.2f}s", style="bold red")
+                raise exc.with_traceback(None) from None
     finally:
         if sync_scratch_dir:
             workspace.finalize_scratch_dir(task=task)
         workspace.finalize_task_log(task=log_identity, job_id=job_id)
 
-    logger.info("Task finished: %s in %.2fs.", debug_name, time.perf_counter() - started_at)
-    runtime_event(f"Task finished: {display} in {(time.perf_counter() - started_at):.2f}s", style="green")
+    elapsed_s = time.perf_counter() - started_at
+    logger.info("Task finished: %s in %.2fs.", debug_name, elapsed_s)
+    runtime_event(f"Task finished: {display} in {elapsed_s:.2f}s", style="green")
     return cast("R", result)
 
 
@@ -328,33 +309,7 @@ def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[s
 
 
 def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:
-    """Persist task result metadata and optional cached payload.
-
-    Durability/crash-safety invariant: a ``resolved_hash -> result_hash``
-    mapping may exist only if its payload is durably present. So for cacheable
-    tasks the payload is committed *before* the pointer -- ``ResultMap`` /
-    ``DiskResultStore`` serialize into a temp dir, fsync the payload contents,
-    ``os.rename`` it into place (atomic within one filesystem), and fsync the
-    parent -- and only then is the ``result_hash`` pointer written to the
-    workspace cache. A
-    crash (``scancel`` / SIGKILL) at any instant therefore leaves either
-    (no payload, no pointer) or (orphan payload, no pointer); both recompute
-    cleanly, while the dangling (pointer, no payload) state -- which makes a
-    dependent job hard-fail -- is never produced.
-
-    The previous ordering wrote the pointer first and relied on an in-process
-    ``except`` rollback to undo it if the payload write failed; a SIGKILL
-    between the two writes bypasses the rollback entirely and strands the
-    pointer. Ordering the durable writes correctly removes that window at the
-    source, so no rollback is needed: if the payload write raises, the pointer
-    was never written; if the pointer write raises, the payload is a harmless
-    content-addressed orphan that a later run reuses or overwrites.
-
-    Args:
-        task: Executed task.
-        result: Computed result.
-        workspace: Workspace to update.
-    """
+    """Persist a task payload before its hash pointer, preserving crash safety."""
     try:
         result_hash = ResultHash.from_object(result)
         index_mode = "result"
@@ -364,8 +319,9 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
 
     logger.debug("Persisting result hash for %s using index_mode=%s.", task, index_mode)
 
-    # Payload before pointer (see invariant above). Non-cacheable tasks have no
-    # payload, so only the pointer is recorded. ``store`` takes the already
+    # Writing a cacheable payload before its pointer prevents a crash from
+    # leaving a pointer to missing data. Non-cacheable tasks only need the
+    # pointer. ``store`` takes the already
     # computed ``result_hash`` because the pointer it would otherwise be read
     # from does not exist yet.
     if task.meta.cache:
@@ -434,20 +390,17 @@ def build_task_dependency_graph(
     Raises:
         ValueError: If ``exclude_cached=True`` and workspace is not provided.
     """
-    if exclude_cacheable:
+    if exclude_cached and not exclude_cacheable and workspace is None:
+        msg = "workspace is required when exclude_cached=True."
+        raise ValueError(msg)
+
+    if exclude_cacheable or exclude_cached:
 
         @cache
         def include_dependency(dependency: Task[Any]) -> bool:
-            return dependency.meta.cache is False
-
-    elif exclude_cached:
-        if workspace is None:
-            msg = "workspace is required when exclude_cached=True."
-            raise ValueError(msg)
-
-        @cache
-        def include_dependency(dependency: Task[Any]) -> bool:
-            return not dependency.is_cached(workspace=workspace)
+            if exclude_cacheable:
+                return not dependency.meta.cache
+            return not dependency.is_cached(workspace=cast("Workspace", workspace))
 
     else:
 
@@ -475,7 +428,7 @@ def build_task_dependency_graph(
             if not include_dependency(dependency):
                 continue
             dependency_node, is_new = get_node_index(dependency)
-            graph.add_edge(current_node, dependency_node, None)
+            graph.add_edge(current_node, dependency_node)
             if is_new:
                 stack.append(dependency)
 

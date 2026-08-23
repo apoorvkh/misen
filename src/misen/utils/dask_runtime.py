@@ -19,6 +19,7 @@ DEFAULT_DASK_STARTUP_TIMEOUT = 600
 MIN_DASK_WORKERS = 2
 _DASK_HTTP_ADDRESS = "127.0.0.1:0"  # fail closed if Dask bypasses the no-HTTP override
 _DASK_SHUTDOWN_TIMEOUT = 30
+_SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 class _NoHttpServer:
@@ -59,8 +60,6 @@ def managed_cluster_script(
     if workers < MIN_DASK_WORKERS:
         msg = f"DASK_CLIENT requires at least {MIN_DASK_WORKERS} workers."
         raise ValueError(msg)
-    command_array = shlex.join(command)
-    launcher_array = shlex.join(worker_launcher)
     environment_exports = "\n        ".join(
         f"export {shlex.quote(f'{name}={value}')}" for name, value in environment.items()
     )
@@ -83,8 +82,8 @@ def managed_cluster_script(
         trap 'exit 130' INT
         trap 'exit 143' TERM
 
-        command=({command_array})
-        worker_launcher=({launcher_array})
+        command=({shlex.join(command)})
+        worker_launcher=({shlex.join(worker_launcher)})
         {environment_exports}
         {DASK_ROLE_ENV}=scheduler {DASK_SCHEDULER_FILE_ENV}="$scheduler_file" "${{command[@]}}" &
         scheduler_pid=$!
@@ -116,14 +115,13 @@ def managed_cluster_script(
             "${{command[@]}}" &
         coordinator_pid=$!
 
-        while kill -0 "$coordinator_pid" 2>/dev/null; do
-            if ! kill -0 "$scheduler_pid" 2>/dev/null || ! kill -0 "$worker_pid" 2>/dev/null; then
-                printf 'misen: Dask runtime exited while the work unit was running\n' >&2
-                exit 1
-            fi
+        runtime_alive() {{
+            kill -0 "$scheduler_pid" 2>/dev/null && kill -0 "$worker_pid" 2>/dev/null
+        }}
+        while kill -0 "$coordinator_pid" 2>/dev/null && runtime_alive; do
             sleep 0.2
         done
-        if ! kill -0 "$scheduler_pid" 2>/dev/null || ! kill -0 "$worker_pid" 2>/dev/null; then
+        if ! runtime_alive; then
             printf 'misen: Dask runtime exited while the work unit was running\n' >&2
             exit 1
         fi
@@ -134,14 +132,13 @@ def managed_cluster_script(
         # Closing the scheduler asks every worker to exit cleanly, allowing
         # the attached launcher (for example, srun) to finish normally.
         kill "$scheduler_pid" 2>/dev/null || true
-        scheduler_status=0
-        wait "$scheduler_pid" || scheduler_status=$?
+        runtime_status=0
+        wait "$scheduler_pid" || runtime_status=$?
         scheduler_pid=
-        worker_status=0
-        wait "$worker_pid" || worker_status=$?
+        wait "$worker_pid" || runtime_status=$?
         worker_pid=
 
-        if (( scheduler_status != 0 || worker_status != 0 )); then
+        if (( runtime_status != 0 )); then
             printf 'misen: Dask runtime failed during shutdown\n' >&2
             exit 1
         fi
@@ -165,21 +162,18 @@ def run_role_from_env() -> bool:
     import asyncio
 
     if role == "scheduler":
-        scheduler_file = _required_env(DASK_SCHEDULER_FILE_ENV)
-        asyncio.run(_run_scheduler(Path(scheduler_file)))
-        return True
-    if role == "worker":
-        address = _required_env(DASK_SCHEDULER_ADDRESS_ENV)
-        asyncio.run(
-            _run_worker(
-                address,
-                nthreads=positive_int_env(DASK_CPUS_ENV),
-                memory_gib=positive_int_env(DASK_MEMORY_GIB_ENV),
-            )
+        run = _run_scheduler(Path(_required_env(DASK_SCHEDULER_FILE_ENV)))
+    elif role == "worker":
+        run = _run_worker(
+            _required_env(DASK_SCHEDULER_ADDRESS_ENV),
+            nthreads=positive_int_env(DASK_CPUS_ENV),
+            memory_gib=positive_int_env(DASK_MEMORY_GIB_ENV),
         )
-        return True
-    msg = f"Unsupported {DASK_ROLE_ENV} value: {role!r}."
-    raise RuntimeError(msg)
+    else:
+        msg = f"Unsupported {DASK_ROLE_ENV} value: {role!r}."
+        raise RuntimeError(msg)
+    asyncio.run(run)
+    return True
 
 
 async def _run_scheduler(scheduler_file: Path) -> None:
@@ -206,7 +200,7 @@ async def _run_scheduler(scheduler_file: Path) -> None:
         async with scheduler:
             loop = asyncio.get_running_loop()
             shutdown = asyncio.Event()
-            for sig in (signal.SIGINT, signal.SIGTERM):
+            for sig in _SHUTDOWN_SIGNALS:
                 loop.add_signal_handler(sig, shutdown.set)
 
             async def close_on_signal() -> None:
@@ -238,7 +232,7 @@ async def _run_scheduler(scheduler_file: Path) -> None:
                 shutdown_task.cancel()
                 finished_task.cancel()
                 await asyncio.gather(shutdown_task, finished_task, return_exceptions=True)
-                for sig in (signal.SIGINT, signal.SIGTERM):
+                for sig in _SHUTDOWN_SIGNALS:
                     loop.remove_signal_handler(sig)
     finally:
         temporary.unlink(missing_ok=True)
@@ -267,11 +261,10 @@ async def _run_worker(address: str, *, nthreads: int, memory_gib: int) -> None:
 
 def _required_env(name: str) -> str:
     """Return one required nonempty environment value."""
-    value = os.environ.get(name)
-    if value:
-        return value
-    msg = f"{name} is required for this Dask runtime role."
-    raise RuntimeError(msg)
+    if not (value := os.environ.get(name)):
+        msg = f"{name} is required for this Dask runtime role."
+        raise RuntimeError(msg)
+    return value
 
 
 def positive_int_env(name: str, *, default: int | None = None) -> int:
@@ -281,12 +274,11 @@ def positive_int_env(name: str, *, default: int | None = None) -> int:
         return default
     if raw is None:
         raw = _required_env(name)
+    msg = f"{name} must be a positive integer, got {raw!r}."
     try:
         value = int(raw)
     except ValueError as exc:
-        msg = f"{name} must be a positive integer, got {raw!r}."
         raise RuntimeError(msg) from exc
     if value < 1:
-        msg = f"{name} must be a positive integer, got {raw!r}."
         raise RuntimeError(msg)
     return value

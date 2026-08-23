@@ -97,9 +97,8 @@ class ConfigurableMeta(msgspec.StructMeta, ABCMeta):
 
     def __call__(cls, **kwargs: Any) -> Any:
         """Return memoized instance for given constructor kwargs."""
-        key = msgspec.json.encode((str(cls.__module__), str(cls.__qualname__), kwargs))
-        instance = ConfigurableMeta._instances.get(key)
-        if instance is None:
+        key = msgspec.json.encode((cls.__module__, cls.__qualname__, kwargs))
+        if (instance := ConfigurableMeta._instances.get(key)) is None:
             instance = super().__call__(**kwargs)
             ConfigurableMeta._instances[key] = instance
         return instance
@@ -141,29 +140,20 @@ class Configurable(msgspec.Struct, dict=True, weakref=True, metaclass=Configurab
         Returns:
             The resolved instance.
         """
-        if settings is None:
-            settings = Settings()
-
+        settings = Settings() if settings is None else settings
         section = dict(settings.toml_data.get(cls._config_key, {}))
         type_name = section.pop("type", None)
-
         if type_name is None:
-            if section:
-                return cls.resolve_type(cls._config_default_type)(**section)
-            return cls.resolve_type(cls._config_default_type)()
-
+            type_name = cls._config_default_type
         if not isinstance(type_name, str):
             msg = f"Invalid type for [{cls._config_key}] in settings: expected string."
             raise ConfigError(msg)
-
         return cls.resolve_type(type_name)(**section)
 
     @classmethod
     def resolve_auto(cls, /, obj: Self | Literal["auto"] = "auto") -> Self:
         """Resolve ``"auto"`` value."""
-        if obj == "auto":
-            return cls.auto()
-        return obj
+        return cls.auto() if obj == "auto" else obj
 
     def __reduce__(self) -> tuple[Callable[[type[msgspec.Struct], bytes], msgspec.Struct], tuple[type[Self], bytes]]:
         """Support pickling by reconstructing from msgpack bytes."""

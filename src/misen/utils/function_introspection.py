@@ -53,16 +53,14 @@ def is_local_project_function(func: FunctionType | BuiltinFunctionType) -> bool:
     Returns:
         ``True`` if source path is outside known stdlib/site-packages roots.
     """
-    source_callable: object = func
     with suppress(ValueError):
-        source_callable = unwrap(func)
+        func = unwrap(func)
 
-    if not is_function_object(source_callable):
+    if not is_function_object(func):
         return False
 
     try:
-        source_file = getsourcefile(source_callable) or getfile(source_callable)
-        source_path = Path(source_file).resolve()
+        source_path = Path(getsourcefile(func) or getfile(func)).resolve()
     except (OSError, TypeError):
         return False
     return not any(source_path.is_relative_to(root) for root in _EXTERNAL_LIBRARY_ROOTS)
@@ -100,16 +98,13 @@ def canonical_lambda_ast_representation(func: FunctionType) -> str:
         raise ValueError(msg)
 
     target_line = func.__code__.co_firstlineno
-    line_matches = [node for node in lambda_nodes if (start_line + node.lineno - 1) == target_line]
-    node = line_matches[0] if line_matches else lambda_nodes[0]
+    node = next((node for node in lambda_nodes if start_line + node.lineno - 1 == target_line), lambda_nodes[0])
     return dump(node, include_attributes=False)
 
 
 def lambda_task_id(func: FunctionType) -> str:
     """Return deterministic task id for a lambda function."""
-    canonical_ast = canonical_lambda_ast_representation(func)
-    digest = sha256(canonical_ast.encode()).hexdigest()
-    return f"lambda.{digest}"
+    return f"lambda.{sha256(canonical_lambda_ast_representation(func).encode()).hexdigest()}"
 
 
 def external_callable_id(func: FunctionType | BuiltinFunctionType) -> str:

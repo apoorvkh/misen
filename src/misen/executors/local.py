@@ -579,8 +579,7 @@ class _LocalScheduler:
 
         accelerator_count = resources["accelerators"] if resources["accelerator_type"] != "tpu" else 0
         if len(self.available_accelerator_indices) < accelerator_count:
-            for index in cpu_indices:
-                insort(self.available_cpu_indices, index)
+            self._release_allocations(cpu_indices, [])
             return None
         accelerator_indices = self.available_accelerator_indices[:accelerator_count]
         del self.available_accelerator_indices[:accelerator_count]

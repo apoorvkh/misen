@@ -49,12 +49,10 @@ def _open_dask_client() -> Iterator[Any]:
         msg = "DASK_CLIENT requires the `distributed` package in the task environment."
         raise RuntimeError(msg) from exc
 
-    address = os.environ.get(DASK_SCHEDULER_ADDRESS_ENV)
-    if not address:
+    if not (address := os.environ.get(DASK_SCHEDULER_ADDRESS_ENV)):
         msg = "DASK_CLIENT was requested, but this executor did not provide a Dask scheduler."
         raise RuntimeError(msg)
-    expected_workers = positive_int_env(DASK_EXPECTED_WORKERS_ENV)
-    if expected_workers < MIN_DASK_WORKERS:
+    if (expected_workers := positive_int_env(DASK_EXPECTED_WORKERS_ENV)) < MIN_DASK_WORKERS:
         msg = f"{DASK_EXPECTED_WORKERS_ENV} must be at least {MIN_DASK_WORKERS} for DASK_CLIENT."
         raise RuntimeError(msg)
     startup_timeout = positive_int_env(DASK_STARTUP_TIMEOUT_ENV, default=DEFAULT_DASK_STARTUP_TIMEOUT)

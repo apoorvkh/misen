@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, Self, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, Self, TypeVar, cast, runtime_checkable
 
 import flufl.lock._lockfile as flufl
 import msgspec
@@ -54,12 +54,10 @@ def _measure_clock_offset(directory: Path) -> timedelta:
         finally:
             os.close(fd)
             Path(probe).unlink()
-        local_mid_ns = (t_before_ns + t_after_ns) // 2
-        samples.append(fs_mtime_ns - local_mid_ns)
+        samples.append(fs_mtime_ns - (t_before_ns + t_after_ns) // 2)
 
     samples.sort()
-    median_ns = samples[len(samples) // 2]
-    return timedelta(microseconds=median_ns // 1000)
+    return timedelta(microseconds=samples[len(samples) // 2] // 1000)
 
 
 def _get_clock_offset(lockfile: Path) -> timedelta:
@@ -138,6 +136,18 @@ class LockLike(Protocol):
         """Return whether lock is currently held."""
 
 
+_LockT = TypeVar("_LockT", bound=LockLike)
+
+
+@contextmanager
+def _lock_context(lock: _LockT, *, blocking: bool, timeout: int | None) -> Iterator[_LockT]:
+    lock.acquire(blocking=blocking, timeout=timeout)
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
 class NFSLock:
     """NFS-safe lock implementation backed by ``flufl.lock`` lock files."""
 
@@ -162,9 +172,8 @@ class NFSLock:
             refresh_interval: Optional refresh interval in seconds.
         """
         self._lock = _ClockOffsetLock(lockfile=str(lockfile), lifetime=lifetime)
-
         self._refresh_interval = refresh_interval
-        if self._refresh_interval is not None:
+        if refresh_interval is not None:
             self._stop = threading.Event()
             self._thread = None
 
@@ -209,10 +218,7 @@ class NFSLock:
             msg = f"Could not acquire lock {self._lock.lockfile!r} within {reported}s."
             raise LockUnavailableError(msg) from e
 
-        if self._refresh_interval is not None:
-            if self._thread is not None and self._thread.is_alive():
-                return
-
+        if self._refresh_interval is not None and (self._thread is None or not self._thread.is_alive()):
             self._stop.clear()
             self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
             self._thread.start()
@@ -227,8 +233,7 @@ class NFSLock:
         """
         if self._refresh_interval is not None:
             self._stop.set()
-            thread = self._thread
-            if thread is not None and thread.is_alive():
+            if (thread := self._thread) is not None and thread.is_alive():
                 # Give the refresh loop up to one full interval to notice the
                 # stop event and exit cleanly. If it doesn't, we log and move
                 # on -- ``_stop`` is still set, so the loop will terminate on
@@ -245,22 +250,9 @@ class NFSLock:
 
         self._lock.unlock(unconditionally=True)
 
-    @contextmanager
-    def context(self, *, blocking: bool = True, timeout: int | None = None) -> Iterator[Self]:
-        """Context manager that acquires/releases lock.
-
-        Args:
-            blocking: Whether acquisition should block.
-            timeout: Optional acquisition timeout in seconds.
-
-        Yields:
-            ``self`` while lock is held.
-        """
-        self.acquire(blocking=blocking, timeout=timeout)
-        try:
-            yield self
-        finally:
-            self.release()
+    def context(self, *, blocking: bool = True, timeout: int | None = None) -> AbstractContextManager[Self]:
+        """Return a context manager that acquires and releases this lock."""
+        return _lock_context(self, blocking=blocking, timeout=timeout)
 
     def is_locked(self) -> bool:
         """Return whether underlying lock is held."""
@@ -352,8 +344,7 @@ class ObjectStoreLock(LockLike):
 
     def _payload(self, *, expiry_ms: int | None = None) -> bytes:
         """Return JSON-encoded lock metadata for the current lease."""
-        if expiry_ms is None:
-            expiry_ms = _now_ms() + self._lifetime_ms
+        expiry_ms = _now_ms() + self._lifetime_ms if expiry_ms is None else expiry_ms
         return msgspec.json.encode({"owner": self._owner, "expiry_ms": expiry_ms})
 
     @staticmethod
@@ -363,13 +354,7 @@ class ObjectStoreLock(LockLike):
         obstore expects an :class:`obstore.UpdateVersion` ``TypedDict`` here
         (only ``e_tag`` / ``version`` keys present, omitted when ``None``).
         """
-        mode: dict[str, str] = {}
-        e_tag = token.get("e_tag")
-        version = token.get("version")
-        if e_tag is not None:
-            mode["e_tag"] = e_tag
-        if version is not None:
-            mode["version"] = version
+        mode = {key: value for key in ("e_tag", "version") if (value := token.get(key)) is not None}
         if not mode:
             msg = "Object store did not return an update token for conditional writes."
             raise LockUnavailableError(msg)
@@ -439,11 +424,10 @@ class ObjectStoreLock(LockLike):
 
     def _start_refresh(self) -> None:
         """Start the background refresh thread if refresh is enabled."""
-        if self._refresh_interval is None:
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
-        self._thread.start()
+        if self._refresh_interval is not None:
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
+            self._thread.start()
 
     def _refresh_loop(self) -> None:
         """Refresh the lease until release or until refresh fails."""
@@ -461,8 +445,7 @@ class ObjectStoreLock(LockLike):
     def release(self) -> None:
         """Release the lock. Idempotent."""
         self._stop.set()
-        thread = self._thread
-        if thread is not None and thread.is_alive():
+        if (thread := self._thread) is not None and thread.is_alive():
             join_timeout = max(self._refresh_interval or 1, 1)
             thread.join(timeout=join_timeout)
         self._thread = None
@@ -477,11 +460,6 @@ class ObjectStoreLock(LockLike):
         """Return whether this lock instance currently holds the lease."""
         return self._token is not None
 
-    @contextmanager
-    def context(self, *, blocking: bool = True, timeout: int | None = None) -> Iterator[Self]:
-        """Context manager that acquires/releases the lock."""
-        self.acquire(blocking=blocking, timeout=timeout)
-        try:
-            yield self
-        finally:
-            self.release()
+    def context(self, *, blocking: bool = True, timeout: int | None = None) -> AbstractContextManager[Self]:
+        """Return a context manager that acquires and releases this lock."""
+        return _lock_context(self, blocking=blocking, timeout=timeout)

@@ -54,6 +54,17 @@ def _digest_mapping_items(items: Iterable[tuple[Any, Any]], element_hash: Elemen
     )
 
 
+class _InstanceMatch:
+    """Match instances declaratively while preserving each handler's digest."""
+
+    _types: type[Any] | tuple[type[Any], ...]
+    _excluded_types: tuple[type[Any], ...] = ()
+
+    @classmethod
+    def match(cls, obj: Any) -> bool:
+        return isinstance(obj, cls._types) and not isinstance(obj, cls._excluded_types)
+
+
 class NoneHandler(PrimitiveHandler):
     @staticmethod
     def match(obj: Any) -> bool:
@@ -64,50 +75,41 @@ class NoneHandler(PrimitiveHandler):
         return hash_values(None)
 
 
-class EnumHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, enum.Enum)
+class EnumHandler(_InstanceMatch, Handler):
+    _types = enum.Enum
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
         return element_hash(obj.value)
 
 
-class BoolHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, bool)
+class BoolHandler(_InstanceMatch, PrimitiveHandler):
+    _types = bool
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(bool(obj))
 
 
-class IntHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, int) and not isinstance(obj, (bool, enum.Enum))
+class IntHandler(_InstanceMatch, PrimitiveHandler):
+    _types = int
+    _excluded_types = (bool, enum.Enum)
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(int(obj))
 
 
-class FloatHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, float)
+class FloatHandler(_InstanceMatch, PrimitiveHandler):
+    _types = float
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(_normalized_float(float(obj)))
 
 
-class ComplexHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, complex)
+class ComplexHandler(_InstanceMatch, PrimitiveHandler):
+    _types = complex
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -120,40 +122,32 @@ class ComplexHandler(PrimitiveHandler):
         )
 
 
-class StrHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, str)
+class StrHandler(_InstanceMatch, PrimitiveHandler):
+    _types = str
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(str(obj))
 
 
-class BytearrayHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, bytearray)
+class BytearrayHandler(_InstanceMatch, PrimitiveHandler):
+    _types = bytearray
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(bytes(obj))
 
 
-class BytesHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, bytes)
+class BytesHandler(_InstanceMatch, PrimitiveHandler):
+    _types = bytes
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(bytes(obj))
 
 
-class MemoryviewHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, memoryview)
+class MemoryviewHandler(_InstanceMatch, PrimitiveHandler):
+    _types = memoryview
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -170,10 +164,8 @@ class MemoryviewHandler(PrimitiveHandler):
         )
 
 
-class DatetimeHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, datetime.datetime)
+class DatetimeHandler(_InstanceMatch, PrimitiveHandler):
+    _types = datetime.datetime
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -192,20 +184,17 @@ class DatetimeHandler(PrimitiveHandler):
         )
 
 
-class DateHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, datetime.date) and not isinstance(obj, datetime.datetime)
+class DateHandler(_InstanceMatch, PrimitiveHandler):
+    _types = datetime.date
+    _excluded_types = (datetime.datetime,)
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values((obj.year, obj.month, obj.day))
 
 
-class TimeHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, datetime.time)
+class TimeHandler(_InstanceMatch, PrimitiveHandler):
+    _types = datetime.time
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -221,40 +210,32 @@ class TimeHandler(PrimitiveHandler):
         )
 
 
-class TimedeltaHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, datetime.timedelta)
+class TimedeltaHandler(_InstanceMatch, PrimitiveHandler):
+    _types = datetime.timedelta
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values((obj.days, obj.seconds, obj.microseconds))
 
 
-class UUIDHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, uuid.UUID)
+class UUIDHandler(_InstanceMatch, PrimitiveHandler):
+    _types = uuid.UUID
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(obj.bytes)
 
 
-class DecimalHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, decimal.Decimal)
+class DecimalHandler(_InstanceMatch, PrimitiveHandler):
+    _types = decimal.Decimal
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(str(obj))
 
 
-class FractionHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, fractions.Fraction)
+class FractionHandler(_InstanceMatch, PrimitiveHandler):
+    _types = fractions.Fraction
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -262,27 +243,25 @@ class FractionHandler(PrimitiveHandler):
         return hash_values((value.numerator, value.denominator))
 
 
-class RangeHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, range)
+class RangeHandler(_InstanceMatch, PrimitiveHandler):
+    _types = range
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values((obj.start, obj.stop, obj.step))
 
 
-class SliceHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, slice)
+class SliceHandler(_InstanceMatch, PrimitiveHandler):
+    _types = slice
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values((obj.start, obj.stop, obj.step))
 
 
-class PathHandler(PrimitiveHandler):
+class PathHandler(_InstanceMatch, PrimitiveHandler):
+    _types = pathlib.PurePath
+
     @staticmethod
     def type_name(obj: Any) -> str:
         # pathlib.Path() produces PosixPath on Unix and WindowsPath on
@@ -294,29 +273,21 @@ class PathHandler(PrimitiveHandler):
             return "pathlib.Path"
         return qualified_type_name(type(obj))
 
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, pathlib.PurePath)
-
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values((obj.drive, obj.root, obj.parts))
 
 
-class PatternHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, re.Pattern)
+class PatternHandler(_InstanceMatch, PrimitiveHandler):
+    _types = re.Pattern
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values((obj.pattern, obj.flags))
 
 
-class ZoneInfoHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, zoneinfo.ZoneInfo)
+class ZoneInfoHandler(_InstanceMatch, PrimitiveHandler):
+    _types = zoneinfo.ZoneInfo
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -327,30 +298,23 @@ class ZoneInfoHandler(PrimitiveHandler):
         return hash_values(key)
 
 
-class IPAddressHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(
-            obj,
-            (
-                ipaddress.IPv4Address,
-                ipaddress.IPv6Address,
-                ipaddress.IPv4Network,
-                ipaddress.IPv6Network,
-                ipaddress.IPv4Interface,
-                ipaddress.IPv6Interface,
-            ),
-        )
+class IPAddressHandler(_InstanceMatch, PrimitiveHandler):
+    _types = (
+        ipaddress.IPv4Address,
+        ipaddress.IPv6Address,
+        ipaddress.IPv4Network,
+        ipaddress.IPv6Network,
+        ipaddress.IPv4Interface,
+        ipaddress.IPv6Interface,
+    )
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
         return hash_values(str(obj))
 
 
-class ArrayHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, array.array)
+class ArrayHandler(_InstanceMatch, PrimitiveHandler):
+    _types = array.array
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -369,7 +333,7 @@ class EllipsisHandler(PrimitiveHandler):
         return hash_values("...")
 
 
-class TypeHandler(Handler):
+class TypeHandler(_InstanceMatch, Handler):
     """Hash type objects (classes) by their qualified name.
 
     Parameterized generic aliases (``list[int]``, ``dict[str, int]``,
@@ -380,9 +344,7 @@ class TypeHandler(Handler):
     every parameterization of the same origin would collide.
     """
 
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, (type, types.GenericAlias))
+    _types = (type, types.GenericAlias)
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
@@ -402,40 +364,32 @@ class TypeHandler(Handler):
         )
 
 
-class SimpleNamespaceHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, types.SimpleNamespace)
+class SimpleNamespaceHandler(_InstanceMatch, Handler):
+    _types = types.SimpleNamespace
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
         return _digest_mapping_items(vars(obj).items(), element_hash)
 
 
-class UserDictHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, UserDict)
+class UserDictHandler(_InstanceMatch, Handler):
+    _types = UserDict
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
         return _digest_mapping_items(obj.data.items(), element_hash)
 
 
-class UserListHandler(CollectionHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, UserList)
+class UserListHandler(_InstanceMatch, CollectionHandler):
+    _types = UserList
 
     @staticmethod
     def elements(obj: Any) -> list[Any]:
         return list(obj.data)
 
 
-class UserStringHandler(PrimitiveHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, UserString)
+class UserStringHandler(_InstanceMatch, PrimitiveHandler):
+    _types = UserString
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
@@ -454,10 +408,8 @@ class NamedTupleHandler(CollectionHandler):
         return [(f, getattr(obj, f)) for f in type(obj)._fields]
 
 
-class ListHandler(CollectionHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, (list, tuple, set, frozenset))
+class ListHandler(_InstanceMatch, CollectionHandler):
+    _types = (list, tuple, set, frozenset)
 
     @staticmethod
     def elements(obj: Any) -> list[Any] | set[Any]:
@@ -468,30 +420,24 @@ class ListHandler(CollectionHandler):
         return obj
 
 
-class DequeHandler(CollectionHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, deque)
+class DequeHandler(_InstanceMatch, CollectionHandler):
+    _types = deque
 
     @staticmethod
     def elements(obj: Any) -> list[Any]:
         return list(obj)
 
 
-class OrderedDictHandler(CollectionHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, OrderedDict)
+class OrderedDictHandler(_InstanceMatch, CollectionHandler):
+    _types = OrderedDict
 
     @staticmethod
     def elements(obj: Any) -> list[Any]:
         return list(obj.items())
 
 
-class DefaultDictHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, defaultdict)
+class DefaultDictHandler(_InstanceMatch, Handler):
+    _types = defaultdict
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
@@ -504,70 +450,57 @@ class DefaultDictHandler(Handler):
         )
 
 
-class CounterHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, Counter)
+class CounterHandler(_InstanceMatch, Handler):
+    _types = Counter
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
         return _digest_mapping_items(obj.items(), element_hash)
 
 
-class DictHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, dict) and not isinstance(obj, (OrderedDict, defaultdict, Counter))
+class DictHandler(_InstanceMatch, Handler):
+    _types = dict
+    _excluded_types = (OrderedDict, defaultdict, Counter)
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
         return _digest_mapping_items(obj.items(), element_hash)
 
 
-class DictKeysViewHandler(CollectionHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, _DICT_KEYS_TYPE)
+class DictKeysViewHandler(_InstanceMatch, CollectionHandler):
+    _types = _DICT_KEYS_TYPE
 
     @staticmethod
     def elements(obj: Any) -> set[Any]:
         return set(obj)
 
 
-class DictValuesViewHandler(CollectionHandler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, _DICT_VALUES_TYPE)
+class DictValuesViewHandler(_InstanceMatch, CollectionHandler):
+    _types = _DICT_VALUES_TYPE
 
     @staticmethod
     def elements(obj: Any) -> list[Any]:
         return list(obj)
 
 
-class DictItemsViewHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, _DICT_ITEMS_TYPE)
+class DictItemsViewHandler(_InstanceMatch, Handler):
+    _types = _DICT_ITEMS_TYPE
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
         return _digest_mapping_items(obj, element_hash)
 
 
-class ChainMapHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, ChainMap)
+class ChainMapHandler(_InstanceMatch, Handler):
+    _types = ChainMap
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:
         return hash_values([_digest_mapping_items(mapping.items(), element_hash) for mapping in obj.maps])
 
 
-class MappingProxyHandler(Handler):
-    @staticmethod
-    def match(obj: Any) -> bool:
-        return isinstance(obj, types.MappingProxyType)
+class MappingProxyHandler(_InstanceMatch, Handler):
+    _types = types.MappingProxyType
 
     @classmethod
     def digest(cls, obj: Any, element_hash: ElementHasher, /) -> int:

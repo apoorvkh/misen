@@ -1,47 +1,8 @@
-"""Keyed collection of files persistable as a misen task result.
+"""Keyed files that can be persisted as a task result without loading them.
 
-A :class:`FileMap` lets a task return "here are some files" instead of
-materializing their contents in memory.  It is built incrementally from
-sources on disk, and when persisted via misen's serializer the files are
-moved into the result's cache directory, preserving their relative
-layout.  On reload, the values are :class:`Path` objects that resolve
-into the *current* workspace's cache directory, and :attr:`FileMap.root`
-gives the single directory that holds them — suitable for handing to
-external tools that consume a directory (TensorBoard, MLflow, ...).
-
-Use this when a task produces many or large files (model checkpoints,
-generated images, training logs, ...) and you want them to flow into
-downstream tasks without round-tripping their contents through RAM.  The
-intended role is to extract files out of a task's scratch directory
-before the runtime cleans it up after the task completes.
-
-Build it with the chainable ``include_*`` / ``exclude_*`` methods (or the
-``from_glob`` / ``from_tree`` one-liners that wrap them)::
-
-    from misen import FileMap, SCRATCH_DIR, meta
-
-    @meta(cache=True)
-    def train(scratch_dir: Path = SCRATCH_DIR) -> FileMap:
-        return (FileMap()
-                .include_glob(scratch_dir, "ckpt_*.pt",
-                              key=lambda p: int(p.stem.split("_")[1]))
-                .include_tree(scratch_dir / "tb_logs")
-                .exclude_glob("*.tmp"))
-
-    @meta(cache=True)
-    def analyze(files: FileMap, step: int) -> dict[str, float]:
-        state = torch.load(files[step], weights_only=True)  # by key
-        ...
-
-    # Hand the preserved directory to an external tool:
-    logs = train_task.result()
-    subprocess.run(["tensorboard", "--logdir", str(logs.root)])
-
-Keys must be one of ``str``, ``int``, ``float``, ``bool`` or ``None``
-(types that round-trip cleanly through JSON).  Exclusions are applied
-eagerly: each ``exclude_*`` call filters whatever has been included so
-far.  A FileMap reloaded from a workspace is read-only — build a fresh
-one to stage different files.
+Build a map with the chainable ``include_*`` and ``exclude_*`` methods. Files
+retain their relative layout in the result cache, and a reloaded map exposes
+that directory through :attr:`FileMap.root`. Reloaded maps are read-only.
 """
 
 from __future__ import annotations
@@ -52,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Generic, NamedTuple, Self, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
     from os import PathLike
 
 __all__ = ["FileMap"]
@@ -67,41 +28,17 @@ _ALLOWED_KEY_TYPES: tuple[type, ...] = (str, int, float, bool, type(None))
 
 
 class _Entry(NamedTuple):
-    """One file in a :class:`FileMap`.
-
-    ``path`` is the file's current location (a source path while building,
-    a cache path after reload).  ``layout`` is the file's relative path
-    within the map — where it lands in the cache directory, preserving
-    hierarchy for directory-consuming tools.
-    """
+    """A file's current path and relative layout within its map."""
 
     path: Path
     layout: str
 
 
 class FileMap(Mapping[K, Path], Generic[K]):
-    """A keyed collection of files persisted with a task result.
+    """A chainable, keyed collection of files persisted with a task result.
 
-    Build incrementally with :meth:`include_glob`, :meth:`include_tree`,
-    and :meth:`include`; trim with :meth:`exclude_glob` and
-    :meth:`exclude`.  All builder methods mutate in place and return
-    ``self`` for chaining.
-
-    The map exposes a read-only ``Mapping[K, Path]`` for keyed access and
-    :attr:`root` for the single directory that holds every file (valid
-    after the map has been persisted and reloaded).
-
-    A reloaded FileMap is frozen: its files live in the workspace cache,
-    so further ``include_*`` / ``exclude_*`` calls raise.
-
-    Args:
-        paths: Optional initial explicit ``key -> source path`` entries,
-            equivalent to calling :meth:`include` for each pair.
-
-    Raises:
-        TypeError: If any key is not an allowed type.
-        ValueError: If a source is not a regular file, or a key/location
-            collides with an existing entry.
+    Keys must be ``str``, ``int``, ``float``, ``bool``, or ``None``. Sources
+    must be regular files with unique keys and cache layouts.
     """
 
     def __init__(self, paths: Mapping[K, str | PathLike[str]] | None = None) -> None:
@@ -164,11 +101,7 @@ class FileMap(Mapping[K, Path], Generic[K]):
         """
         self._check_mutable()
         root_path = Path(root)
-        for match in sorted(root_path.glob(pattern)):
-            if not match.is_file():
-                continue
-            self._add_entry(key(match), match, match.relative_to(root_path).as_posix())
-        return self
+        return self._include_matches(root_path, root_path.glob(pattern), key)
 
     def include_tree(self, root: str | PathLike[str]) -> Self:
         """Add every file under ``root``, keyed by relative path.
@@ -184,12 +117,7 @@ class FileMap(Mapping[K, Path], Generic[K]):
         """
         self._check_mutable()
         root_path = Path(root)
-        for match in sorted(root_path.rglob("*")):
-            if not match.is_file():
-                continue
-            rel = match.relative_to(root_path).as_posix()
-            self._add_entry(rel, match, rel)
-        return self
+        return self._include_matches(root_path, root_path.rglob("*"))
 
     # ------------------------------------------------------------------
     # Exclusions (eager: filter what has been included so far)
@@ -287,8 +215,7 @@ class FileMap(Mapping[K, Path], Generic[K]):
     def __repr__(self) -> str:
         """Return a short summary; full contents are intentionally elided."""
         n = len(self._entries)
-        suffix = "" if n == 1 else "s"
-        return f"FileMap({n} file{suffix})"
+        return f"FileMap({n} file{'' if n == 1 else 's'})"
 
     def __eq__(self, other: object) -> bool:
         """Return equality based on the underlying key→path mapping."""
@@ -313,6 +240,18 @@ class FileMap(Mapping[K, Path], Generic[K]):
                 "Build a fresh FileMap to stage different files."
             )
             raise RuntimeError(msg)
+
+    def _include_matches(
+        self,
+        root: Path,
+        matches: Iterable[Path],
+        key: Callable[[Path], Hashable] | None = None,
+    ) -> Self:
+        for match in sorted(matches):
+            if match.is_file():
+                layout = match.relative_to(root).as_posix()
+                self._add_entry(layout if key is None else key(match), match, layout)
+        return self
 
     def _add_entry(self, key: Hashable, path: Path, layout: str) -> None:
         if not isinstance(key, _ALLOWED_KEY_TYPES):

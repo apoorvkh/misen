@@ -115,15 +115,9 @@ class WorkUnit:
 
         task_results: dict[Task[Any], Any] = {}
 
-        def resolve_arg(arg: Any) -> Any:
-            """Resolve non-cacheable task leaves from in-memory runtime results."""
-
-            def resolve_leaf(leaf: Any) -> Any:
-                if isinstance(leaf, Task) and not leaf.meta.cache:
-                    return task_results[leaf]
-                return leaf
-
-            return map_nested_leaves(arg, resolve_leaf)
+        def resolve_leaf(value: Any) -> Any:
+            """Resolve a non-cacheable task from the in-memory result map."""
+            return task_results[value] if isinstance(value, Task) and not value.meta.cache else value
 
         with RuntimeValues() as runtime_values:
             ordered_tasks: list[Task[Any]] = list(graph)
@@ -137,8 +131,8 @@ class WorkUnit:
                 # Rebuild the task with resolved in-unit non-cacheable dependencies.
                 # Cacheable dependencies are still loaded through Workspace in Task.result.
                 executable_task = task.with_resolved_args(
-                    args=tuple(resolve_arg(arg) for arg in task.args),
-                    kwargs={name: resolve_arg(arg) for name, arg in task.kwargs.items()},
+                    args=tuple(map_nested_leaves(arg, resolve_leaf) for arg in task.args),
+                    kwargs={name: map_nested_leaves(arg, resolve_leaf) for name, arg in task.kwargs.items()},
                 )
                 result = executable_task.result(
                     workspace=workspace,
@@ -215,8 +209,4 @@ def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
 def _dask_topology(resources: Resources) -> tuple[int, int, str | None]:
     """Return the allocation-shaping subset of a resource request."""
     accelerators = resources["accelerators"]
-    return (
-        resources["nodes"],
-        accelerators,
-        resources["accelerator_type"] if accelerators else None,
-    )
+    return resources["nodes"], accelerators, resources["accelerator_type"] if accelerators else None

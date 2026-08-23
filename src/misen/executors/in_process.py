@@ -81,7 +81,7 @@ class InProcessExecutor(Executor[CompletedJob]):
         with apply_env_files_temporarily():
             WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id)
 
-        logger.info("InProcessExecutor finished executing %d task node(s).", len(list(task_graph.node_indices())))
+        logger.info("InProcessExecutor finished executing %d task node(s).", len(task_graph.node_indices()))
         return DependencyGraph()
 
     def _dispatch(

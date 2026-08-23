@@ -42,13 +42,8 @@ def _write(text: str, lock: threading.Lock, target: TextIO) -> None:
 
 def _try_fsync(target: TextIO) -> None:
     """Call ``os.fsync`` on ``target`` if it's a real file; no-op otherwise."""
-    fileno = _try(getattr, target, "fileno")
-    if not callable(fileno):
-        return
-    fd = _try(fileno)
-    if fd is None:
-        return
-    _try(os.fsync, fd)
+    if callable(fileno := _try(getattr, target, "fileno")) and (fd := _try(fileno)) is not None:
+        _try(os.fsync, fd)
 
 
 def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
@@ -56,14 +51,7 @@ def _make_decoder(enc: str) -> codecs.IncrementalDecoder:
     return codecs.getincrementaldecoder(enc)(errors="replace")
 
 
-# Default cadence at which the reader thread fsyncs the log targets.
-# ``flush()`` only gets bytes into the kernel; on NFS-mounted shared
-# filesystems (typical SLURM clusters) the client-side write-back cache
-# can sit on those bytes for several seconds before propagating them to
-# the server, so a tail-reader on another node sees stale content. An
-# explicit fsync triggers an NFS COMMIT, but per-write fsyncs are an
-# RPC each — throttle to a small interval so the worst-case staleness is
-# bounded without paying RPC cost on every chunk.
+# Bound NFS tail-reader staleness without paying for an fsync on every chunk.
 _LOG_FSYNC_INTERVAL_S = 0.1
 
 
@@ -76,16 +64,7 @@ def _drain_and_write(
     deadline: float | None = None,
     fsync_interval_s: float = _LOG_FSYNC_INTERVAL_S,
 ) -> None:
-    """Read from ``pipe_fd`` until EOF/error and write decoded text to targets.
-
-    Stops when the pipe returns EOF, raises ``OSError``/``BlockingIOError``, or
-    ``deadline`` (a ``time.monotonic`` timestamp) is reached. Always flushes the
-    decoder's trailing bytes to every target before returning, and fsyncs every
-    target on exit so its final contents reach durable storage.
-
-    ``fsync_interval_s`` throttles the inline fsync rate; pass ``0`` to fsync
-    after every chunk (more responsive, more RPC cost on NFS).
-    """
+    """Drain decoded pipe data to all targets, periodically fsyncing them."""
     last_fsync_at = time.monotonic()
     while deadline is None or time.monotonic() < deadline:
         try:
@@ -113,18 +92,7 @@ def _wrap_fd(fd: int, enc: str, *, closefd: bool = False) -> TextIO:
     """Wrap file descriptor in a line-buffered text writer."""
     raw = io.FileIO(fd, mode="w", closefd=closefd)
     buf = io.BufferedWriter(raw)
-    return io.TextIOWrapper(
-        buf,
-        encoding=enc,
-        errors="replace",
-        line_buffering=True,
-        write_through=True,
-    )
-
-
-def _join_until(th: threading.Thread, deadline: float) -> None:
-    """Join thread until deadline timestamp."""
-    th.join(timeout=max(0.0, deadline - time.monotonic()))
+    return io.TextIOWrapper(buf, encoding=enc, errors="replace", line_buffering=True, write_through=True)
 
 
 def _validate_capture_target(target: TextIO, old_stdout: TextIO, old_stderr: TextIO) -> None:
@@ -148,23 +116,10 @@ def capture_all_output(
     *,
     tee_to_stdout: bool = False,
 ) -> Iterator[None]:
-    """Capture writes to fds 1/2 and tee them into ``target``.
+    """Capture fd 1/2 writes into ``target``, optionally teeing to stdout.
 
-    Exit behavior:
-      - waits up to `timeout` seconds to drain cleanly
-      - if not drained, best-effort drains what's currently available and then stops
-        (never hangs, may lose trailing output from stray inheritors).
-
-    Args:
-        target: Destination stream for captured output.
-        timeout: Drain timeout in seconds on context exit.
-        tee_to_stdout: Whether to mirror captured output to original stdout.
-
-    Yields:
-        ``None`` while output redirection is active.
-
-    Raises:
-        ValueError: If ``target`` points to stdout/stderr and would recurse.
+    Exit waits up to ``timeout`` to drain, then performs a nonblocking
+    best-effort drain. ``target`` cannot itself point to fd 1 or 2.
     """
     encoding: str = getattr(sys.stdout, "encoding", None) or "utf-8"
 
@@ -174,20 +129,18 @@ def capture_all_output(
     # Guard against recursion/feedback loops.
     _validate_capture_target(target, old_stdout, old_stderr)
 
-    # Flush before redirecting
-    _try(old_stdout.flush)
-    _try(old_stderr.flush)
+    for stream in (old_stdout, old_stderr):
+        _try(stream.flush)
     _try(_fflush_all)
 
     # Save original inheritability of fds 1/2 and make them non-inheritable (best-effort)
-    inh1 = _try(os.get_inheritable, 1)
-    inh2 = _try(os.get_inheritable, 2)
-    _try(os.set_inheritable, 1, False)  # noqa: FBT003
-    _try(os.set_inheritable, 2, False)  # noqa: FBT003
+    stdio_fds = (1, 2)
+    inheritability = tuple(_try(os.get_inheritable, fd) for fd in stdio_fds)
+    for fd in stdio_fds:
+        _try(os.set_inheritable, fd, False)  # noqa: FBT003
 
-    saved_fd1 = os.dup(1)
-    saved_fd2 = os.dup(2)
-    tee_stdout: TextIO | None = _wrap_fd(os.dup(saved_fd1), encoding, closefd=True) if tee_to_stdout else None
+    saved_fds = tuple(os.dup(fd) for fd in stdio_fds)
+    tee_stdout: TextIO | None = _wrap_fd(os.dup(saved_fds[0]), encoding, closefd=True) if tee_to_stdout else None
 
     rfd, wfd = os.pipe()
     os.set_inheritable(wfd, False)  # noqa: FBT003
@@ -211,11 +164,11 @@ def capture_all_output(
 
     # Redirect fd 1/2 -> pipe
     try:
-        os.dup2(wfd, 1)
-        os.dup2(wfd, 2)
+        for fd in stdio_fds:
+            os.dup2(wfd, fd)
         # Re-apply non-inheritable on 1/2 after dup2 (belt & suspenders)
-        _try(os.set_inheritable, 1, False)  # noqa: FBT003
-        _try(os.set_inheritable, 2, False)  # noqa: FBT003
+        for fd in stdio_fds:
+            _try(os.set_inheritable, fd, False)  # noqa: FBT003
     finally:
         _try(os.close, wfd)
 
@@ -227,32 +180,31 @@ def capture_all_output(
         yield
     finally:
         # Flush while still redirected
-        _try(sys.stdout.flush)
-        _try(sys.stderr.flush)
+        for stream in (sys.stdout, sys.stderr):
+            _try(stream.flush)
         _try(_fflush_all)
 
         # Close wrappers so their buffers go into the pipe
-        _try(new_stdout.close)
-        _try(new_stderr.close)
+        for stream in (new_stdout, new_stderr):
+            _try(stream.close)
 
         # Restore original fds 1/2 (closing this proc's pipe write ends)
         try:
-            os.dup2(saved_fd1, 1)
-            os.dup2(saved_fd2, 2)
+            for fd, saved_fd in zip(stdio_fds, saved_fds, strict=True):
+                os.dup2(saved_fd, fd)
         finally:
-            _try(os.close, saved_fd1)
-            _try(os.close, saved_fd2)
+            for saved_fd in saved_fds:
+                _try(os.close, saved_fd)
 
         sys.stdout, sys.stderr = old_stdout, old_stderr
 
         # Restore original inheritability for fds 1/2 (best-effort)
-        if inh1 is not None:
-            _try(os.set_inheritable, 1, bool(inh1))
-        if inh2 is not None:
-            _try(os.set_inheritable, 2, bool(inh2))
+        for fd, inherited in zip(stdio_fds, inheritability, strict=True):
+            if inherited is not None:
+                _try(os.set_inheritable, fd, bool(inherited))
 
         deadline = time.monotonic() + max(0.0, float(timeout))
-        _join_until(t, deadline)
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
 
         if t.is_alive():
             # Best-effort: drain what is currently available, then stop.

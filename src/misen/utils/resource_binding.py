@@ -6,8 +6,6 @@ import os
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
-import psutil
-
 if TYPE_CHECKING:
     from misen.task_metadata import AcceleratorType
 
@@ -47,19 +45,16 @@ def apply_resource_binding(
     Backends that delegate isolation to a scheduler (e.g. ``SlurmExecutor``)
     pass ``None`` so the worker preserves inherited affinity and visibility.
     """
-    for key, value in _DYNAMIC_THREAD_DISABLE_ENV.items():
-        os.environ[key] = value
+    os.environ.update(_DYNAMIC_THREAD_DISABLE_ENV)
 
     if cpu_indices is not None:
         cpu_count_str = str(len(cpu_indices))
-        for key in _CPU_THREAD_CAP_VARS:
-            os.environ[key] = cpu_count_str
+        os.environ.update(dict.fromkeys(_CPU_THREAD_CAP_VARS, cpu_count_str))
         _apply_cpu_affinity(cpu_indices)
 
     if accelerator_indices is not None:
         mask = ",".join(map(str, accelerator_indices))
-        for key in _ACCELERATOR_MASK_VARS.get(accelerator_type, ()):
-            os.environ[key] = mask
+        os.environ.update(dict.fromkeys(_ACCELERATOR_MASK_VARS.get(accelerator_type, ()), mask))
 
 
 def _apply_cpu_affinity(cpu_indices: list[int]) -> None:
@@ -72,6 +67,8 @@ def _apply_cpu_affinity(cpu_indices: list[int]) -> None:
         with suppress(AttributeError, ImportError, OSError, RuntimeError, ValueError):
             sched_setaffinity(0, set(cpu_indices))
             return
+
+    import psutil
 
     process = psutil.Process()
     cpu_affinity = getattr(process, "cpu_affinity", None)

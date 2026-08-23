@@ -12,10 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-__all__ = [
-    "iter_nested_leaves",
-    "map_nested_leaves",
-]
+__all__ = ["iter_nested_leaves", "map_nested_leaves"]
 
 
 def map_nested_leaves(value: Any, leaf_mapper: Callable[[Any], Any]) -> Any:

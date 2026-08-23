@@ -38,6 +38,7 @@ _FALSEY = frozenset({"0", "false", "no", "off"})
 _LIVE_CONTEXT: dict[str, int] = {"depth": 0}
 _LIVE_CONTEXT_LOCK = threading.Lock()
 _JOB_BOARD_ENV = "MISEN_RUNTIME_JOB_BOARD"
+_STATE_ORDER = {state: index for index, state in enumerate(("done", "failed", "running", "pending", "unknown"))}
 
 _JobState = Literal["pending", "running", "done", "failed"]
 RuntimeJobState = Literal["pending", "running", "done", "failed", "unknown"]
@@ -69,43 +70,30 @@ class _RuntimeJobBoard:
         self._live: Live | None = None
         self._lock = threading.RLock()
 
-    def pending(self, job_key: int, label: str) -> None:
-        """Register a pending job row."""
+    def update(
+        self,
+        job_key: int,
+        state: _JobState,
+        *,
+        label: str | None = None,
+        job_id: str | None = None,
+        pid: int | None = None,
+    ) -> None:
+        """Create or update a job row."""
         with self._lock:
-            if self._live is None and self._entries and self._all_terminal_locked():
+            if state == "pending" and self._live is None and self._entries and self._all_terminal_locked():
                 self._entries.clear()
 
             line = self._entries.get(job_key)
             if line is None:
-                self._entries[job_key] = _JobStatusLine(label=label, state="pending")
-            else:
+                line = self._entries[job_key] = _JobStatusLine(label=label if label is not None else f"job-{job_key}")
+            if label is not None:
                 line.label = label
-                line.state = "pending"
-            self._refresh_locked()
-
-    def running(self, job_key: int, *, job_id: str | None, pid: int | None) -> None:
-        """Mark a job row as running."""
-        with self._lock:
-            line = self._entries.setdefault(job_key, _JobStatusLine(label=f"job-{job_key}", state="pending"))
-            line.state = "running"
+            line.state = state
             if job_id is not None:
                 line.job_id = job_id
             if pid is not None:
                 line.pid = pid
-            self._refresh_locked()
-
-    def done(self, job_key: int) -> None:
-        """Mark a job row as complete."""
-        with self._lock:
-            line = self._entries.setdefault(job_key, _JobStatusLine(label=f"job-{job_key}", state="pending"))
-            line.state = "done"
-            self._refresh_locked()
-
-    def failed(self, job_key: int) -> None:
-        """Mark a job row as failed."""
-        with self._lock:
-            line = self._entries.setdefault(job_key, _JobStatusLine(label=f"job-{job_key}", state="pending"))
-            line.state = "failed"
             self._refresh_locked()
 
     def on_live_context_exit(self) -> None:
@@ -122,26 +110,25 @@ class _RuntimeJobBoard:
             return
 
         renderable = self._render_locked()
-        has_active = not self._all_terminal_locked()
+        all_terminal = self._all_terminal_locked()
 
-        if self._live is None:
-            if has_active:
-                from rich.live import Live
-
-                self._live = Live(renderable, console=console, refresh_per_second=12, transient=False)
-                self._live.start()
-                return
-
-            # If all jobs are already terminal, render a static final snapshot once.
-            console.print(renderable)
+        if all_terminal:
+            if self._live is None:
+                console.print(renderable)
+            else:
+                self._live.update(renderable, refresh=True)
+                self._live.stop()
+                self._live = None
             self._entries.clear()
             return
 
-        self._live.update(renderable, refresh=True)
-        if self._all_terminal_locked():
-            self._live.stop()
-            self._live = None
-            self._entries.clear()
+        if self._live is None:
+            from rich.live import Live
+
+            self._live = Live(renderable, console=console, refresh_per_second=12, transient=False)
+            self._live.start()
+        else:
+            self._live.update(renderable, refresh=True)
 
     def _all_terminal_locked(self) -> bool:
         return all(line.state in {"done", "failed"} for line in self._entries.values())
@@ -265,40 +252,29 @@ def runtime_progress(description: str, *, total: int) -> Iterator[Callable[[int]
 
 def runtime_job_pending(job_key: int, label: str) -> None:
     """Register one pending local job in the live status board."""
-    _job_board_action(_JOB_BOARD.pending, job_key, label=label)
+    _job_board_action(_JOB_BOARD.update, job_key, "pending", label=label)
 
 
 def runtime_job_running(job_key: int, *, job_id: str | None, pid: int | None) -> None:
     """Mark one local job as running in the live status board."""
-    _job_board_action(_JOB_BOARD.running, job_key, job_id=job_id, pid=pid)
+    _job_board_action(_JOB_BOARD.update, job_key, "running", job_id=job_id, pid=pid)
 
 
 def runtime_job_done(job_key: int) -> None:
     """Mark one local job as complete in the live status board."""
-    _job_board_action(_JOB_BOARD.done, job_key)
+    _job_board_action(_JOB_BOARD.update, job_key, "done")
 
 
 def runtime_job_failed(job_key: int) -> None:
     """Mark one local job as failed in the live status board."""
-    _job_board_action(_JOB_BOARD.failed, job_key)
+    _job_board_action(_JOB_BOARD.update, job_key, "failed")
 
 
 def runtime_job_summary_lines(rows: list[RuntimeJobSummary]) -> list[str]:
     """Format final job summary rows for terminal output."""
-    state_order = {
-        "done": 0,
-        "failed": 1,
-        "running": 2,
-        "pending": 3,
-        "unknown": 4,
-    }
-    ordered_rows = sorted(rows, key=lambda row: (state_order.get(row.state, 99), row.label))
+    ordered_rows = sorted(rows, key=lambda row: (_STATE_ORDER.get(row.state, 99), row.label))
 
-    lines: list[str] = []
-    for row in ordered_rows:
-        state_text = "complete" if row.state == "done" else row.state
-        lines.append(f"{state_text:<8} {row.label}")
-    return lines
+    return [f"{('complete' if row.state == 'done' else row.state):<8} {row.label}" for row in ordered_rows]
 
 
 def task_label(
@@ -324,10 +300,7 @@ def task_label(
         if argument_items:
             label_core = f"{label_core}({', '.join(argument_items)})"
 
-    if include_hash:
-        return f"{label_core} [{task.task_hash().short_b32()}]"
-
-    return label_core
+    return f"{label_core} [{task.task_hash().short_b32()}]" if include_hash else label_core
 
 
 def work_unit_label(work_unit: WorkUnit) -> str:
@@ -337,9 +310,8 @@ def work_unit_label(work_unit: WorkUnit) -> str:
 
 def _work_unit_repr_label(work_unit_repr: str) -> str:
     """Extract inner label from ``WorkUnit.__repr__`` output."""
-    if work_unit_repr.startswith("WorkUnit(") and work_unit_repr.endswith(")"):
-        return work_unit_repr[len("WorkUnit(") : -1]
-    return work_unit_repr
+    wrapped = work_unit_repr.startswith("WorkUnit(") and work_unit_repr.endswith(")")
+    return work_unit_repr[len("WorkUnit(") : -1] if wrapped else work_unit_repr
 
 
 def _events_enabled() -> bool:

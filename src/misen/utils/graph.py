@@ -197,33 +197,26 @@ class DependencyGraph(Generic[T]):
         stream = sys.stdout if target is None else target
 
         def write_line(text: str = "") -> None:
-            """Write a line to the target stream."""
             stream.write(f"{text}\n")
 
+        indices = self.node_indices()
+        adjacency: dict[T, list[T]] = {self[index]: self.successors(index) for index in indices}
+
         def sort_key(node: T) -> str:
-            """Return deterministic sort key for pretty-print ordering."""
-            # Deterministic ordering even for unorderable node types.
             return str(node)
 
-        all_nodes: list[T] = []
-        all_dependencies: set[T] = set()
-        adjacency: dict[T, list[T]] = {}
-        for node_index in self.node_indices():
-            node = self[node_index]
-            dependencies = self.successors(node_index)
-            adjacency[node] = dependencies
-            all_nodes.append(node)
-            all_dependencies.update(dependencies)
+        def children(node: T) -> list[T]:
+            return sorted(adjacency.get(node, []), key=sort_key)
 
-        if roots is None:
-            # Roots are nodes that are not a dependency of any other node (no incoming edges)
-            roots = [node for node in all_nodes if node not in all_dependencies]
-            roots.sort(key=sort_key)
+        root_nodes = (
+            roots
+            if roots is not None
+            else sorted((self[index] for index in indices if self.is_root(index)), key=sort_key)
+        )
 
         printed: set[T] = set()
 
         def walk(node: T, prefix: str, *, is_last: bool, depth: int, stack: set[T]) -> None:
-            """Recursively print a node subtree with indentation."""
             connector = "└── " if is_last else "├── "
 
             if node in stack:
@@ -240,23 +233,24 @@ class DependencyGraph(Generic[T]):
             if max_depth is not None and depth >= max_depth:
                 return
 
-            children = list(adjacency.get(node, ()))
-            children.sort(key=sort_key)
-
+            child_nodes = children(node)
             new_prefix = prefix + ("    " if is_last else "│   ")
-            stack2 = set(stack)
-            stack2.add(node)
+            next_stack = stack | {node}
+            for i, child in enumerate(child_nodes):
+                walk(
+                    child,
+                    new_prefix,
+                    is_last=i == len(child_nodes) - 1,
+                    depth=depth + 1,
+                    stack=next_stack,
+                )
 
-            for i, child in enumerate(children):
-                walk(child, new_prefix, is_last=i == len(children) - 1, depth=depth + 1, stack=stack2)
-
-        for r_i, root in enumerate(roots):
+        for root_index, root in enumerate(root_nodes):
             # Print root without a connector for a cleaner look
-            if r_i:
-                write_line()  # blank line between root trees
+            if root_index:
+                write_line()
             write_line(str(root))
 
-            children = list(adjacency.get(root, ()))
-            children.sort(key=sort_key)
-            for i, child in enumerate(children):
-                walk(child, "", is_last=i == len(children) - 1, depth=1, stack={root})
+            child_nodes = children(root)
+            for i, child in enumerate(child_nodes):
+                walk(child, "", is_last=i == len(child_nodes) - 1, depth=1, stack={root})

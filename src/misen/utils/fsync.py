@@ -1,9 +1,4 @@
-"""Low-level fsync helpers shared by NFS-safe publication code paths.
-
-These live in ``misen.utils`` (rather than ``misen.workspaces.disk``, where
-they originated) so utility modules like ``misen.utils.snapshot`` can reuse
-them without importing a workspace backend.
-"""
+"""Low-level durability helpers shared by NFS-safe publication paths."""
 
 from __future__ import annotations
 
@@ -15,17 +10,7 @@ __all__ = ["atomic_write_bytes", "fsync_dir", "fsync_file"]
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Durably publish ``data`` at ``path`` (mkstemp → fsync → rename → fsync-dir).
-
-    The atomic-overwrite-plus-fsync sequence shared by every
-    payload-before-pointer commit point (hash-index writes, store and
-    snapshot markers): a crash leaves either the old file or the new one,
-    never a partial write, and the rename itself is durable.
-
-    Args:
-        path: Final file path (parent directory must exist).
-        data: File contents.
-    """
+    """Durably publish ``data`` via mkstemp, fsync, replace, and directory fsync."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
@@ -39,25 +24,17 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 def fsync_dir(path: Path) -> None:
-    """Fsync a directory entry so a contained rename or unlink is durable.
-
-    Args:
-        path: Directory to fsync.
-    """
-    fd = os.open(path, os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Fsync a directory so a contained rename or unlink is durable."""
+    _fsync_path(path, os.O_DIRECTORY)
 
 
 def fsync_file(path: Path) -> None:
-    """Fsync a regular file's contents so they reach durable storage.
+    """Fsync a regular file's contents."""
+    _fsync_path(path, os.O_RDONLY)
 
-    Args:
-        path: File whose contents should be flushed.
-    """
-    fd = os.open(path, os.O_RDONLY)
+
+def _fsync_path(path: Path, flags: int) -> None:
+    fd = os.open(path, flags)
     try:
         os.fsync(fd)
     finally:

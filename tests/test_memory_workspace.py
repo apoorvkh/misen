@@ -27,6 +27,7 @@ def _clear_singleton_cache() -> None:
 
 
 _call_log: list[int] = []
+_none_calls: list[None] = []
 
 
 @meta(id="memory_ws_doubler", cache=True)
@@ -43,6 +44,11 @@ def _chain_a() -> int:
 @meta(id="memory_ws_chain_b", cache=True)
 def _chain_b(value: int) -> int:
     return value + 1
+
+
+@meta(id="memory_ws_none", cache=True)
+def _returns_none() -> None:
+    _none_calls.append(None)
 
 
 def test_resolve_type_memory_alias() -> None:
@@ -133,6 +139,16 @@ def test_in_process_executor_caches_result(tmp_path: Path) -> None:
     executor.submit(tasks={task}, workspace=ws, blocking=True)
     assert _call_log == [21]
     assert ws.results[task] == 42
+
+
+def test_cached_none_is_a_cache_hit(tmp_path: Path) -> None:
+    ws = InMemoryWorkspace(directory=str(tmp_path / "ws"))
+    task = Task(_returns_none)
+    _none_calls.clear()
+
+    assert task.result(workspace=ws, compute_if_uncached=True) is None
+    assert task.result(workspace=ws) is None
+    assert _none_calls == [None]
 
 
 def test_in_process_executor_runs_dependency_chain(tmp_path: Path) -> None:

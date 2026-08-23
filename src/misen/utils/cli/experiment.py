@@ -27,7 +27,7 @@ from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
 from misen.workspace import WorkspaceType  # noqa: TC001
 
-from . import tui
+from . import system_exit_code, tui
 from .display import format_task_line_markup, iter_task_arg_children
 
 if TYPE_CHECKING:
@@ -359,19 +359,6 @@ def resolve_experiment_class(reference: str) -> type[Experiment]:
     return cast("type[Experiment]", target)
 
 
-def _system_exit_code(exc: SystemExit) -> int:
-    """Normalize ``SystemExit.code`` into a stable integer exit code."""
-    code = exc.code
-    if code is None:
-        return 0
-    if isinstance(code, int):
-        return code
-    try:
-        return int(code)
-    except (TypeError, ValueError):
-        return 1
-
-
 def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
     """Run an experiment CLI by resolving ``<module:ExperimentClass>``."""
     args_list = list(sys.argv[1:] if argv is None else argv)
@@ -379,7 +366,7 @@ def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
         try:
             tyro.cli(_ExperimentEntryArgs, args=["--help"])
         except SystemExit as exc:
-            return _system_exit_code(exc)
+            return system_exit_code(exc)
         return 0
 
     parsed, unknown_args = tyro.cli(
@@ -399,39 +386,18 @@ def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
     return 0
 
 
-def _resolve_command_task(*, command: str, task_name: str | None) -> str:
-    """Resolve task selector for command-specific task operations."""
-    if task_name is None:
-        msg = f"{command!r} command requires a task name."
-        raise ValueError(msg)
-    return task_name
-
-
-def _task_sort_key(task: Task[Any]) -> tuple[str, str]:
-    """Return stable sort key for task display."""
-    return (task.meta.id, task.task_hash().b32())
-
-
 def _iter_task_closure(root_tasks: Iterable[Task[Any]]) -> list[Task[Any]]:
     """Return all unique tasks reachable from the given roots."""
     visited: set[Task[Any]] = set()
-
-    def visit(task: Task[Any]) -> None:
+    pending = list(root_tasks)
+    while pending:
+        task = pending.pop()
         if task in visited:
-            return
+            continue
         visited.add(task)
-        for dependency in task.dependencies:
-            visit(dependency)
+        pending.extend(task.dependencies)
 
-    for root in root_tasks:
-        visit(root)
-
-    return sorted(visited, key=_task_sort_key)
-
-
-def _task_done(task: Task[Any], workspace: Any) -> bool:
-    """Return completion status for one task in the given workspace."""
-    return task.done(workspace=workspace)
+    return sorted(visited, key=lambda task: (task.meta.id, task.task_hash().b32()))
 
 
 def _status_indicator(*, done: bool) -> str:
@@ -443,11 +409,6 @@ def _styled_title(title: str) -> str:
     """Return consistently-styled title text for list/tree outputs."""
     color = "yellow" if "Incomplete" in title else "cyan"
     return f"[bold {color}]{escape(title)}[/bold {color}]"
-
-
-def _task_display_label(task: Task[Any]) -> str:
-    """Return one task label for CLI list/tree output (no hash, no job id)."""
-    return format_task_line_markup(task)
 
 
 def _build_task_tree(
@@ -471,7 +432,7 @@ def _build_task_tree(
     def include_task(task: Task[Any]) -> bool:
         if cacheable_only and not task.meta.cache:
             return False
-        return not (incomplete_only and _task_done(task, workspace))
+        return not (incomplete_only and task.done(workspace=workspace))
 
     def add_task(
         branch: Tree,
@@ -486,7 +447,7 @@ def _build_task_tree(
         if not show_all and task in rendered:
             return
 
-        status = _status_indicator(done=_task_done(task, workspace))
+        status = _status_indicator(done=task.done(workspace=workspace))
         task_line = format_task_line_markup(task, prefix=arg_prefix)
         line = f"{status} {task_line}"
 
@@ -530,11 +491,7 @@ def _filter_root_named_tasks(named_tasks: Mapping[str, Task[Any]]) -> Mapping[st
     task map transitively depends on it. Intermediate named tasks are still
     reachable through their parents' subtrees.
     """
-    non_roots: set[Task[Any]] = set()
-    for task in named_tasks.values():
-        for dep in _iter_task_closure([task]):
-            if dep is not task:
-                non_roots.add(dep)
+    non_roots = set(_iter_task_closure(dependency for task in named_tasks.values() for dependency in task.dependencies))
     roots = {name: task for name, task in named_tasks.items() if task not in non_roots}
     return roots or named_tasks
 
@@ -553,10 +510,10 @@ def _build_task_list_lines(
         if cacheable_only and not task.meta.cache:
             continue
 
-        done = _task_done(task, workspace)
+        done = task.done(workspace=workspace)
         if incomplete_only and done:
             continue
-        lines.append(f"{_status_indicator(done=done)} {_task_display_label(task)}")
+        lines.append(f"{_status_indicator(done=done)} {format_task_line_markup(task)}")
 
     return lines
 
@@ -565,7 +522,7 @@ def _count_completion(named_tasks: Mapping[str, Task[Any]], workspace: Any) -> t
     """Return completed/total counts over distinct tasks in the dependency closure."""
     tasks = _iter_task_closure(named_tasks.values())
     total_count = len(tasks)
-    complete_count = sum(1 for task in tasks if _task_done(task, workspace))
+    complete_count = sum(task.done(workspace=workspace) for task in tasks)
     return complete_count, total_count
 
 
@@ -579,24 +536,12 @@ def _unwrap(value: Any, attr: str) -> Any:
     return getattr(value, attr) if hasattr(value, attr) and not isinstance(value, (str, Path)) else value
 
 
-def _args_config(args: Any) -> Path | None:
-    return _unwrap(args.config, "config")
-
-
-def _args_workspace(args: Any) -> Any:
-    return _unwrap(args.workspace, "workspace")
-
-
-def _args_executor(args: Any) -> Any:
-    return _unwrap(args.executor, "executor")
-
-
 def _resolve_workspace(args: Any) -> Any:
     """Resolve workspace instance from parsed CLI args."""
     from misen.workspace import Workspace
 
-    settings = Settings(config_file=_args_config(args))
-    workspace = _args_workspace(args)
+    settings = Settings(config_file=_unwrap(args.config, "config"))
+    workspace = _unwrap(args.workspace, "workspace")
     return Workspace.auto(settings=settings) if workspace == "auto" else workspace
 
 
@@ -604,8 +549,8 @@ def _resolve_executor(args: Any) -> Any:
     """Resolve executor instance from parsed CLI args."""
     from misen.executor import Executor
 
-    settings = Settings(config_file=_args_config(args))
-    executor = _args_executor(args)
+    settings = Settings(config_file=_unwrap(args.config, "config"))
+    executor = _unwrap(args.executor, "executor")
     return Executor.auto(settings=settings) if executor == "auto" else executor
 
 
@@ -618,7 +563,6 @@ _COMMAND_TYPES: dict[ExperimentCommand, type[Any]] = {
     "incomplete": IncompleteCommandArgs,
     "logs": LogsCommandArgs,
 }
-_COMMAND_ATTR_PREFIX: dict[str, str] = {"incomplete": "tree"}
 
 
 def _coerce_command(args: Any) -> Any:
@@ -640,7 +584,7 @@ def _coerce_command(args: Any) -> Any:
     if cls is None:
         msg = f"Unknown command {command!r}. Expected one of: {sorted(_COMMAND_TYPES)}."
         raise ValueError(msg)
-    prefix = _COMMAND_ATTR_PREFIX.get(command, command)
+    prefix = "tree" if command == "incomplete" else command
     kwargs = {f.name: getattr(args, f"{prefix}_{f.name}") for f in fields(cls) if hasattr(args, f"{prefix}_{f.name}")}
     return cls(**kwargs)
 
@@ -695,7 +639,7 @@ def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
 
     work_graph = build_work_graph(set(experiment.normalized_tasks().values()))
     for work_unit in work_graph.nodes():
-        if task == work_unit.root or task in set(work_unit.graph.nodes()):
+        if task == work_unit.root or task in work_unit.graph.nodes():
             return work_unit
 
     msg = f"No job found containing task {task_label(task)}."
@@ -846,8 +790,10 @@ def _cmd_list(command: ListCommandArgs, args: Any, console: Console) -> None:
 
 def _cmd_result(command: ResultCommandArgs, args: Any, console: Console) -> None:
     workspace = _resolve_workspace(args)
-    task_key = _resolve_command_task(command="result", task_name=command.task)
-    console.print(Pretty(args.experiment.result(task_key, workspace=workspace)))
+    if command.task is None:
+        msg = "'result' command requires a task name."
+        raise ValueError(msg)
+    console.print(Pretty(args.experiment.result(command.task, workspace=workspace)))
 
 
 def _cmd_logs(command: LogsCommandArgs, args: Any, console: Console) -> None:
@@ -882,8 +828,8 @@ def _show_task_log(
     skip_missing: bool = False,
 ) -> bool:
     """Print one task's log (or its log entry listing). Return whether anything was printed."""
-    status = _status_indicator(done=_task_done(task, workspace))
-    header = f"{status} {_task_display_label(task)}"
+    status = _status_indicator(done=task.done(workspace=workspace))
+    header = f"{status} {format_task_line_markup(task)}"
     if list_mode:
         console.print(header)
         _list_task_logs(task, workspace, console)
@@ -978,15 +924,6 @@ def experiment_cli(
         return_unknown_args=True,
         args=args_list,
     )
-    command_default_factories: dict[ExperimentCommand, type[object]] = {
-        "run": RunCommandArgs,
-        "list": ListCommandArgs,
-        "tree": TreeCommandArgs,
-        "count": CountCommandArgs,
-        "result": ResultCommandArgs,
-        "incomplete": IncompleteCommandArgs,
-        "logs": LogsCommandArgs,
-    }
     resolved_command = _resolve_command(command_token=None, unknown_args=unknown_args)
 
     # Each CLI group lives in its own single-field wrapper so tyro renders a
@@ -1025,7 +962,7 @@ def experiment_cli(
     cli_fields.extend(
         [
             ("experiment", tyro.conf.OmitArgPrefixes[experiment_cls], experiment_spec),  # ty:ignore[invalid-type-form]
-            ("command", ExperimentCommandArgs, field(default_factory=command_default_factories[resolved_command])),
+            ("command", ExperimentCommandArgs, field(default_factory=_COMMAND_TYPES[resolved_command])),
         ]
     )
 

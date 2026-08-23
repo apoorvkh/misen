@@ -306,18 +306,10 @@ class ProjectSnapshot:
             raise RuntimeError(msg)
         transport = self.transport
 
-        payload = payload_ref
-        env_files = list(self.env_file_refs)
-        if transport is None:
-            project_dir: Path | None = self.project_dir
-            snapshot_key: str | None = None
-        else:
-            project_dir = None
-            snapshot_key = self.snapshot_key
+        project_dir, snapshot_key = (self.project_dir, None) if transport is None else (None, self.snapshot_key)
 
         worker_args = [
-            *_indices_argv("cpu-indices", cpu_indices),
-            *_accelerator_argv(accelerator_type, accelerator_indices),
+            *_resource_argv(cpu_indices, accelerator_type, accelerator_indices),
             JOB_LOG_PATH_ARG,
             str(log_path),
         ]
@@ -331,8 +323,8 @@ class ProjectSnapshot:
             store_root=_resolve_store_root(self.env_store_dir),
             project_dir=project_dir,
             snapshot_key=snapshot_key,
-            payload=payload,
-            env_files=env_files,
+            payload=payload_ref,
+            env_files=list(self.env_file_refs),
             worker_args=worker_args,
         )
         return job_id, ["bash", "-c", script], {}, log_path
@@ -462,8 +454,7 @@ def _snapshot_key(staged_dir: Path) -> str:
 
 def _is_pure_wheel(wheel_path: Path) -> bool:
     """Whether a wheel is platform-independent (``…-none-any.whl``)."""
-    tags = wheel_path.stem.split("-")
-    return len(tags) >= 5 and tags[-2:] == ["none", "any"]  # noqa: PLR2004
+    return len(tags := wheel_path.stem.split("-")) >= 5 and tags[-2:] == ["none", "any"]  # noqa: PLR2004
 
 
 def _stage_local_package(package_dir: Path, packages_dir: Path) -> None:
@@ -953,11 +944,12 @@ def _materialize_envs(project_dir: Path, store_root: Path, *, pixi_bin: str | No
     """
     conda_manifest_path: Path | None = None
     resolved_pixi: str | None = None
-    if (project_dir / "pixi.lock").exists():
+    pixi_lock = project_dir / "pixi.lock"
+    if pixi_lock.exists():
         resolved_pixi = _resolve_pixi_bin(pixi_bin)
         conda_manifest_path = _ensure_conda_env_entry(
             manifest_path=project_dir / "pixi.toml",
-            lock_path=project_dir / "pixi.lock",
+            lock_path=pixi_lock,
             pixi_bin=resolved_pixi,
             store_root=store_root,
         )
@@ -1106,14 +1098,13 @@ def _check_pixi_lock_for_pypi(lock_path: Path) -> None:
     Raises:
         RuntimeError: If any ``- pypi:`` entry is present in ``lock_path``.
     """
-    for line in lock_path.read_text().splitlines():
-        if line.lstrip().startswith("- pypi:"):
-            msg = (
-                f"{lock_path} contains pypi dependencies. "
-                "misen owns PyPI packages through pyproject.toml / uv.lock; "
-                "remove them from the pixi manifest."
-            )
-            raise RuntimeError(msg)
+    if any(line.lstrip().startswith("- pypi:") for line in lock_path.read_text().splitlines()):
+        msg = (
+            f"{lock_path} contains pypi dependencies. "
+            "misen owns PyPI packages through pyproject.toml / uv.lock; "
+            "remove them from the pixi manifest."
+        )
+        raise RuntimeError(msg)
 
 
 def _resolve_project_pixi() -> tuple[Path, Path, str] | None:
@@ -1225,23 +1216,23 @@ def _execute_argv(
         *(["--env-file", *(str(path) for path in env_files)] if env_files else []),
         "--payload",
         str(payload_path),
-        *_indices_argv("cpu-indices", cpu_indices),
-        *_accelerator_argv(accelerator_type, accelerator_indices),
+        *_resource_argv(cpu_indices, accelerator_type, accelerator_indices),
     ]
 
 
-def _indices_argv(flag: str, indices: list[int] | None) -> list[str]:
-    """Render ``--<flag> i j k``, or nothing for ``None`` / ``[]``."""
-    if indices is None or len(indices) == 0:
-        return []
-    return [f"--{flag}", *(str(i) for i in indices)]
-
-
-def _accelerator_argv(accelerator_type: AcceleratorType, indices: list[int] | None) -> list[str]:
-    """Render an explicit accelerator binding, preserving ``[]`` versus ``None``."""
-    if indices is None:
-        return []
-    return ["--accelerator-type", accelerator_type, "--accelerator-indices", *(str(i) for i in indices)]
+def _resource_argv(
+    cpu_indices: list[int] | None,
+    accelerator_type: AcceleratorType,
+    accelerator_indices: list[int] | None,
+) -> list[str]:
+    """Render explicit CPU and accelerator bindings."""
+    cpu = ["--cpu-indices", *(str(i) for i in cpu_indices)] if cpu_indices else []
+    accelerator = (
+        ["--accelerator-type", accelerator_type, "--accelerator-indices", *(str(i) for i in accelerator_indices)]
+        if accelerator_indices is not None
+        else []
+    )
+    return [*cpu, *accelerator]
 
 
 def _pixi_run_prefix(pixi_bin: str, manifest_path: Path) -> list[str]:
