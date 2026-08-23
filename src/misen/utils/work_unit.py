@@ -127,20 +127,20 @@ class WorkUnit:
 
         with RuntimeValues() as runtime_values:
             ordered_tasks: list[Task[Any]] = list(graph)
+            last_use = {
+                dependency: index
+                for index, task in enumerate(ordered_tasks)
+                for dependency in task.dependencies
+                if not dependency.meta.cache
+            }
             for i, task in enumerate(ordered_tasks):
-                # Keep only transient results still needed by future in-unit tasks.
-                remaining_deps = {
-                    dependency for remaining_task in ordered_tasks[i:] for dependency in remaining_task.dependencies
-                }
-                task_results = {k: v for k, v in task_results.items() if k in remaining_deps}
-
                 # Rebuild the task with resolved in-unit non-cacheable dependencies.
                 # Cacheable dependencies are still loaded through Workspace in Task.result.
                 executable_task = task.with_resolved_args(
                     args=tuple(resolve_arg(arg) for arg in task.args),
                     kwargs={name: resolve_arg(arg) for name, arg in task.kwargs.items()},
                 )
-                task_results[task] = executable_task.result(
+                result = executable_task.result(
                     workspace=workspace,
                     compute_if_uncached=True,
                     compute_uncached_deps=False,
@@ -148,6 +148,12 @@ class WorkUnit:
                     _log_task=task,
                     _runtime_values=runtime_values,
                 )
+                if task in last_use:
+                    task_results[task] = result
+                del result
+                for dependency in task.dependencies:
+                    if last_use.get(dependency) == i:
+                        task_results.pop(dependency)
 
     def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
         """Serialize executable payload for backend dispatch.
@@ -195,14 +201,13 @@ def build_work_graph(tasks: set[Task]) -> DependencyGraph[WorkUnit]:
     task_graph.remove_node_by_value(union, cmp=is_, first=True)
 
     # Keep only roots and cache boundaries, then retain induced connectivity.
-    anchor_graph = task_graph.copy()
-    anchors = [i for i in anchor_graph.node_indices() if anchor_graph.is_root(i) or anchor_graph[i].meta.cache]
-    anchor_graph.coarsen_to_anchors(anchors=anchors)
+    anchors = [i for i in task_graph.node_indices() if task_graph.is_root(i) or task_graph[i].meta.cache]
+    task_graph.coarsen_to_anchors(anchors=anchors)
 
-    # Materialize WorkUnit nodes preserving dependency topology.
-    work_graph = cast("DependencyGraph[WorkUnit]", anchor_graph.copy())
+    # Materialize WorkUnit nodes in place; dependencies have already been converted.
+    work_graph = cast("DependencyGraph[WorkUnit]", task_graph)
     for i in work_graph.evaluation_order():
-        work_graph[i] = WorkUnit(root=anchor_graph[i], dependencies=set(work_graph.successors(i)))
+        work_graph[i] = WorkUnit(root=cast("Task[Any]", work_graph[i]), dependencies=set(work_graph.successors(i)))
 
     return work_graph
 

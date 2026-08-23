@@ -31,6 +31,7 @@ from misen.utils.snapshot import (
     _is_pure_wheel,
     _misen_bootstrap_requirement,
     _uv_bin,
+    prepare_live_job,
 )
 from misen.workspace import Workspace
 from misen.workspaces.disk import DiskWorkspace
@@ -79,6 +80,15 @@ def captured_exec(monkeypatch: pytest.MonkeyPatch) -> list[ExecCall]:
 def _env_build_calls(recorded: list[list[str]]) -> list[list[str]]:
     """Subprocess calls that create or populate an environment."""
     return [argv for argv in recorded if "sync" in argv or "venv" in argv or "install" in argv]
+
+
+def _echo_uv(path: Path) -> str:
+    """Write a supported fake uv that echoes non-version invocations."""
+    path.write_text(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  printf 'uv 0.12.3\\n'\nelse\n  printf '%s\\n' \"$*\"\nfi\n"
+    )
+    path.chmod(0o755)
+    return str(path)
 
 
 class _StubHash:
@@ -284,12 +294,27 @@ def test_misen_requirement_git_preserves_subdirectory(tmp_path: Path) -> None:
 # ---------- bootstrap dispatch argv ----------
 
 
-def test_worker_shell_bootstrap_resolves_configured_tools(tmp_path: Path) -> None:
+def test_live_dispatch_uses_current_python_without_uv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
+    monkeypatch.setattr(snapshot_mod, "_uv_bin", lambda: pytest.fail("live dispatch resolved uv on submitter"))
+
+    _, argv, _, _ = prepare_live_job(
+        _StubWorkUnit(),  # type: ignore[arg-type]
+        workspace,
+        cpu_indices=None,
+        accelerator_type="cuda",
+        accelerator_indices=None,
+    )
+
+    assert argv[:3] == [snapshot_mod.sys.executable, "-m", "misen.utils.execute"]
+
+
+def test_worker_shell_bootstrap_resolves_configured_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The Bash root resolves required tools before entering uv."""
-    echo_bin = shutil.which("echo")
+    monkeypatch.delenv("MISEN_UV_BIN", raising=False)
+    echo_bin = _echo_uv(tmp_path / "uv")
     true_bin = shutil.which("true")
     bash_bin = shutil.which("bash")
-    assert echo_bin is not None
     assert true_bin is not None
     assert bash_bin is not None
     script = worker_bootstrap_script(
@@ -306,7 +331,7 @@ def test_worker_shell_bootstrap_resolves_configured_tools(tmp_path: Path) -> Non
         env_files=[],
         worker_args=[JOB_LOG_PATH_ARG, str(tmp_path / "job.log")],
     )
-    assert '${env_file_paths[@]+"${env_file_paths[@]}"}' in script
+    assert "${#env_file_paths[@]}" in script
     result = subprocess.run(  # noqa: S603
         [bash_bin, "-c", script],
         check=True,
@@ -468,7 +493,9 @@ def test_bootstrap_builds_reuses_and_execs(
 
     _run_materializer(snapshot, store_root, payload_ref, accelerator_type="rocm", accelerator_indices=[])
     path, argv, env = captured_exec[-1]
-    assert path == argv[0] == _uv_bin()
+    assert path == argv[0]
+    assert Path(path).name == "python"
+    assert Path(path).is_relative_to(store_root / "overlay-envs")
     assert "misen.utils.execute" in argv
     assert argv[argv.index("--payload") + 1] == payload_ref  # disk refs are paths
     assert argv[argv.index("--accelerator-type") + 1] == "rocm"
@@ -477,7 +504,8 @@ def test_bootstrap_builds_reuses_and_execs(
 
     overlay_venv = Path(env["VIRTUAL_ENV"])
     assert overlay_venv.is_relative_to(store_root / "overlay-envs")
-    deps_bin = Path(env["PATH"].split(os.pathsep)[0])
+    path_entries = env["PATH"].split(os.pathsep)
+    deps_bin = Path(path_entries[0])
     assert deps_bin.name == "bin"
     assert deps_bin.parent.is_relative_to(store_root / "python-envs")
     assert Path(env["PYTHONPATH"].split(os.pathsep)[0]).is_relative_to(overlay_venv)
@@ -490,7 +518,7 @@ def test_bootstrap_builds_reuses_and_execs(
         f"assert __import__('sys').prefix == {str(overlay_venv)!r}\n"
     )
     subprocess.run(  # noqa: S603
-        [argv[0], "run", "--no-project", "python", "-c", check], env=env, check=True, capture_output=True
+        [argv[0], "-c", check], env=env, check=True, capture_output=True
     )
 
     # A second bootstrap (same snapshot, same host) reuses both entries.
@@ -561,6 +589,7 @@ def test_materializer_removes_corrupt_transported_snapshot(tmp_path: Path) -> No
 
 def test_bash_transport_fetches_before_materialization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The single submitted shell fetches every ref before materialization."""
+    monkeypatch.delenv("MISEN_UV_BIN", raising=False)
     root = tmp_path / "project"
     root.mkdir()
     (root / "pyproject.toml").write_text(
@@ -581,9 +610,8 @@ def test_bash_transport_fetches_before_materialization(tmp_path: Path, monkeypat
         "fi\n"
     )
     store_root = tmp_path / "env-store"
-    echo_bin = shutil.which("echo")
+    echo_bin = _echo_uv(tmp_path / "uv")
     bash_bin = shutil.which("bash")
-    assert echo_bin is not None
     assert bash_bin is not None
     bootstrap = worker_bootstrap_script(
         uv_bin=echo_bin,

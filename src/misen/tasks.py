@@ -36,7 +36,6 @@ from misen.task_metadata import Resources, TaskMetadata, _normalize_resources, r
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object, task_function_signature
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
-from misen.utils.snapshot import token_base32
 from misen.utils.task_operators import TaskOperatorsMixin
 from misen.utils.task_utils import (
     collect_task_dependencies,
@@ -358,6 +357,8 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         workspace = Workspace.resolve_auto(workspace)
         if _job_id is None:
+            from misen.utils.snapshot import token_base32
+
             _job_id = token_base32(6)
         logger.debug(
             "Resolving task result for %s (cache=%s, compute_if_uncached=%s, compute_uncached_deps=%s, job_id=%s).",

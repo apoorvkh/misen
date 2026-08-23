@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, cast
 
 import libcst as cst
 import tyro  # noqa: TC002
-from libcst import matchers as m
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -414,7 +413,9 @@ def _as_str_list(value: object) -> list[str]:
 
 
 def _is_task_reference(expression: cst.BaseExpression) -> bool:
-    return m.matches(expression, m.Name("meta")) or m.matches(expression, m.Attribute(attr=m.Name("meta")))
+    return (isinstance(expression, cst.Name) and expression.value == "meta") or (
+        isinstance(expression, cst.Attribute) and expression.attr.value == "meta"
+    )
 
 
 def _is_placeholder_id(value: cst.BaseExpression) -> bool:

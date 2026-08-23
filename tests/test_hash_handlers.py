@@ -571,17 +571,6 @@ def test_networkx_graph_is_unsupported() -> None:
         stable_hash(graph)
 
 
-def test_rustworkx_graph_is_unsupported() -> None:
-    rx = pytest.importorskip("rustworkx")
-
-    graph = rx.PyDiGraph(multigraph=True)
-    graph.add_node("a")
-    graph.add_node("b")
-
-    with pytest.raises(HashError, match="explicit handlers"):
-        stable_hash(graph)
-
-
 def test_sklearn_estimator_is_unsupported() -> None:
     linear_model = pytest.importorskip("sklearn.linear_model")
 

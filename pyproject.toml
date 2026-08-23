@@ -11,9 +11,7 @@ dependencies = [
   "distributed>=2024.1.0",
   "msgspec>=0.20.0",
   "psutil>=6.0; sys_platform != 'linux'",  # cpu affinity
-  "rustworkx>=0.15.0",
   "typing_extensions>=4.1.0",
-  "uv>=0.11.15",
   "xxhash>=3.0.0",
   # disk workspace
   "flufl-lock>=9.1.0",
@@ -32,7 +30,7 @@ dependencies = [
 misen = "misen.cli:main"
 
 [dependency-groups]
-dev = ["pytest==9.0.3", "ruff==0.15.10", "ty==0.0.31"]
+dev = ["numpy==2.1.3", "pytest==9.0.3", "ruff==0.15.10", "ty==0.0.31"]
 docs = [
     "mkdocstrings-python==2.0.1",
     "zensical==0.0.43",

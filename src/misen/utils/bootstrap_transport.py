@@ -13,6 +13,8 @@ from textwrap import dedent
 from types import CodeType
 from typing import TYPE_CHECKING
 
+from misen.utils.uv_tool import ensure_uv_script
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
@@ -20,7 +22,6 @@ if TYPE_CHECKING:
 TRANSPORT_OPERATION_ENV = "MISEN_TRANSPORT_OPERATION"
 TRANSPORT_REF_ENV = "MISEN_TRANSPORT_REF"
 TRANSPORT_DEST_ENV = "MISEN_TRANSPORT_DEST"
-UV_BIN_ENV = "MISEN_UV_BIN"
 PIXI_BIN_ENV = "MISEN_PIXI_BIN"
 
 
@@ -202,6 +203,11 @@ def worker_bootstrap_script(
             f"""
             set -euo pipefail
 
+            store_root={_quote(store_root)}
+            mkdir -p -- "$store_root"
+
+            {ensure_uv_script(uv_bin, store_root)}
+
             resolve_tool() {{
                 local preferred="$1"
                 local name="$2"
@@ -216,12 +222,7 @@ def worker_bootstrap_script(
                     return 127
                 fi
             }}
-
-            MISEN_UV_BIN="$(resolve_tool {_quote(uv_bin)} uv)"
-            export MISEN_UV_BIN
             misen_requirement={_quote(misen_requirement)}
-            store_root={_quote(store_root)}
-            mkdir -p -- "$store_root"
             """
         )
     ]
@@ -361,9 +362,9 @@ def worker_bootstrap_script(
             --payload "$payload_path"
             --env-store-root "$store_root"
         )
-        for path in "${{env_file_paths[@]+"${{env_file_paths[@]}}"}}"; do
-            materialize+=(--env-file "$path")
-        done
+        if (( ${{#env_file_paths[@]}} )); then
+            materialize+=(--env-file "${{env_file_paths[@]}}")
+        fi
         """
     )
     if transport_script is not None:

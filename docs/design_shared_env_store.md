@@ -79,8 +79,8 @@ Split each environment by rate of change, and co-locate caches:
     scrubbed environment;
   - local entry-point scripts get real launchers in `<overlay>/bin`.
   Two env overrides complete the picture: `PATH` gains `<shared>/bin`
-  (dependency console scripts like `torchrun`; `uv run` only prepends the
-  overlay's bin), and `PYTHONPATH` carries the overlay site-packages as a
+  (dependency console scripts like `torchrun`; the worker entrypoint prepends
+  the overlay's bin), and `PYTHONPATH` carries the overlay site-packages as a
   safety net for children of shared-shebang scripts (e.g. `torchrun`'s
   re-exec runs the *shared* python, which never reads the overlay `.pth`).
 - **Shared conda env**: same store protocol; entry = staged `pixi.toml` +

@@ -17,8 +17,6 @@ import time
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-from rich.console import Console as RichConsole
-
 from misen.exceptions import HashError
 from misen.sentinels import SCRATCH_DIR, is_runtime_sentinel
 from misen.task_metadata import aggregate_resources
@@ -291,6 +289,8 @@ def execute_task(
                 try:
                     result = task.func(*resolved_args, **resolved_kwargs)
                 except Exception as exc:
+                    from rich.console import Console as RichConsole
+
                     RichConsole(stderr=True).print_exception()
                     logger.exception("Task failed: %s after %.2fs.", debug_name, time.perf_counter() - started_at)
                     runtime_event(
@@ -457,27 +457,26 @@ def build_task_dependency_graph(
     graph: DependencyGraph[Task[Any]] = DependencyGraph()
     nodes: dict[Task[Any], int] = {}
 
-    def get_node_index(candidate: Task[Any]) -> int:
+    def get_node_index(candidate: Task[Any]) -> tuple[int, bool]:
         node_index = nodes.get(candidate)
         if node_index is None:
             node_index = nodes[candidate] = graph.add_node(candidate)
-        else:
-            graph[node_index] = _merge_equivalent_task(graph[node_index], candidate)
-        return node_index
+            return node_index, True
+        graph[node_index] = _merge_equivalent_task(graph[node_index], candidate)
+        return node_index, False
 
     stack: list[Task[Any]] = [task]
-    seen: set[Task[Any]] = {task}
 
     while stack:
         current = stack.pop()
-        current_node = get_node_index(current)
+        current_node, _ = get_node_index(current)
 
         for dependency in current.dependencies:
             if not include_dependency(dependency):
                 continue
-            graph.add_edge(current_node, get_node_index(dependency), None)
-            if dependency not in seen:
-                seen.add(dependency)
+            dependency_node, is_new = get_node_index(dependency)
+            graph.add_edge(current_node, dependency_node, None)
+            if is_new:
                 stack.append(dependency)
 
     return graph

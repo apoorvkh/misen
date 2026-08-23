@@ -10,21 +10,12 @@ from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
-from rich.console import Console
-from rich.live import Live
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    TextColumn,
-    TimeElapsedColumn,
-)
-from rich.spinner import Spinner
-from rich.table import Table
-from rich.text import Text
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    from rich.console import Console
+    from rich.live import Live
+    from rich.table import Table
 
     from misen.tasks import Task
     from misen.utils.work_unit import WorkUnit
@@ -135,6 +126,8 @@ class _RuntimeJobBoard:
 
         if self._live is None:
             if has_active:
+                from rich.live import Live
+
                 self._live = Live(renderable, console=console, refresh_per_second=12, transient=False)
                 self._live.start()
                 return
@@ -154,6 +147,10 @@ class _RuntimeJobBoard:
         return all(line.state in {"done", "failed"} for line in self._entries.values())
 
     def _render_locked(self) -> Table:
+        from rich.spinner import Spinner
+        from rich.table import Table
+        from rich.text import Text
+
         table = Table.grid(padding=(0, 1))
         table.add_column(width=8, no_wrap=True)
         table.add_column()
@@ -246,6 +243,8 @@ def runtime_progress(description: str, *, total: int) -> Iterator[Callable[[int]
 
     _enter_live_context()
     try:
+        from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
+
         with Progress(
             TextColumn("[bold blue][misen][/bold blue] {task.description}"),
             BarColumn(),
@@ -385,4 +384,6 @@ def _exit_live_context() -> None:
 
 @cache
 def _get_console() -> Console | None:
+    from rich.console import Console
+
     return Console(stderr=True, soft_wrap=True)

@@ -12,9 +12,6 @@ from typing import Annotated, Any, cast
 
 import tyro
 
-from misen.utils.cli.experiment import experiment
-from misen.utils.cli.fill import fill
-
 __all__ = []
 
 
@@ -45,6 +42,13 @@ def _select_experiment(
 ) -> _ExperimentSelection:
     """Run an experiment CLI from a class reference."""
     return _ExperimentSelection(reference=reference)
+
+
+def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
+    """Load and run the experiment CLI."""
+    from misen.utils.cli.experiment import experiment as run_experiment
+
+    return run_experiment(argv)
 
 
 TopLevelCommand = (
@@ -91,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
         return experiment(argv=[parsed.reference, *unknown_args])
 
     if isinstance(parsed, _FillSelection):
+        from misen.utils.cli.fill import fill
+
         return int(tyro.cli(fill, args=unknown_args))
 
     return 0

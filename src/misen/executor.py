@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar
 
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, task_label, work_unit_label
 from misen.utils.settings import Configurable
-from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap
 from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
@@ -31,6 +30,7 @@ if TYPE_CHECKING:
     from misen.task_metadata import Resources
     from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
+    from misen.utils.snapshot import ProjectSnapshot
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -114,6 +114,8 @@ class Executor(Configurable, Generic[JobT]):
 
         snapshot: ProjectSnapshot | None = None
         if pending_work_units:
+            from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap
+
             logger.info("%s creating snapshot for %d pending work unit(s).", executor_name, num_dispatch)
             started_at = time.perf_counter()
             try:
@@ -198,10 +200,10 @@ class Executor(Configurable, Generic[JobT]):
             num_complete,
         )
 
-        # Keep graph topology and replace each WorkUnit node with its job handle.
-        job_graph = cast("DependencyGraph[CompletedJob | JobT]", work_graph.copy())
+        # Keep graph topology and replace each WorkUnit node with its job handle in place.
+        job_graph = cast("DependencyGraph[CompletedJob | JobT]", work_graph)
         for i in job_graph.node_indices():
-            job_graph[i] = jobs[work_graph[i]]
+            job_graph[i] = jobs[cast("WorkUnit", job_graph[i])]
 
         if blocking:
             blocking_jobs = list(job_graph.nodes())

@@ -27,7 +27,7 @@ behavior to today.
   ordering (`venv_bin:conda_bin:…` — see below). We do *not* filter
   `python` / `python_abi` / `pip` out of the conda install. If the lockfile
   pulls them in they are installed as-is: the uv venv still wins because
-  `uv run` prepends its `bin` directory ahead of the conda prefix, and
+  the worker entrypoint prepends its `bin` directory ahead of the conda prefix, and
   conda's activation does not set `PYTHONHOME` / `PYTHONPATH`, so
   `sys.path` can't cross-contaminate.
 - `[pypi-dependencies]` in the lockfile is a hard error — PyPI belongs in
@@ -125,18 +125,18 @@ LocalSnapshot
      lockfile if it thinks the manifest drifted. Pre-installing means
      the first job doesn't pay install latency.
   7. Return the staged manifest path.
-- `prepare_job()` builds the `uv run ...` argv as today. If
+- `prepare_job()` builds the materialized Python argv. If
   `self.conda_manifest_path is not None` and `self.pixi_bin is not None`,
   the argv is wrapped as:
   ```
   [pixi, run, --no-progress, --color, never, --frozen,
-   --manifest-path, <staged pixi.toml>, --, <uv run ...>]
+   --manifest-path, <staged pixi.toml>, --, <overlay python ...>]
   ```
   - `--` stops pixi from parsing our command's flags.
   - `--frozen` ensures pixi re-uses the already-installed env without
     touching the lockfile.
-  `env_overrides` stays `{"VIRTUAL_ENV": <python_env_dir>}` — conda
-  activation now happens inside the pixi subprocess.
+  `env_overrides` carries the Python activation paths; conda activation
+  happens inside the pixi subprocess.
 - Snapshot cleanup does not own the content-addressed conda entry; store
   pruning removes it when it is no longer needed.
 
@@ -165,19 +165,18 @@ state seen by user code):
    - Sources `$CONDA_PREFIX/etc/conda/activate.d/*.sh`, where packages
      like `cudatoolkit`, `cudnn`, `mkl` inject `CUDA_HOME`,
      `CMAKE_PREFIX_PATH`, `MKL_*`, etc.
-3. **uv run prepend**: the exec'd command is `uv run --no-project
-   --env-file ... -m ...`. `uv run` sees `VIRTUAL_ENV` and prepends
-   `<python-env>/bin` on top of the conda-activated `PATH`.
-4. **User env files**: `--env-file` entries apply last and win ties
-   (unchanged behavior).
+3. **Worker entrypoint**: the overlay Python runs directly and restores
+   `<python-env>/bin` to the front of the conda-activated `PATH`.
+4. **User env files**: files are loaded in order, with later files overriding
+   earlier ones and the inherited worker environment winning ties.
 
 Final priority visible to the child Python process:
 
 ```
-PATH             = venv_bin : conda_bin : parent_path
+PATH             = overlay_bin : conda_bin : deps_bin : parent_path
 LD_LIBRARY_PATH  = conda_lib : parent_ld_library_path
-CONDA_PREFIX     = <snapshot_dir>/.pixi/envs/default
-VIRTUAL_ENV      = <snapshot_dir>/python-env
+CONDA_PREFIX     = <conda store entry>/.pixi/envs/default
+VIRTUAL_ENV      = <overlay store entry>/venv
 CUDA_HOME, MKL_* = whatever activate.d scripts set
 ```
 

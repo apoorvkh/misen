@@ -9,7 +9,7 @@ from pathlib import Path
 import tyro
 
 from misen.task_metadata import AcceleratorType
-from misen.utils.bootstrap_transport import PIXI_BIN_ENV, UV_BIN_ENV
+from misen.utils.bootstrap_transport import PIXI_BIN_ENV
 from misen.utils.snapshot import (
     _activation_env,
     _materialize_envs,
@@ -18,6 +18,7 @@ from misen.utils.snapshot import (
     _snapshot_key,
     _worker_command,
 )
+from misen.utils.uv_tool import UV_BIN_ENV
 
 
 def main(

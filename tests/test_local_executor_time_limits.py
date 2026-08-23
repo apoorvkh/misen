@@ -110,9 +110,9 @@ def test_scheduler_terminates_running_job_past_time_limit(tmp_path: Path) -> Non
     _stage_running_job(executor, job, fake_process=fake_process)
 
     with executor._scheduler._condition:  # noqa: SLF001
-        executor._scheduler._running.add(job)  # noqa: SLF001
+        executor._scheduler._running[job] = None  # noqa: SLF001
         executor._scheduler._terminate_timed_out_locked()  # noqa: SLF001
-        executor._scheduler._running.discard(job)  # noqa: SLF001
+        executor._scheduler._running.pop(job, None)  # noqa: SLF001
 
     assert fake_process.terminate_calls == 1
 
@@ -125,9 +125,9 @@ def test_scheduler_does_not_terminate_running_job_within_time_limit(tmp_path: Pa
     _stage_running_job(executor, job, fake_process=fake_process)
 
     with executor._scheduler._condition:  # noqa: SLF001
-        executor._scheduler._running.add(job)  # noqa: SLF001
+        executor._scheduler._running[job] = None  # noqa: SLF001
         executor._scheduler._terminate_timed_out_locked()  # noqa: SLF001
-        executor._scheduler._running.discard(job)  # noqa: SLF001
+        executor._scheduler._running.pop(job, None)  # noqa: SLF001
 
     assert fake_process.terminate_calls == 0
 
@@ -140,8 +140,8 @@ def test_scheduler_terminates_unannotated_task_past_default_60min_limit(tmp_path
     _stage_running_job(executor, job, fake_process=fake_process)
 
     with executor._scheduler._condition:  # noqa: SLF001
-        executor._scheduler._running.add(job)  # noqa: SLF001
+        executor._scheduler._running[job] = None  # noqa: SLF001
         executor._scheduler._terminate_timed_out_locked()  # noqa: SLF001
-        executor._scheduler._running.discard(job)  # noqa: SLF001
+        executor._scheduler._running.pop(job, None)  # noqa: SLF001
 
     assert fake_process.terminate_calls == 1

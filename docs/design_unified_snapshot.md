@@ -111,9 +111,10 @@ The executor delivers five things to a worker, all strings/small files:
 
 The executor submits one Bash bootstrap with these phases:
 
-1. Enter through Bash and locate `uv`; also locate `pixi` when the staged
-   project has a Pixi environment. A transport locates any additional
-   tools it needs itself.
+1. Enter through Bash and locate `uv`, installing Misen's pinned standalone
+   version into the env store when no configured or PATH executable is
+   available; also locate `pixi` when the staged project has a Pixi
+   environment. A transport locates any additional tools it needs itself.
 2. Resolve the data plane entirely from shell: use worker-visible paths
    directly, or run the workspace's Bash transport for the snapshot,
    payload, and env-file refs into local paths under the env-store root.
@@ -128,15 +129,18 @@ The executor submits one Bash bootstrap with these phases:
    wrapped in `pixi run --frozen` so native builds see the locked
    toolchain (this ordering is why conda comes first).
 6. Apply activation (`VIRTUAL_ENV`, `PATH`, `PYTHONPATH`, pixi wrap), and
-   `exec` `uv run --no-project --env-file …
-   -m misen.utils.execute --payload …`.
+   `exec` the overlay environment's Python directly. The worker entrypoint
+   applies the transported env files before loading the payload.
 
-**Bootstrap runtime.** Bash is the root bootstrap dependency. It
-checks configured `uv`/`pixi` paths, falls back to `PATH`, and fails with
-a precise error if a required tool is absent. Executors provision these
-tools once through an image, container, module, node setup, or scheduler
-prologue rather than reinstalling them in every job. After the
-shell has resolved every data-plane ref, it runs `uv run --with
+**Bootstrap runtime.** Bash is the root bootstrap dependency. It checks a
+configured uv path and `PATH`, then downloads Misen's pinned uv version with
+the official standalone installer into a versioned env-store entry. The
+managed install does not alter shell profiles or self-update, and concurrent
+jobs may safely publish the same pinned executable. Offline executors instead
+pre-provision uv or set `MISEN_UV_BIN`; `MISEN_UV_AUTO_INSTALL=0` disables the
+fallback. Submitters use the same resolver, with managed tools stored under
+their XDG data directory. Pixi remains an executor-provided prerequisite.
+After the shell has resolved every data-plane ref, it runs `uv run --with
 <locked-misen-requirement> -m misen.utils.materialize_env …`. When the
 submitting misen is a local/editable package (developing misen itself —
 detectable from the user's `uv.lock` source table), its staged artifact is
@@ -159,7 +163,7 @@ LocalExecutor uses the same wrapper when `prewarm_envs=false`; its default
 - `prewarm_envs`: if true, the submit host runs the same ensure-env
   functions against `env_store_dir` at snapshot time, and jobs then
   dispatch **directly** — activation paths in argv/env, no bootstrap
-  wrapper, no worker-side requirements at all (fail-fast errors,
+  wrapper and no worker-side builds or downloads (fail-fast errors,
   air-gap-friendly; the store must then be reachable by workers, and the
   workspace's job files must be worker-visible paths). Defaults:
   `LocalExecutor` prewarms (jobs run on the building host and share the
@@ -289,7 +293,8 @@ safe when nothing is queued or running.
 3. **Universal bootstrap** — done: data plane via plain paths or a
    workspace Bash transport embedded in one submitted script; Bash
    resolves worker tools and data first, then path-only `uv run --no-project --with
-   <locked-misen-requirement> -m misen.utils.materialize_env` dispatches; prewarmed
+   <locked-misen-requirement> -m misen.utils.materialize_env` materializes the
+   environment and dispatches its Python directly; prewarmed
    snapshots dispatch directly; `env_store_dir` + `prewarm_envs` replace
    `snapshot="shallow"`/`env_cache`/`snapshots_dir`; dependency envs use
    the staged project's frozen uv sync on either host.

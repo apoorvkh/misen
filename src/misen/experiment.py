@@ -16,8 +16,8 @@ from __future__ import annotations
 import logging
 import weakref
 from abc import abstractmethod
-from collections.abc import Collection, Mapping
-from functools import wraps
+from collections.abc import Callable, Collection, Mapping
+from functools import partial, update_wrapper, wraps
 from typing import Any, Generic, Literal, TypeAlias, cast
 
 from msgspec import Struct, StructMeta
@@ -25,7 +25,6 @@ from typing_extensions import TypeVar
 
 from misen.executor import Executor
 from misen.tasks import Task
-from misen.utils.cli.experiment import _ClassOrInstanceMethod, experiment_cli
 from misen.utils.hashing import stable_hash
 from misen.workspace import Workspace
 
@@ -37,6 +36,18 @@ _ExperimentTasks: TypeAlias = Mapping[str, Task[Any]] | Collection[Task[Any]]
 logger = logging.getLogger(__name__)
 _HASH_BY_ID: dict[int, int] = {}
 _TASKS_BY_HASH: dict[int, _ExperimentTasks] = {}
+
+
+class _ClassOrInstanceMethod:
+    """Pass the class on class access and the instance on instance access."""
+
+    def __init__(self, func: Callable[[Any], None]) -> None:
+        self._func = func
+
+    def __get__(self, instance: Any, owner: type | None = None) -> Callable[[], None]:
+        bound = partial(self._func, instance if instance is not None else owner)
+        update_wrapper(bound, self._func)
+        return bound
 
 
 class _FrozenStructMeta(StructMeta):
@@ -174,4 +185,6 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
         overrides. (``self`` here is the class on class access, the instance on
         instance access — see :class:`_ClassOrInstanceMethod`.)
         """
+        from misen.utils.cli.experiment import experiment_cli
+
         experiment_cli(self)

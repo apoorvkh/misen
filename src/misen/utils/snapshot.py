@@ -34,12 +34,10 @@ import time
 import tomllib
 from contextlib import contextmanager
 from functools import cache
-from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
-import uv
 from dotenv import load_dotenv
 
 from misen.exceptions import LockUnavailableError
@@ -49,6 +47,7 @@ from misen.utils.hashing import Hash
 from misen.utils.hashing.base import hash_values
 from misen.utils.locks import NFSLock
 from misen.utils.runtime_events import runtime_event
+from misen.utils.uv_tool import find_or_install_uv
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -79,7 +78,7 @@ def prepare_live_job(
     accelerator_type: AcceleratorType,
     accelerator_indices: list[int] | None,
 ) -> tuple[str, list[str], dict[str, str], Path]:
-    """Prepare a work unit to run via ``uv run --no-project`` in the live env.
+    """Prepare a work unit to run with the current Python environment.
 
     The ``snapshot = false`` dispatch mode: no snapshot is taken, so jobs
     start instantly but run against whatever interpreter and environment
@@ -118,7 +117,8 @@ def prepare_live_job(
     log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
     argv = [
         *_detect_pixi_wrap(),
-        *_uv_execute_argv(
+        *_execute_argv(
+            sys.executable,
             _active_env_files(),
             payload_path,
             cpu_indices=cpu_indices,
@@ -888,14 +888,14 @@ def _worker_command(
     """Build the worker command for materialized envs.
 
     The single definition of what a job runs — the pixi activation wrap
-    (when the snapshot has a conda env) around the ``uv run … -m
-    misen.utils.execute`` invocation — used identically by prewarmed
-    dispatch (at submission) and the bootstrap (on the execution host).
+    (when the snapshot has a conda env) around the materialized environment's
+    Python — used identically by prewarmed dispatch and worker bootstrap.
     """
     argv: list[str] = []
     if envs.conda_manifest_path is not None and envs.pixi_bin is not None:
         argv += _pixi_run_prefix(envs.pixi_bin, envs.conda_manifest_path)
-    argv += _uv_execute_argv(
+    argv += _execute_argv(
+        envs.overlay_venv_dir / "bin" / "python",
         env_files,
         payload_path,
         cpu_indices=cpu_indices,
@@ -909,10 +909,10 @@ def _worker_command(
 def _activation_env(envs: _MaterializedEnvs) -> dict[str, str]:
     """Env overrides activating materialized envs; pairs with :func:`_worker_command`.
 
-    ``uv run`` prepends only the overlay venv's bin; the deps env's bin
-    carries dependency console scripts (e.g. torchrun), and PYTHONPATH
-    keeps local packages importable for children of deps-env script
-    shebangs (which never read the overlay's ``.pth``).
+    The deps env supplies dependency scripts (e.g. torchrun); the worker
+    entrypoint moves the overlay's bin ahead of it after optional Pixi
+    activation. PYTHONPATH keeps local packages importable for children of
+    deps-env script shebangs (which never read the overlay's ``.pth``).
     """
     return {
         "VIRTUAL_ENV": str(envs.overlay_venv_dir),
@@ -1201,10 +1201,11 @@ def _ensure_conda_env_entry(*, manifest_path: Path, lock_path: Path, pixi_bin: s
 @cache
 def _uv_bin() -> str:
     """Return the uv CLI path (cached — constant across the process)."""
-    return uv.find_uv_bin()
+    return find_or_install_uv()
 
 
-def _uv_execute_argv(
+def _execute_argv(
+    python_bin: str | Path,
     env_files: list[Path] | tuple[Path, ...],
     payload_path: Path,
     *,
@@ -1212,19 +1213,16 @@ def _uv_execute_argv(
     accelerator_type: AcceleratorType,
     accelerator_indices: list[int] | None,
 ) -> list[str]:
-    """Build the ``uv run --no-project -m misen.utils.execute ...`` argv.
+    """Build the ``python -m misen.utils.execute ...`` argv.
 
-    Shared by both snapshot classes; the only per-class difference is the
-    ``env_files`` source (live CWD paths for :func:`prepare_live_job`,
-    submission-scoped job files for :class:`ProjectSnapshot`).
+    Shared by live and snapshot execution; their only difference is the
+    Python environment and source of ``env_files``.
     """
     return [
-        _uv_bin(),
-        "run",
-        "--no-project",
-        *chain.from_iterable(("--env-file", str(path)) for path in env_files),
+        str(python_bin),
         "-m",
         "misen.utils.execute",
+        *(["--env-file", *(str(path) for path in env_files)] if env_files else []),
         "--payload",
         str(payload_path),
         *_indices_argv("cpu-indices", cpu_indices),

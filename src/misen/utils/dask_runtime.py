@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shlex
 import signal
@@ -163,6 +162,8 @@ def run_role_from_env() -> bool:
     role = os.environ.pop(DASK_ROLE_ENV, None)
     if role is None:
         return False
+    import asyncio
+
     if role == "scheduler":
         scheduler_file = _required_env(DASK_SCHEDULER_FILE_ENV)
         asyncio.run(_run_scheduler(Path(scheduler_file)))
@@ -183,6 +184,8 @@ def run_role_from_env() -> bool:
 
 async def _run_scheduler(scheduler_file: Path) -> None:
     """Run a scheduler on a dynamic port and publish its address atomically."""
+    import asyncio
+
     import dask
     from distributed import Scheduler as DaskScheduler
 

@@ -10,11 +10,14 @@ post-execute finalizers -- regardless of where the worker is running.
 """
 
 import contextlib
+import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cloudpickle
 import tyro
+from dotenv import load_dotenv
 
 from misen.task_metadata import AcceleratorType
 from misen.utils.dask_runtime import run_role_from_env
@@ -23,10 +26,13 @@ from misen.utils.resource_binding import apply_resource_binding
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+_ENV_FILES_LOADED = "MISEN_ENV_FILES_LOADED"
+
 
 def execute(
     payload: Path,
     *,
+    env_file: tuple[Path, ...] = (),
     cpu_indices: list[int] | None = None,
     accelerator_type: AcceleratorType = "cuda",
     accelerator_indices: list[int] | None = None,
@@ -39,6 +45,8 @@ def execute(
             ``workspace`` (Workspace) and ``fn`` (zero-arg callable). The
             workspace is exposed so the worker can wrap its lifecycle in
             :meth:`Workspace.streaming_job_log` for live log publishing.
+        env_file: Dotenv files loaded in order. Later files override earlier
+            files, while variables already present in the worker environment win.
         cpu_indices: CPU logical-core indices to bind via
             :func:`os.sched_setaffinity`. Pass ``None`` when the scheduler
             (e.g. SLURM) already pins CPUs for this process.
@@ -50,6 +58,25 @@ def execute(
             combined stdout/stderr log. When provided, the workspace can stream
             the log while the worker is still running.
     """
+    env_files_loaded = os.environ.pop(_ENV_FILES_LOADED, None)
+    reload_with_env = bool(env_file) and env_files_loaded is None
+    if reload_with_env:
+        inherited_env = os.environ.copy()
+        for path in env_file:
+            load_dotenv(path, override=True)
+        os.environ.update(inherited_env)
+    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+        venv_bin = str(Path(virtual_env) / "bin")
+        path_entries = os.environ.get("PATH", "").split(os.pathsep)
+        os.environ["PATH"] = os.pathsep.join((venv_bin, *(path for path in path_entries if path != venv_bin)))
+    if reload_with_env:
+        env = os.environ.copy()
+        env[_ENV_FILES_LOADED] = "1"
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execve(sys.executable, [sys.executable, "-m", "misen.utils.execute", *sys.argv[1:]], env)  # noqa: S606
+        return
+
     apply_resource_binding(
         cpu_indices=cpu_indices,
         accelerator_type=accelerator_type,

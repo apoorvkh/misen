@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import functools
 import importlib
 import importlib.util
 import sys
@@ -32,7 +31,7 @@ from . import tui
 from .display import format_task_line_markup, iter_task_arg_children
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator, Mapping
 
     from misen import Experiment
     from misen.tasks import Task
@@ -1033,19 +1032,3 @@ def experiment_cli(
     console = Console()
     parsed = tyro.cli(make_dataclass("", cli_fields, kw_only=True), args=unknown_args)
     _execute_command(args=cast("Any", parsed), console=console)
-
-
-class _ClassOrInstanceMethod:
-    """Descriptor: passes the class on class access and the instance on instance access.
-
-    Lets a single method serve both ``Experiment.cli()`` (class → field defaults)
-    and ``config.cli()`` (instance → bound field values seed CLI defaults).
-    """
-
-    def __init__(self, func: Callable[[Any], None]) -> None:
-        self._func = func
-
-    def __get__(self, instance: Any, owner: type | None = None) -> Callable[[], None]:
-        bound = functools.partial(self._func, instance if instance is not None else owner)
-        functools.update_wrapper(bound, self._func)
-        return bound

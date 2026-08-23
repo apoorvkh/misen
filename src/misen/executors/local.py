@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from bisect import insort
+from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -343,13 +344,20 @@ class _ResourceBudget:
 
 
 class _LocalScheduler:
-    """Background scheduler for dependency-ready local jobs."""
+    """Event-driven local scheduler with bounded resource backfilling.
+
+    Dependency edges are visited only when jobs finish. Newly ready jobs may
+    backfill, while resource-blocked jobs retry in FIFO order.
+    """
 
     __slots__ = (
+        "_blocked",
         "_condition",
-        "_pending",
+        "_dependents",
+        "_ready",
         "_running",
         "_thread",
+        "_waiting",
         "available_accelerator_indices",
         "available_budget",
         "available_cpu_indices",
@@ -369,8 +377,11 @@ class _LocalScheduler:
         self.available_cpu_indices = list(available_cpu_indices)
         self.available_accelerator_indices = list(available_accelerator_indices)
         self.enforce_time_limits = enforce_time_limits
-        self._pending: list[LocalJob] = []
-        self._running: set[LocalJob] = set()
+        self._blocked: deque[LocalJob] = deque()
+        self._dependents: dict[LocalJob, list[LocalJob]] = {}
+        self._ready: deque[LocalJob] = deque()
+        self._running: dict[LocalJob, None] = {}
+        self._waiting: dict[LocalJob, int] = {}
         self._condition = threading.Condition()
         self._thread = threading.Thread(name="misen-local-scheduler", target=self._run, daemon=True)
         self._thread.start()
@@ -381,11 +392,20 @@ class _LocalScheduler:
     def submit(self, job: LocalJob) -> None:
         """Queue a job for scheduling."""
         with self._condition:
-            self._pending.append(job)
+            dependencies = [(dependency, dependency.state()) for dependency in job.dependencies]
+            waiting = [dependency for dependency, state in dependencies if state != "done"]
+            if any(state == "failed" for _, state in dependencies):
+                self._mark_failed_locked(job)
+            elif waiting:
+                self._waiting[job] = len(waiting)
+                for dependency in waiting:
+                    self._dependents.setdefault(dependency, []).append(job)
+            else:
+                self._ready.append(job)
             self._logger.debug(
                 "Queued job for %s (pending=%d, running=%d).",
                 job.work_unit,
-                len(self._pending),
+                len(self._ready) + len(self._blocked) + len(self._waiting),
                 len(self._running),
             )
             self._condition.notify_all()
@@ -393,14 +413,15 @@ class _LocalScheduler:
     def _run(self) -> None:
         while True:
             with self._condition:
-                if self.enforce_time_limits:
-                    self._terminate_timed_out_locked()
-                self._collect_finished_locked()
-                progress_made = self._start_ready_jobs_locked()
-                if not self._pending and not self._running:
-                    self._condition.wait()
-                elif not progress_made:
-                    self._condition.wait(timeout=0.1)
+                self._tick_locked()
+                self._condition.wait(timeout=0.1 if self._running else None)
+
+    def _tick_locked(self) -> None:
+        if self.enforce_time_limits:
+            self._terminate_timed_out_locked()
+        if self._collect_finished_locked():
+            self._retry_blocked_locked()
+        self._start_ready_jobs_locked()
 
     def _terminate_timed_out_locked(self) -> None:
         for job in list(self._running):
@@ -414,62 +435,85 @@ class _LocalScheduler:
             )
             job.terminate()
 
-    def _collect_finished_locked(self) -> None:
+    def _collect_finished_locked(self) -> bool:
         finished_any = False
         for job in list(self._running):
             state = job.state()
             if state not in {"done", "failed"}:
                 continue
 
-            self._running.remove(job)
+            del self._running[job]
             self.available_budget = self.available_budget.add(job.resources)
             self._release_allocations(job.assigned_cpu_indices, job.assigned_accelerator_indices)
             finished_any = True
             if state == "done":
                 self._logger.info("LocalScheduler observed job completion for %s.", job.work_unit)
                 runtime_job_done(id(job))
+                self._release_dependents_locked(job)
             else:
                 self._logger.error("LocalScheduler observed job failure for %s.", job.work_unit)
                 runtime_job_failed(id(job))
+                self._fail_dependents_locked(job)
 
-        if finished_any:
-            self._condition.notify_all()
+        return finished_any
 
-    def _start_ready_jobs_locked(self) -> bool:
-        progress_made = False
-        for job in list(self._pending):
-            dependency_states = {dependency.state() for dependency in job.dependencies}
-            if "failed" in dependency_states:
-                self._logger.error(
-                    "Dependency failed; marking pending job failed for %s.",
-                    job.work_unit,
-                )
-                self._mark_pending_failed(job)
-                progress_made = True
-                continue
-            if dependency_states and dependency_states != {"done"}:
-                continue
-            if not self.available_budget.fits(job.resources):
-                continue
+    def _start_ready_jobs_locked(self) -> None:
+        while self._ready and self.available_budget.cpus and self.available_budget.memory:
+            job = self._ready.popleft()
+            if not self._start_job_locked(job):
+                self._blocked.append(job)
 
-            allocations = self._reserve_indices(job.resources)
-            if allocations is None:
-                continue
-            cpu_indices, accelerator_indices = allocations
+    def _retry_blocked_locked(self) -> None:
+        while self._blocked and self._start_job_locked(self._blocked[0]):
+            self._blocked.popleft()
 
-            try:
-                self._launch_job(job, cpu_indices=cpu_indices, accelerator_indices=accelerator_indices)
-            except Exception:
-                self._logger.exception("Failed to launch local job for %s.", job.work_unit)
-                self._mark_pending_failed(job, cpu_indices=cpu_indices, accelerator_indices=accelerator_indices)
-                progress_made = True
-                continue
+    def _start_job_locked(self, job: LocalJob) -> bool:
+        if not self.available_budget.fits(job.resources):
+            return False
+        allocations = self._reserve_indices(job.resources)
+        if allocations is None:
+            return False
+        cpu_indices, accelerator_indices = allocations
 
-            self.available_budget = self.available_budget.subtract(job.resources)
-            self._pending.remove(job)
-            self._running.add(job)
-            progress_made = True
-        return progress_made
+        try:
+            self._launch_job(job, cpu_indices=cpu_indices, accelerator_indices=accelerator_indices)
+        except Exception:
+            self._logger.exception("Failed to launch local job for %s.", job.work_unit)
+            self._release_allocations(cpu_indices, accelerator_indices)
+            self._mark_failed_locked(job)
+            return True
+
+        self.available_budget = self.available_budget.subtract(job.resources)
+        self._running[job] = None
+        return True
+
+    def _release_dependents_locked(self, job: LocalJob) -> None:
+        for dependent in self._dependents.pop(job, ()):
+            remaining = self._waiting.get(dependent)
+            if remaining is None:
+                continue
+            if remaining == 1:
+                del self._waiting[dependent]
+                self._ready.append(dependent)
+            else:
+                self._waiting[dependent] = remaining - 1
+
+    def _fail_dependents_locked(self, job: LocalJob) -> None:
+        failed = deque(self._dependents.pop(job, ()))
+        while failed:
+            dependent = failed.popleft()
+            if self._waiting.pop(dependent, None) is None:
+                continue
+            dependent.mark_failed()
+            self._logger.error("Dependency failed; marked local job failed for %s.", dependent.work_unit)
+            runtime_job_failed(id(dependent))
+            failed.extend(self._dependents.pop(dependent, ()))
+
+    def _mark_failed_locked(self, job: LocalJob) -> None:
+        job.mark_failed()
+        self._logger.error("Marked pending local job failed for %s.", job.work_unit)
+        runtime_job_failed(id(job))
+        self._fail_dependents_locked(job)
 
     def _launch_job(self, job: LocalJob, *, cpu_indices: list[int], accelerator_indices: list[int]) -> None:
         log_fp: FileIO | None = None
@@ -547,20 +591,6 @@ class _LocalScheduler:
             insort(self.available_cpu_indices, index)
         for index in accelerator_indices:
             insort(self.available_accelerator_indices, index)
-
-    def _mark_pending_failed(
-        self,
-        job: LocalJob,
-        *,
-        cpu_indices: list[int] | None = None,
-        accelerator_indices: list[int] | None = None,
-    ) -> None:
-        self._release_allocations(cpu_indices or [], accelerator_indices or [])
-        job.mark_failed()
-        if job in self._pending:
-            self._pending.remove(job)
-        self._logger.error("Marked pending local job failed for %s.", job.work_unit)
-        runtime_job_failed(id(job))
 
     def _terminate_running_jobs(self) -> None:
         """Send SIGTERM to every currently running job.
