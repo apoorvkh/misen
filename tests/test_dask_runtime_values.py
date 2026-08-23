@@ -9,6 +9,7 @@ import distributed
 import pytest
 
 from misen import DASK_CLIENT, Task, meta
+from misen.exceptions import ExecutionError
 from misen.utils.runtime_values import RuntimeValues
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.memory import InMemoryWorkspace
@@ -143,7 +144,7 @@ def test_runtime_membership_change_fails_and_closes(fake_client: type[_FakeClien
         },
     ]
 
-    with pytest.raises(RuntimeError, match="membership changed"):
+    with pytest.raises(ExecutionError, match="membership changed"):
         with RuntimeValues() as values:
             values.resolve(DASK_CLIENT)
 
@@ -154,7 +155,7 @@ def test_runtime_membership_change_fails_and_closes(fake_client: type[_FakeClien
 def test_runtime_rejects_a_single_worker_group(fake_client: type[_FakeClient], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MISEN_DASK_EXPECTED_WORKERS", "1")
 
-    with pytest.raises(RuntimeError, match="must be at least 2"):
+    with pytest.raises(ExecutionError, match="must be at least 2"):
         with RuntimeValues() as values:
             values.resolve(DASK_CLIENT)
 
@@ -174,10 +175,40 @@ def test_client_closes_when_work_unit_fails(fake_client: type[_FakeClient]) -> N
     assert fake_client.created[0].closed
 
 
+def test_dask_setup_preserves_unexpected_errors(
+    fake_client: type[_FakeClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_wait(self: _FakeClient, workers: int, *, timeout: float) -> None:
+        _ = self, workers, timeout
+        raise AssertionError("client bug")
+
+    monkeypatch.setattr(_FakeClient, "wait_for_workers", fail_wait)
+
+    with pytest.raises(AssertionError, match="client bug"):
+        with RuntimeValues() as values:
+            values.resolve(DASK_CLIENT)
+
+    assert fake_client.created[0].closed
+
+
+def test_dask_close_interrupt_is_not_swallowed(fake_client: type[_FakeClient], monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupt_close(self: _FakeClient) -> None:
+        self.closed = True
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_FakeClient, "close", interrupt_close)
+
+    with pytest.raises(KeyboardInterrupt):
+        with RuntimeValues() as values:
+            values.resolve(DASK_CLIENT)
+
+    assert fake_client.created[0].closed
+
+
 def test_direct_task_execution_cannot_resolve_dask_client(tmp_path: Any) -> None:
     task = Task(_client_leaf, DASK_CLIENT)
     workspace = InMemoryWorkspace(directory=str(tmp_path / "ws"))
-    with pytest.raises(RuntimeError, match="WorkUnit through an Executor"):
+    with pytest.raises(ExecutionError, match="WorkUnit through an Executor"):
         task.result(workspace=workspace, compute_if_uncached=True)
 
 

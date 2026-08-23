@@ -277,6 +277,30 @@ def test_zarr_array_roundtrip(tmp_path: pathlib.Path) -> None:
     assert loaded.attrs["label"] == "demo"
 
 
+def test_zarr_group_roundtrip(tmp_path: pathlib.Path) -> None:
+    zarr = pytest.importorskip("zarr")
+    data = numpy.arange(24, dtype=numpy.int32).reshape(4, 6)
+    source = zarr.open_group(str(tmp_path / "source-group.zarr"), mode="w")
+    source.attrs["kind"] = "root"
+    subgroup = source.create_group("nested")
+    subgroup.attrs["kind"] = "child"
+    if int(zarr.__version__.partition(".")[0]) >= 3:
+        array = subgroup.create_array("values", data=data, chunks=(2, 3))
+    else:
+        array = subgroup.create_dataset("values", data=data, chunks=(2, 3))
+    array.attrs["units"] = "items"
+
+    save_dir = tmp_path / "save-group"
+    serde.save(source, save_dir)
+    loaded = serde.load(save_dir)
+
+    assert loaded.attrs["kind"] == "root"
+    assert loaded["nested"].attrs["kind"] == "child"
+    assert loaded["nested/values"].attrs["units"] == "items"
+    assert loaded["nested/values"].chunks == (2, 3)
+    assert numpy.array_equal(numpy.asarray(loaded["nested/values"][...]), data)
+
+
 def test_dask_array_roundtrip(tmp_path: pathlib.Path) -> None:
     da = pytest.importorskip("dask.array")
     arr = da.arange(12, chunks=4).reshape(3, 4)

@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import builtins
+import json
 import subprocess
 import sys
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from misen.exceptions import SerializationError
 from misen.utils import serde
 from misen.utils.serde.libs.dask import dask_serializers
 from misen.utils.serde.libs.stdlib import MsgpackLeafSerializer
@@ -103,3 +105,55 @@ else:
     if result.stdout.strip() == "unsupported":
         pytest.skip("This Dask version does not expose Array expressions through its public collection API.")
     assert result.stdout.strip() == "ok"
+
+
+def test_dask_array_write_failure_is_wrapped(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dask array persistence failures retain their cause."""
+    da = pytest.importorskip("dask.array")
+    np = pytest.importorskip("numpy")
+
+    def fail_save(*_args: object, **_kwargs: object) -> None:
+        msg = "array storage unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr(np, "save", fail_save)
+
+    with pytest.raises(SerializationError, match="Could not encode Dask array") as exc_info:
+        serde.save(da.arange(6, chunks=3), tmp_path)
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+
+def test_dask_array_read_failure_is_wrapped(tmp_path: pathlib.Path) -> None:
+    """Corrupt Dask array payloads fail at the serialization boundary."""
+    da = pytest.importorskip("dask.array")
+    serde.save(da.arange(6, chunks=3), tmp_path)
+
+    manifest = json.loads((tmp_path / serde.MANIFEST_FILENAME).read_text())
+    subdir = manifest["root"]["subdir"]
+    (tmp_path / "dirs" / subdir / "data.npy").write_bytes(b"not-an-npy-file")
+
+    with pytest.raises(SerializationError, match="Could not decode Dask array") as exc_info:
+        serde.load(tmp_path)
+
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_dask_array_rejects_invalid_chunk_metadata(tmp_path: pathlib.Path) -> None:
+    """Malformed persisted chunk hints do not leak raw type errors."""
+    da = pytest.importorskip("dask.array")
+    serde.save(da.arange(6, chunks=3), tmp_path)
+
+    manifest_path = tmp_path / serde.MANIFEST_FILENAME
+    manifest = json.loads(manifest_path.read_text())
+    subdir = manifest["root"]["subdir"]
+    manifest["dirs"][subdir]["meta"]["chunks"] = [3, 3]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(SerializationError, match="Could not decode Dask array") as exc_info:
+        serde.load(tmp_path)
+
+    assert isinstance(exc_info.value.__cause__, TypeError)

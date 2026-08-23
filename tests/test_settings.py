@@ -2,11 +2,40 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import tomllib
+from typing import TYPE_CHECKING
 
 import pytest
 
+import misen.utils.settings as settings_module
+from misen.exceptions import ConfigError
 from misen.utils.settings import Configurable, ConfigurableMeta, Settings
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+class _BuggyConfigurable(Configurable):
+    _config_key = "buggy"
+    _config_default_type = f"{__name__}:_BuggyConfigurable"
+    _config_aliases = {}
+
+    def __post_init__(self) -> None:
+        raise ValueError("plugin initialization bug")
+
+
+class _ValidatedBase(Configurable):
+    _config_key = "validated"
+    _config_default_type = f"{__name__}:_ValidatedChild"
+    _config_aliases = {}
+    _config_validation_errors = (ValueError,)
+
+    def __post_init__(self) -> None:
+        raise ValueError("invalid inherited config")
+
+
+class _ValidatedChild(_ValidatedBase):
+    pass
 
 
 class TestSettingsNoFiles:
@@ -21,6 +50,25 @@ class TestSettingsNoFiles:
         settings = Settings()
         assert settings.toml_data == {}
 
+    def test_deleted_cwd_raises_config_error_with_cause(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("MISEN_CONFIG", raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        deleted_cwd = tmp_path / "deleted"
+        deleted_cwd.mkdir()
+        monkeypatch.chdir(deleted_cwd)
+        deleted_cwd.rmdir()
+        try:
+            with pytest.raises(ConfigError, match="current working directory") as raised:
+                _ = Settings().toml_data
+        finally:
+            monkeypatch.undo()
+
+        assert isinstance(raised.value.__cause__, FileNotFoundError)
+
 
 class TestSettingsExplicitOverride:
     def test_config_file_arg_uses_only_that_file(self, tmp_path: Path) -> None:
@@ -29,9 +77,7 @@ class TestSettingsExplicitOverride:
         settings = Settings(config_file=override)
         assert settings.toml_data == {"executor": {"type": "slurm"}}
 
-    def test_misen_config_env_uses_only_that_file(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_misen_config_env_uses_only_that_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         override = tmp_path / "env_override.toml"
         override.write_text('[workspace]\ntype = "disk"\n', encoding="utf-8")
         monkeypatch.setenv("MISEN_CONFIG", str(override))
@@ -43,6 +89,15 @@ class TestSettingsExplicitOverride:
 
         settings = Settings()
         assert settings.toml_data == {"workspace": {"type": "disk"}}
+
+    def test_invalid_toml_raises_config_error_with_cause(self, tmp_path: Path) -> None:
+        config = tmp_path / "invalid.toml"
+        config.write_text("[workspace\n", encoding="utf-8")
+
+        with pytest.raises(ConfigError, match="Invalid TOML") as exc_info:
+            _ = Settings(config_file=config).toml_data
+
+        assert isinstance(exc_info.value.__cause__, tomllib.TOMLDecodeError)
 
 
 class TestSettingsLayering:
@@ -61,7 +116,7 @@ class TestSettingsLayering:
         monkeypatch.delenv("MISEN_CONFIG", raising=False)
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty_xdg"))
         monkeypatch.chdir(tmp_path)
-        (tmp_path / ".misen.toml").write_text('[executor]\nnum_cpus = 8\n', encoding="utf-8")
+        (tmp_path / ".misen.toml").write_text("[executor]\nnum_cpus = 8\n", encoding="utf-8")
 
         settings = Settings()
         assert settings.toml_data == {"executor": {"num_cpus": 8}}
@@ -75,7 +130,7 @@ class TestSettingsLayering:
 
         project = tmp_path / "project"
         project.mkdir()
-        (project / ".misen.toml").write_text('[executor]\nnum_cpus = 8\n', encoding="utf-8")
+        (project / ".misen.toml").write_text("[executor]\nnum_cpus = 8\n", encoding="utf-8")
         monkeypatch.chdir(project)
 
         settings = Settings()
@@ -195,6 +250,81 @@ class TestConfigurable:
         from misen.executors.local import LocalExecutor
 
         assert Executor.resolve_type("misen.executors.local:LocalExecutor") is LocalExecutor
+
+    def test_resolve_type_rejects_invalid_reference_with_cause(self) -> None:
+        from misen.executor import Executor
+
+        with pytest.raises(ConfigError, match="expected 'module:Class'") as exc_info:
+            Executor.resolve_type("not-a-reference")
+
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
+    def test_resolve_type_wraps_import_failure(self) -> None:
+        from misen.executor import Executor
+
+        with pytest.raises(ConfigError, match="Could not resolve") as exc_info:
+            Executor.resolve_type("misen.does_not_exist:Executor")
+
+        assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
+
+    def test_resolve_type_does_not_wrap_dependency_import_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from misen.executor import Executor
+
+        def fail_import(_module_name: str) -> None:
+            raise ModuleNotFoundError("No module named 'optional_dependency'", name="optional_dependency")
+
+        monkeypatch.setattr(settings_module, "import_module", fail_import)
+
+        with pytest.raises(ModuleNotFoundError, match="optional_dependency"):
+            Executor.resolve_type("configured.executor:Executor")
+
+    def test_resolve_type_wraps_missing_class_but_not_import_time_attribute_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from misen.executor import Executor
+
+        with pytest.raises(ConfigError, match="Could not resolve"):
+            Executor.resolve_type("misen.executors.local:MissingExecutor")
+
+        def fail_import(_module_name: str) -> None:
+            raise AttributeError("module initialization bug")
+
+        monkeypatch.setattr(settings_module, "import_module", fail_import)
+        with pytest.raises(AttributeError, match="module initialization bug"):
+            Executor.resolve_type("configured.executor:Executor")
+
+    def test_auto_wraps_invalid_constructor_settings(self, tmp_path: Path) -> None:
+        config = tmp_path / "invalid-executor.toml"
+        config.write_text('[executor]\ntype = "local"\nnum_cpus = 0\n', encoding="utf-8")
+
+        from misen.executor import Executor
+
+        with pytest.raises(ConfigError, match=r"Invalid \[executor\] settings") as exc_info:
+            Executor.auto(settings=Settings(config_file=config))
+
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
+    def test_auto_preserves_unexpected_plugin_value_error(self, tmp_path: Path) -> None:
+        settings = Settings(config_file=tmp_path / "missing.toml")
+
+        with pytest.raises(ValueError, match="plugin initialization bug"):
+            _BuggyConfigurable.auto(settings=settings)
+
+    def test_auto_inherits_declared_validation_errors(self, tmp_path: Path) -> None:
+        with pytest.raises(ConfigError, match="invalid inherited config") as exc_info:
+            _ValidatedBase.auto(Settings(config_file=tmp_path / "missing.toml"))
+
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
+    def test_auto_rejects_non_table_section(self, tmp_path: Path) -> None:
+        config = tmp_path / "invalid-section.toml"
+        config.write_text('executor = "local"\n', encoding="utf-8")
+
+        from misen.executor import Executor
+
+        with pytest.raises(ConfigError, match="expected a TOML table"):
+            Executor.auto(settings=Settings(config_file=config))
 
     def test_resolve_auto_literal(self, tmp_path: Path) -> None:
         from misen.workspace import Workspace

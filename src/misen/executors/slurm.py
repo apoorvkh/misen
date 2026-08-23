@@ -8,10 +8,11 @@ import shlex
 import shutil
 import subprocess
 from functools import cache
-from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, TypeAlias, cast
 
 import msgspec
 
+from misen.exceptions import StatusQueryError, SubmissionError
 from misen.executor import Executor, Job, JobState
 from misen.utils.dask_runtime import DEFAULT_DASK_STARTUP_TIMEOUT, managed_cluster_script
 from misen.utils.runtime_events import work_unit_label
@@ -29,6 +30,9 @@ __all__ = ("SlurmExecutor", "SlurmJob")
 
 logger = logging.getLogger(__name__)
 
+_SLURM_QUERY_TIMEOUT_S = 15.0
+_SLURM_SUBMIT_TIMEOUT_S = 30.0
+
 
 class SlurmJob(Job):
     """Job handle backed by a SLURM job id.
@@ -40,7 +44,7 @@ class SlurmJob(Job):
     accounting, OOM messages, etc.).
     """
 
-    __slots__ = ("_finalized", "slurm_job_id", "workspace")
+    __slots__ = ("slurm_job_id", "workspace")
 
     def __init__(
         self,
@@ -54,7 +58,6 @@ class SlurmJob(Job):
         super().__init__(work_unit=work_unit, job_id=job_id, log_path=log_path)
         self.slurm_job_id = slurm_job_id
         self.workspace = workspace
-        self._finalized = False
 
     def state(self) -> JobState:
         """Return the current SLURM state, normalized to a misen job state."""
@@ -90,26 +93,53 @@ class SlurmJob(Job):
         def collect(command: str, args: list[str], *, in_queue: bool) -> None:
             for sid, raw in _parse_id_state_rows(_run_slurm_query(command, args)):
                 if sid in by_id:
-                    states[sid] = _normalize_slurm_state(raw, in_queue=in_queue)
+                    state = _normalize_slurm_state(raw, in_queue=in_queue)
+                    states[sid] = state
+                    if state == "failed":
+                        for job in by_id[sid]:
+                            job._record_failure(f"SLURM reported state {raw!r}.")  # noqa: SLF001
                     remaining.discard(sid)
 
-        collect("squeue", ["-h", "-j", ",".join(sorted(remaining)), "-o", "%i %T"], in_queue=True)
+        query_errors: list[StatusQueryError] = []
+        for command, in_queue in (("squeue", True), ("sacct", False)):
+            if not remaining:
+                break
+            ids = ",".join(sorted(remaining))
+            args = ["-h", "-j", ids, "-o", "%i %T"] if in_queue else ["-n", "-X", "-j", ids, "--format=JobIDRaw,State"]
+            try:
+                collect(command, args, in_queue=in_queue)
+            except StatusQueryError as exc:
+                query_errors.append(exc)
 
-        if remaining:
-            collect(
-                "sacct",
-                ["-n", "-X", "-j", ",".join(sorted(remaining)), "--format=JobIDRaw,State"],
-                in_queue=False,
+        deferred_error: StatusQueryError | None = None
+        if remaining and query_errors:
+            msg = (
+                f"Could not resolve SLURM state for job ids {', '.join(sorted(remaining))}: "
+                f"{'; '.join(map(str, query_errors))}"
             )
+            error = StatusQueryError(msg, retryable=any(query_error.retryable for query_error in query_errors))
+            for query_error in query_errors[:-1]:
+                error.add_note(str(query_error))
+            if error.retryable:
+                first_failure = all(job._unknown_since is None for sid in remaining for job in by_id[sid])  # noqa: SLF001
+                logger.log(
+                    logging.WARNING if first_failure else logging.DEBUG,
+                    "%s; preserving resolved states and retrying unresolved jobs.",
+                    error,
+                )
+            else:
+                deferred_error = error
 
         result: dict[Job, JobState] = {}
         for sid, group in by_id.items():
             state = states[sid]
             for job in group:
-                if not job._finalized and state in {"done", "failed"} and job.log_path is not None:  # noqa: SLF001
-                    job.workspace.finalize_job_log(job.log_path)
-                    job._finalized = True  # noqa: SLF001
+                if state in {"done", "failed"}:
+                    job._finalize_log(job.workspace, failed=state == "failed")  # noqa: SLF001
                 result[job] = state
+        if deferred_error is not None:
+            cause = query_errors[-1].__cause__ or query_errors[-1]
+            raise deferred_error from cause
         return result
 
 
@@ -134,11 +164,23 @@ class SlurmExecutor(Executor[SlurmJob]):
     dask_startup_timeout: int = DEFAULT_DASK_STARTUP_TIMEOUT
     default_flags: dict[str, _SetValue] = msgspec.field(default_factory=dict)
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
+    _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
 
     def __post_init__(self) -> None:
         """Normalize config and validate submit/worker filesystem topology."""
         self.default_flags = msgspec.convert(self.default_flags, type=dict[str, _SetValue])
         self.rules = msgspec.convert(self.rules, type=list[_SlurmRule])
+        configured_flags = set(self.default_flags)
+        for rule in self.rules:
+            configured_flags.update(rule.set)
+            for condition in rule.when.values():
+                predicates = condition if isinstance(condition, list) else [condition]
+                for predicate in predicates:
+                    if isinstance(predicate, _ResourcePredicate):
+                        _validate_predicate(predicate)
+        if reserved := sorted(_EXECUTOR_OWNED_SBATCH_FLAGS & configured_flags):
+            msg = f"Slurm flags {reserved} are controlled by SlurmExecutor and cannot be overridden."
+            raise ValueError(msg)
         if (
             isinstance(self.dask_startup_timeout, bool)
             or not isinstance(self.dask_startup_timeout, int)
@@ -186,25 +228,31 @@ class SlurmExecutor(Executor[SlurmJob]):
 
         if reserved := sorted(_EXECUTOR_OWNED_SBATCH_FLAGS & flags.keys()):
             msg = f"Slurm flags {reserved} are controlled by SlurmExecutor and cannot be overridden."
-            raise ValueError(msg)
+            raise SubmissionError(msg)
 
         gpu_type = flags.pop("gpu-type", None)
         if resources["accelerators"] > 0:
             accelerator_type = resources["accelerator_type"]
             if accelerator_type not in {"cuda", "rocm", "xpu"}:
                 msg = f"SlurmExecutor does not support {accelerator_type!r} accelerators."
-                raise ValueError(msg)
+                raise SubmissionError(msg)
             required_keys = {"accelerator_memory"} if resources["accelerator_memory"] is not None else set()
             if accelerator_type != "cuda":
                 required_keys.add("accelerator_type")
             if missing := required_keys - matched_resource_keys:
                 msg = f"SlurmExecutor rules do not cover {sorted(missing)} for resources {resources!r}."
-                raise ValueError(msg)
+                raise SubmissionError(msg)
             count = resources["accelerators"]
             flags["gpus-per-node"] = f"{gpu_type}:{count}" if gpu_type else count
 
+        try:
+            sbatch_bin = _resolve_slurm_cmd("sbatch")
+        except OSError as exc:
+            msg = f"Could not submit {label}: {exc}"
+            raise SubmissionError(msg) from exc
+
         sbatch_cmd = [
-            _resolve_slurm_cmd("sbatch"),
+            sbatch_bin,
             "--parsable",
             "--job-name",
             f"misen-{work_unit.root.task_hash().short_b32()}",
@@ -287,18 +335,30 @@ class SlurmExecutor(Executor[SlurmJob]):
         logger.debug("sbatch command for %s: %s", label, shlex.join([*sbatch_cmd[:-1], shlex.join(debug_wrapped)]))
 
         try:
-            result = subprocess.run(sbatch_cmd, check=True, capture_output=True, text=True)  # noqa: S603
-        except subprocess.CalledProcessError as e:
+            result = subprocess.run(  # noqa: S603
+                sbatch_cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=_SLURM_SUBMIT_TIMEOUT_S,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
             logger.exception("sbatch failed while submitting %s.", label)
-            msg = f"sbatch failed: {(e.stderr or e.stdout or '').strip()}"
-            raise RuntimeError(msg) from e
+            if isinstance(exc, subprocess.TimeoutExpired):
+                msg = f"sbatch timed out after {_SLURM_SUBMIT_TIMEOUT_S:g}s while submitting {label}"
+            else:
+                detail = (
+                    (exc.stderr or exc.stdout or "").strip() if isinstance(exc, subprocess.CalledProcessError) else exc
+                )
+                msg = f"sbatch failed while submitting {label}{f': {detail}' if detail else ''}"
+            raise SubmissionError(msg) from exc
 
         output = result.stdout.strip()
         slurm_job_id = output.split(";", 1)[0].split(None, 1)[0] if output else ""
         if not slurm_job_id.isdigit():
             msg = f"Unexpected sbatch output: {output!r}"
             logger.error("%s", msg)
-            raise RuntimeError(msg)
+            raise SubmissionError(msg)
 
         logger.info("Submitted SLURM work unit %s (job_id=%s, slurm_job_id=%s).", label, job_id, slurm_job_id)
         return SlurmJob(
@@ -349,24 +409,18 @@ class _SlurmRule(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True)
 
 
 _SLURM_STATE_MAP: dict[str, JobState] = {
-    **dict.fromkeys(("PENDING", "CONFIGURING", "SUSPENDED", "REQUEUED", "REQUEUED_HOLD", "STAGE_OUT"), "pending"),
-    **dict.fromkeys(("RUNNING", "COMPLETING"), "running"),
+    **dict.fromkeys(
+        "PENDING CONFIGURING SUSPENDED REQUEUED REQUEUE_HOLD REQUEUE_FED RESV_DEL_HOLD "  # noqa: SIM905
+        "EXPEDITING POWER_UP_NODE REVOKED STAGE_OUT".split(),
+        "pending",
+    ),
+    **dict.fromkeys(("RUNNING", "COMPLETING", "RESIZING", "SIGNALING", "STOPPED", "UPDATE_DB"), "running"),
     # ``PREEMPTED`` here is the terminal (out-of-queue) reading; a preempted job
     # still tracked by the controller is requeue-bound and mapped to ``pending``
     # in ``_normalize_slurm_state`` via its ``in_queue`` flag.
     **dict.fromkeys(
-        (
-            "BOOT_FAIL",
-            "CANCELLED",
-            "DEADLINE",
-            "FAILED",
-            "NODE_FAIL",
-            "OUT_OF_MEMORY",
-            "PREEMPTED",
-            "TIMEOUT",
-            "TIMEOUT_SIGNAL",
-            "SPECIAL_EXIT",
-        ),
+        "BOOT_FAIL CANCELLED DEADLINE FAILED LAUNCH_FAILED NODE_FAIL OUT_OF_MEMORY PREEMPTED "  # noqa: SIM905
+        "RECONFIG_FAIL TIMEOUT TIMEOUT_SIGNAL SPECIAL_EXIT".split(),
         "failed",
     ),
     "COMPLETED": "done",
@@ -383,31 +437,40 @@ def _condition_matches(value: int | str | None, condition: _ResourceCondition) -
 
 
 def _predicate_matches(value: int | str | None, predicate: _ResourcePredicate) -> bool:
+    _validate_predicate(predicate)
     op = getattr(operator, predicate.op)
     rhs = predicate.value
 
     if predicate.op == "contains":
-        if not isinstance(rhs, list):
-            msg = "Predicate op='contains' expects `value` to be a list."
-            raise TypeError(msg)
+        rhs = cast("list[int | str]", rhs)
         return value is not None and bool(op(rhs, value))
 
     if predicate.op in {"eq", "ne"}:
-        if not isinstance(rhs, (int, str)):
-            msg = f"Predicate op={predicate.op!r} expects `value` to be an integer or string."
-            raise TypeError(msg)
+        rhs = cast("int | str", rhs)
         return value is not None and bool(op(value, rhs))
 
     if predicate.op in {"lt", "le", "gt", "ge"}:
-        if not isinstance(rhs, int):
-            msg = f"Predicate op={predicate.op!r} expects `value` to be an integer."
-            raise TypeError(msg)
+        rhs = cast("int", rhs)
         return isinstance(value, int) and bool(op(value, rhs))
 
-    if isinstance(rhs, list):
-        msg = f"Predicate op={predicate.op!r} does not accept list `value`."
-        raise TypeError(msg)
     return bool(op(value, rhs))
+
+
+def _validate_predicate(predicate: _ResourcePredicate) -> None:
+    """Validate that a rule operator and its right-hand value agree."""
+    rhs = predicate.value
+    if predicate.op == "contains" and not isinstance(rhs, list):
+        msg = "Predicate op='contains' expects `value` to be a list."
+        raise ValueError(msg)
+    if predicate.op in {"eq", "ne"} and not isinstance(rhs, (int, str)):
+        msg = f"Predicate op={predicate.op!r} expects `value` to be an integer or string."
+        raise ValueError(msg)
+    if predicate.op in {"lt", "le", "gt", "ge"} and not isinstance(rhs, int):
+        msg = f"Predicate op={predicate.op!r} expects `value` to be an integer."
+        raise ValueError(msg)
+    if predicate.op in {"is_", "is_not"} and isinstance(rhs, list):
+        msg = f"Predicate op={predicate.op!r} does not accept list `value`."
+        raise ValueError(msg)
 
 
 @cache
@@ -420,17 +483,30 @@ def _resolve_slurm_cmd(name: str) -> str:
 
 
 def _run_slurm_query(command: str, args: list[str]) -> str:
-    """Invoke a SLURM CLI tool and return stdout, or ``""`` if the call failed."""
+    """Invoke a SLURM CLI query or raise a stable status error."""
+    try:
+        command_path = _resolve_slurm_cmd(command)
+    except FileNotFoundError as exc:
+        msg = f"Could not run {command}: {exc}"
+        raise StatusQueryError(msg, retryable=False) from exc
     try:
         result = subprocess.run(  # noqa: S603
-            [_resolve_slurm_cmd(command), *args],
+            [command_path, *args],
             check=False,
             capture_output=True,
             text=True,
+            timeout=_SLURM_QUERY_TIMEOUT_S,
         )
-    except OSError:
-        return ""
-    return result.stdout if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        msg = f"Could not run {command}: {exc}"
+        raise StatusQueryError(msg) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        msg = f"{command} exited with code {result.returncode}"
+        if detail:
+            msg += f": {detail}"
+        raise StatusQueryError(msg)
+    return result.stdout
 
 
 def _parse_id_state_rows(output: str) -> list[tuple[str, str]]:
@@ -456,6 +532,6 @@ def _normalize_slurm_state(raw: str, *, in_queue: bool = False) -> JobState:
     ``sacct``) was not requeued and is a genuine failure -- the map default.
     """
     head = raw.upper().split("+", maxsplit=1)[0].split(":", maxsplit=1)[0].split(None, 1)[0]
-    if in_queue and head == "PREEMPTED":
+    if in_queue and head in {"PREEMPTED", "SPECIAL_EXIT"}:
         return "pending"
     return _SLURM_STATE_MAP.get(head, "unknown")

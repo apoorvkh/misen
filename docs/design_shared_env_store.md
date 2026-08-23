@@ -36,8 +36,10 @@ Split each environment by rate of change, and co-locate caches:
 │   ├── payloads/, .env, .env.local
 ├── .shared/                         # shared store (token names are A-Z2-7,
 │   │                                #  so ".shared" can never collide)
-│   ├── python-envs/<key>/           # immutable once published
-│   ├── python-envs/<key>.complete   # commit-point marker
+│   ├── python-envs/<key>            # stable symlink to a private generation
+│   ├── python-envs/.<key>.builds/<token>/
+│   ├── python-envs/.<key>.complete.<token> # immutable commit marker
+│   ├── python-envs/<key>.complete   # compatibility breadcrumb symlink
 │   ├── python-envs/<key>.lock       # NFSLock files
 │   ├── uv-cache/                    # co-located UV_CACHE_DIR (policy below)
 │   ├── conda-envs/<key>/            # staged pixi manifests + .pixi prefix
@@ -93,16 +95,16 @@ local package, pickled payloads. Seconds, not minutes.
 
 ## Publication protocol (NFS crash-safety)
 
-Venvs bake absolute paths into script shebangs, so the repo's usual
-build-in-temp + atomic-rename publication cannot apply. Instead entries
-are built **in place** at their final path and committed by a marker —
-the same payload-before-pointer invariant used for result publication
-(`misen.utils.task_utils.save_task_result`), with the marker as the
-pointer:
+Venvs bake absolute paths into script shebangs, so each contender builds at a
+unique private path. A stable `<key>` symlink selects one generation, whose
+immutable `.<key>.complete.<token>` file is the commit point. The shared
+`<key>.complete` symlink is retained as an operational breadcrumb, but readers
+never trust it for correctness: a stale lease holder can overwrite a shared
+name after its lease expires, while it cannot overwrite another generation's
+marker.
 
-1. **Fast path** (no lock): `<key>.complete` exists *and* a per-kind
-   sanity file inside the entry exists → touch the marker mtime (a
-   breadcrumb for future age-based pruning) and reuse.
+1. **Fast path** (no lock): resolve `<key>` to a validated private generation;
+   require that generation's marker and per-kind sanity file, then reuse.
 2. **Slow path**: take `NFSLock(<key>.lock, lifetime=120, refresh=30)`.
    The workspace's usual 30/20 parameters are for millisecond holds; a
    waiter on another host reads the lockfile mtime through its NFS
@@ -114,32 +116,30 @@ pointer:
    directory, and that same-directory mutation refreshes the client's
    cached (possibly negative) dentries, so the re-checks below can't act
    on stale state and trigger a destructive recovery:
-   - marker present + entry sane → reuse (built while waiting);
-   - marker present, entry gutted → unlink marker, rebuild (heals the
-     double-failure case: NFS server lost async writes *and* the builder
-     host died before the client could resend them);
-   - entry present without marker → crashed-builder residue; `rmtree`
-     with retry/backoff (an orphaned `uv`/`pixi` child of a SIGKILLed
-     builder may still be writing) and rebuild.
-4. Build. A normal failure removes its partial entry before releasing the
-   still-owned lock, so a dependency error cannot strand a multi-gigabyte
-   environment. A builder that lost its lease leaves the entry untouched:
-   its replacement may already be writing the same path and owns cleanup.
+   - selected generation marked + sane → reuse (built while waiting);
+   - selected generation incomplete → unlink that stable pointer, remove only
+     its named private target with retry/backoff, and rebuild.
+4. Atomically point `<key>` at a fresh private path, then build there. This
+   in-progress pointer makes hard-crash residue attributable without scanning
+   or deleting another contender's directory. Normal pre-publication failures
+   remove only their private target; shared pointers are healed by the next
+   lock owner.
 5. Run `os.syncfs` on the store (Linux; one syscall commits the
    mount's dirty pages — per-file fsync over 32k files would cost tens of
    seconds and defeat the point). Entry file *data* is otherwise already
    at the server via NFS close-to-open semantics when the build tool
    exits.
-6. Verify `lock.is_locked()` — if the lease was stolen mid-build (extreme
-   stall), a thief may already be rebuilding the entry, so publishing
-   would bless a half-built directory; raise instead.
-7. Publish the marker with the hash-index write mechanics: `mkstemp` in
-   the store → write forensic content (host, pid, time) → fsync →
-   `os.replace` → fsync the directory.
+6. Verify both `lock.is_locked()` and that `<key>` still selects this private
+   target. If either changed, refuse publication.
+7. Publish this generation's immutable marker with the hash-index mechanics:
+   `mkstemp` in the store → fsync → `os.replace` → fsync the directory. A
+   post-check ensures the stable link still selects it; the compatibility
+   breadcrumb is updated only afterward and is never used as commit truth.
 
 Safety of residue removal: executors dispatch jobs only after snapshot
-creation returns, so an entry whose builder never published was never
-referenced by any job. `NFSLock.release()` is idempotent (like
+creation returns, so a private generation with no immutable marker was never
+referenced by any job. Published generations are never rolled back by stale
+cleanup. `NFSLock.release()` is idempotent (like
 `ObjectStoreLock.release()`): a builder that lost its lease reports the
 discard error, not `NotLockedError`.
 

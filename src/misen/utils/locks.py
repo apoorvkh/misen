@@ -7,8 +7,8 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager, suppress
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Self, TypeVar, cast, runtime_checkable
@@ -17,8 +17,9 @@ import flufl.lock._lockfile as flufl
 import msgspec
 import obstore as _obs
 from obstore.exceptions import AlreadyExistsError, PreconditionError
+from obstore.exceptions import BaseError as ObstoreError
 
-from misen.exceptions import LockUnavailableError
+from misen.exceptions import LockUnavailableError, MisenError, StorageError
 
 if TYPE_CHECKING:
     from obstore import PutMode, PutResult
@@ -140,18 +141,35 @@ _LockT = TypeVar("_LockT", bound=LockLike)
 
 
 @contextmanager
+def _cleanup_on_exit(cleanup: Callable[[], None], label: str, *, on_error: bool = False) -> Iterator[None]:
+    """Run cleanup without letting its failure replace an active one."""
+    primary: BaseException | None = None
+    try:
+        yield
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        if not on_error or primary is not None:
+            try:
+                cleanup()
+            except BaseException as exc:
+                if primary is None:
+                    raise
+                primary.add_note(f"Additionally, {label} failed: {type(exc).__name__}: {exc}")
+
+
+@contextmanager
 def _lock_context(lock: _LockT, *, blocking: bool, timeout: int | None) -> Iterator[_LockT]:
     lock.acquire(blocking=blocking, timeout=timeout)
-    try:
+    with _cleanup_on_exit(lock.release, "releasing the lock"):
         yield lock
-    finally:
-        lock.release()
 
 
 class NFSLock:
     """NFS-safe lock implementation backed by ``flufl.lock`` lock files."""
 
-    __slots__ = ("_lock", "_refresh_interval", "_stop", "_thread")
+    __slots__ = ("_lock", "_refresh_error", "_refresh_interval", "_stop", "_thread")
 
     _lock: _ClockOffsetLock
     _refresh_interval: int | None
@@ -172,6 +190,7 @@ class NFSLock:
             refresh_interval: Optional refresh interval in seconds.
         """
         self._lock = _ClockOffsetLock(lockfile=str(lockfile), lifetime=lifetime)
+        self._refresh_error: LockUnavailableError | None = None
         self._refresh_interval = refresh_interval
         if refresh_interval is not None:
             self._stop = threading.Event()
@@ -190,8 +209,12 @@ class NFSLock:
         while not self._stop.wait(self._refresh_interval):
             try:
                 self._lock.refresh()
-            except flufl.NotLockedError:
-                logger.warning("Lost lease on lock %s during refresh.", self._lock.lockfile)
+            except flufl.NotLockedError as exc:
+                msg = f"Lost the lease for lock {self._lock.lockfile!r} during refresh."
+                error = LockUnavailableError(msg)
+                error.__cause__ = exc
+                self._refresh_error = error
+                logger.warning("%s", msg)
                 return
             except OSError as e:
                 logger.warning("Could not refresh lock %s (%s); retrying.", self._lock.lockfile, e)
@@ -205,6 +228,7 @@ class NFSLock:
 
         Raises:
             LockUnavailableError: If acquisition fails within ``timeout``.
+            StorageError: If the backing filesystem cannot be accessed.
         """
         # flufl.lock's stale-break check runs only after its timeout check,
         # so ``timeout=0`` never breaks expired lockfiles. Pass ``timeout=1``
@@ -217,7 +241,11 @@ class NFSLock:
             reported = timeout if blocking else 0
             msg = f"Could not acquire lock {self._lock.lockfile!r} within {reported}s."
             raise LockUnavailableError(msg) from e
+        except OSError as exc:
+            msg = f"Could not access lock {self._lock.lockfile!r}: {exc}"
+            raise StorageError(msg) from exc
 
+        self._refresh_error = None
         if self._refresh_interval is not None and (self._thread is None or not self._thread.is_alive()):
             self._stop.clear()
             self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
@@ -226,10 +254,9 @@ class NFSLock:
     def release(self) -> None:
         """Release lock and stop refresh thread if active.
 
-        Idempotent (matching :meth:`ObjectStoreLock.release`): releasing a
-        lock whose lease was stolen — e.g. broken as stale by a waiter while
-        the holder was stalled — must not raise, the holder has already
-        lost it.
+        Idempotent when already released. A lease lost during refresh is
+        surfaced as :class:`LockUnavailableError` so a caller cannot report
+        success after ownership was stolen.
         """
         if self._refresh_interval is not None:
             self._stop.set()
@@ -248,7 +275,15 @@ class NFSLock:
                     )
             self._thread = None
 
-        self._lock.unlock(unconditionally=True)
+        try:
+            self._lock.unlock(unconditionally=True)
+        except OSError as exc:
+            msg = f"Could not release lock {self._lock.lockfile!r}: {exc}"
+            raise StorageError(msg) from exc
+        refresh_error = self._refresh_error
+        self._refresh_error = None
+        if refresh_error is not None:
+            raise refresh_error
 
     def context(self, *, blocking: bool = True, timeout: int | None = None) -> AbstractContextManager[Self]:
         """Return a context manager that acquires and releases this lock."""
@@ -256,7 +291,13 @@ class NFSLock:
 
     def is_locked(self) -> bool:
         """Return whether underlying lock is held."""
-        return self._lock.is_locked
+        if self._refresh_error is not None:
+            return False
+        try:
+            return self._lock.is_locked
+        except OSError as exc:
+            msg = f"Could not inspect lock {self._lock.lockfile!r}: {exc}"
+            raise StorageError(msg) from exc
 
     def holder(self) -> tuple[str, int] | None:
         """Return ``(hostname, pid)`` of whoever currently holds the lockfile.
@@ -308,7 +349,9 @@ class ObjectStoreLock(LockLike):
         "_key",
         "_lifetime_ms",
         "_owner",
+        "_refresh_error",
         "_refresh_interval",
+        "_state_lock",
         "_stop",
         "_store",
         "_thread",
@@ -339,6 +382,8 @@ class ObjectStoreLock(LockLike):
         self._refresh_interval = refresh_interval
         self._owner = _owner_id()
         self._token: PutResult | None = None
+        self._refresh_error: MisenError | None = None
+        self._state_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -406,11 +451,18 @@ class ObjectStoreLock(LockLike):
         Raises:
             LockUnavailableError: If the lock cannot be acquired within
                 the requested time budget.
+            StorageError: If the object store cannot complete a lock operation.
         """
         deadline = None if timeout is None else time.monotonic() + timeout
         backoff = 0.1
         while True:
-            if self._try_create() or self._try_takeover():
+            try:
+                acquired = self._try_create() or self._try_takeover()
+            except (OSError, ObstoreError) as exc:
+                msg = f"Could not access object-store lock {self._key!r}: {exc}"
+                raise StorageError(msg) from exc
+            if acquired:
+                self._refresh_error = None
                 self._start_refresh()
                 return
             if not blocking:
@@ -429,18 +481,34 @@ class ObjectStoreLock(LockLike):
             self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
             self._thread.start()
 
+    def _renew(self, operation: str) -> bool:
+        """Conditionally renew the current token, recording any failure."""
+        token = self._token
+        if token is None:
+            return False
+        try:
+            self._token = _obs.put(self._store, self._key, self._payload(), mode=self._update_mode(token))
+        except (PreconditionError, AlreadyExistsError, FileNotFoundError, LockUnavailableError) as exc:
+            error: MisenError = LockUnavailableError(f"Lost the lease for object-store lock {self._key!r}.")
+            cause = exc
+        except (OSError, ObstoreError) as exc:
+            error = StorageError(f"Could not {operation} object-store lock {self._key!r}: {exc}")
+            cause = exc
+        else:
+            return True
+        error.__cause__ = cause
+        self._refresh_error = error
+        self._token = None
+        return False
+
     def _refresh_loop(self) -> None:
         """Refresh the lease until release or until refresh fails."""
         while not self._stop.wait(self._refresh_interval):
-            token = self._token
-            if token is None:
-                return
-            try:
-                self._token = _obs.put(self._store, self._key, self._payload(), mode=self._update_mode(token))
-            except (PreconditionError, AlreadyExistsError, FileNotFoundError):
-                logger.warning("Lost lease on lock %s during refresh.", self._key)
-                self._token = None
-                return
+            with self._state_lock:
+                if not self._renew("refresh"):
+                    if self._refresh_error is not None:
+                        logger.warning("%s", self._refresh_error)
+                    return
 
     def release(self) -> None:
         """Release the lock. Idempotent."""
@@ -449,16 +517,46 @@ class ObjectStoreLock(LockLike):
             join_timeout = max(self._refresh_interval or 1, 1)
             thread.join(timeout=join_timeout)
         self._thread = None
-        token = self._token
-        self._token = None
+        if thread is not None and thread.is_alive():
+            msg = f"Could not stop the refresh worker for object-store lock {self._key!r}."
+            error = StorageError(msg)
+            if self._refresh_error is not None:
+                error.add_note(f"The refresh worker had already failed: {self._refresh_error}")
+            self._refresh_error = None
+            raise error
+        with self._state_lock:
+            refresh_error = self._refresh_error
+            self._refresh_error = None
+            token = self._token
+            self._token = None
         if token is None:
+            if refresh_error is not None:
+                raise refresh_error
             return
-        with suppress(AlreadyExistsError, FileNotFoundError, PreconditionError):
+        try:
             _obs.put(self._store, self._key, self._payload(expiry_ms=0), mode=self._update_mode(token))
+        except (AlreadyExistsError, FileNotFoundError, PreconditionError):
+            pass
+        except (OSError, ObstoreError) as exc:
+            msg = f"Could not release object-store lock {self._key!r}: {exc}"
+            error = StorageError(msg)
+            if refresh_error is not None:
+                error.add_note(f"The lease refresh had already failed: {refresh_error}")
+            raise error from exc
+        if refresh_error is not None:
+            raise refresh_error
 
     def is_locked(self) -> bool:
-        """Return whether this lock instance currently holds the lease."""
-        return self._token is not None
+        """Synchronously verify and renew ownership of this lock's lease."""
+        with self._state_lock:
+            if isinstance(self._refresh_error, StorageError):
+                raise self._refresh_error
+            if self._token is None:
+                return False
+            renewed = self._renew("verify")
+            if not renewed and isinstance(self._refresh_error, StorageError):
+                raise self._refresh_error
+            return renewed
 
     def context(self, *, blocking: bool = True, timeout: int | None = None) -> AbstractContextManager[Self]:
         """Return a context manager that acquires and releases this lock."""

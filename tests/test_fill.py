@@ -1,10 +1,12 @@
 """Tests for placeholder ``@meta(id=...)`` handling in ``misen fill`` and ``meta``."""
 # ruff: noqa: D103, S101
 
+from pathlib import Path
+
 import pytest
 
 from misen import Task, meta
-from misen.utils.cli.fill import fill_task_ids_in_source
+from misen.utils.cli.fill import fill_paths_task_ids, fill_task_ids_in_source
 
 
 def _fixed_uuid() -> str:
@@ -24,6 +26,24 @@ def test_fill_inserts_missing_id() -> None:
     updated, replacements = fill_task_ids_in_source(source, uuid_factory=_fixed_uuid)
     assert replacements == 1
     assert updated == '@meta(id="FILLEDID00", cache=True)\ndef f():\n    pass\n'
+
+
+def test_fill_reports_write_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_path = tmp_path / "task.py"
+    source_path.write_text("@meta(cache=True)\ndef f():\n    pass\n", encoding="utf-8")
+    real_write_text = Path.write_text
+
+    def write_text(path: Path, *args: object, **kwargs: object) -> int:
+        if path == source_path:
+            msg = "read-only source"
+            raise PermissionError(msg)
+        return real_write_text(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    report = fill_paths_task_ids([source_path], uuid_factory=_fixed_uuid)
+
+    assert report.changed_files == 0
+    assert report.failed_files == [(source_path, "read-only source")]
 
 
 def test_fill_preserves_existing_id() -> None:

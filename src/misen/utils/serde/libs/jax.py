@@ -1,18 +1,22 @@
 """JAX array v2 serializer — batched ``.npz`` via numpy conversion."""
 
 import importlib.util
+import zipfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from misen.utils.serde.base import LeafSerializer, Serializer
+from misen.utils.serde.base import BaseSerializer, LeafSerializer, translate_errors
 
 __all__ = ["jax_serializers", "jax_serializers_by_type"]
 
-jax_serializers: list[type[Serializer]] = []
-jax_serializers_by_type: dict[str, type[Serializer]] = {}
+jax_serializers: list[type[BaseSerializer]] = []
+jax_serializers_by_type: dict[str, type[BaseSerializer]] = {}
 
 if importlib.util.find_spec("jax") is not None and importlib.util.find_spec("numpy") is not None:
+    import jax as _jax
+
+    from misen.utils.type_registry import qualified_type_name as _qname
 
     class JaxArraySerializer(LeafSerializer[Any]):
         """Batched leaf for ``jax.Array`` — packed into one ``arrays.npz``.
@@ -27,8 +31,6 @@ if importlib.util.find_spec("jax") is not None and importlib.util.find_spec("num
 
         @staticmethod
         def match(obj: Any) -> bool:
-            if type(obj).__module__.split(".")[0] != "jax":
-                return False
             import jax
 
             return isinstance(obj, jax.Array)
@@ -37,7 +39,10 @@ if importlib.util.find_spec("jax") is not None and importlib.util.find_spec("num
         def to_payload(cls, obj: Any) -> Any:
             import numpy as np
 
-            return np.asarray(obj)
+            with translate_errors(
+                "Could not convert JAX array for serialization", (TypeError, ValueError, RuntimeError)
+            ):
+                return np.asarray(obj)
 
         @staticmethod
         def write_batch(
@@ -48,7 +53,10 @@ if importlib.util.find_spec("jax") is not None and importlib.util.find_spec("num
             import numpy as np
 
             bundle = {leaf_id: payload for leaf_id, payload, _ in entries}
-            np.savez(str(directory / "arrays.npz"), **bundle)
+            with translate_errors(
+                f"Could not encode JAX array bundle in {directory}", (OSError, TypeError, ValueError)
+            ):
+                np.savez(str(directory / "arrays.npz"), **bundle)
             return {"jax_version": jax.__version__}
 
         @staticmethod
@@ -56,12 +64,20 @@ if importlib.util.find_spec("jax") is not None and importlib.util.find_spec("num
             import jax.numpy as jnp
             import numpy as np
 
-            npz = np.load(directory / "arrays.npz", allow_pickle=False)
+            with translate_errors(
+                f"Could not decode JAX array bundle in {directory}",
+                (OSError, EOFError, ValueError, zipfile.BadZipFile),
+            ):
+                npz = np.load(directory / "arrays.npz", allow_pickle=False)
 
             def reader(leaf_id: str) -> Any:
-                return jnp.asarray(np.array(npz[leaf_id]))
+                with translate_errors(
+                    f"Could not decode JAX array {leaf_id!r} in {directory}",
+                    (OSError, KeyError, TypeError, ValueError, RuntimeError, zipfile.BadZipFile),
+                ):
+                    return jnp.asarray(np.array(npz[leaf_id]))
 
             return reader
 
     jax_serializers = [JaxArraySerializer]
-    jax_serializers_by_type = {"jax.Array": JaxArraySerializer}
+    jax_serializers_by_type = {_qname(_jax.Array): JaxArraySerializer}

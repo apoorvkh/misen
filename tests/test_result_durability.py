@@ -16,7 +16,10 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from misen import Task, meta
+from misen.exceptions import StorageError
 from misen.utils.hashing import ResultHash
 from misen.utils.task_utils import save_task_result
 from misen.workspaces import disk as disk_mod
@@ -24,8 +27,6 @@ from misen.workspaces.disk import DiskResultStore, DiskWorkspace
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 @meta(id="durability_produce", cache=True)
@@ -75,6 +76,25 @@ def test_payload_committed_before_pointer(tmp_path: Path, monkeypatch: pytest.Mo
     ws._result_hashes.clear()
     ws._resolved_hashes.clear()
     assert task.done(workspace=ws) is False
+
+
+def test_pointer_oserror_is_storage_error_and_does_not_prime_memory_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = DiskWorkspace(directory=str(tmp_path / "ws"))
+    task = Task(_produce, x=2)
+
+    def fail_write(_self: Any, _key: Any, _value: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(type(ws._result_hash_cache), "__setitem__", fail_write)
+
+    with pytest.raises(StorageError, match="disk full") as raised:
+        save_task_result(task, 3, ws)
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert task.task_hash() not in ws._result_hashes
 
 
 def test_reader_recomputes_on_dangling_mapping(tmp_path: Path) -> None:

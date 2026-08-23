@@ -161,6 +161,25 @@ class _RuntimeJobBoard:
 _JOB_BOARD = _RuntimeJobBoard()
 
 
+def _ui_value(action: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    with contextlib.suppress(Exception, SystemExit):
+        return action(*args, **kwargs)
+    return None
+
+
+@contextlib.contextmanager
+def _live_widget(widget: Any) -> Iterator[None]:
+    _enter_live_context()
+    with contextlib.suppress(Exception, SystemExit):
+        widget.start()
+    try:
+        yield
+    finally:
+        with contextlib.suppress(Exception, SystemExit):
+            widget.stop()
+        _exit_live_context()
+
+
 def runtime_event(message: str, *, style: str = "cyan") -> None:
     """Print one runtime event line.
 
@@ -170,13 +189,12 @@ def runtime_event(message: str, *, style: str = "cyan") -> None:
     if not _events_enabled():
         return
 
-    console = _get_console()
-    if console is not None:
-        console.print(f"[bold blue][misen][/bold blue] {message}", style=style, highlight=False)
-        return
-
-    sys.stderr.write(f"[misen] {message}\n")
-    sys.stderr.flush()
+    with contextlib.suppress(Exception, SystemExit):
+        if console := _get_console():
+            console.print(f"[bold blue][misen][/bold blue] {message}", style=style, highlight=False)
+        else:
+            sys.stderr.write(f"[misen] {message}\n")
+            sys.stderr.flush()
 
 
 @contextlib.contextmanager
@@ -186,22 +204,23 @@ def runtime_activity(message: str, *, spinner: str = "dots", style: str = "cyan"
         yield
         return
 
-    console = _get_console()
+    console = _ui_value(_get_console)
     if console is None:
         runtime_event(message, style=style)
         yield
         return
 
-    _enter_live_context()
-    try:
-        with console.status(
-            f"[bold blue][misen][/bold blue] {message}",
-            spinner=spinner,
-            spinner_style=style,
-        ):
-            yield
-    finally:
-        _exit_live_context()
+    status = _ui_value(
+        console.status,
+        f"[bold blue][misen][/bold blue] {message}",
+        spinner=spinner,
+        spinner_style=style,
+    )
+    if status is None:
+        yield
+        return
+    with _live_widget(status):
+        yield
 
 
 @contextlib.contextmanager
@@ -215,7 +234,7 @@ def runtime_progress(description: str, *, total: int) -> Iterator[Callable[[int]
         yield noop
         return
 
-    console = _get_console()
+    console = _ui_value(_get_console)
     if console is None:
         completed = 0
         runtime_event(f"{description} (0/{total})", style="cyan")
@@ -228,26 +247,30 @@ def runtime_progress(description: str, *, total: int) -> Iterator[Callable[[int]
         yield advance_fallback
         return
 
-    _enter_live_context()
-    try:
+    progress = None
+    with contextlib.suppress(Exception, SystemExit):
         from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 
-        with Progress(
+        progress = Progress(
             TextColumn("[bold blue][misen][/bold blue] {task.description}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             console=console,
             transient=True,
-        ) as progress:
-            task_id = progress.add_task(description=description, total=total)
+        )
+    if progress is None:
+        yield noop
+        return
+    with _live_widget(progress):
+        task_id = _ui_value(progress.add_task, description, total=total)
 
-            def advance(step: int = 1) -> None:
-                progress.advance(task_id, step)
+        def advance(step: int = 1) -> None:
+            if task_id is not None:
+                with contextlib.suppress(Exception, SystemExit):
+                    progress.advance(task_id, step)
 
-            yield advance
-    finally:
-        _exit_live_context()
+        yield advance
 
 
 def runtime_job_pending(job_key: int, label: str) -> None:
@@ -335,7 +358,8 @@ def _job_board_action(
 ) -> None:
     if not _events_enabled() or not _job_board_enabled():
         return
-    action(*args, **kwargs)
+    with contextlib.suppress(Exception, SystemExit):
+        action(*args, **kwargs)
 
 
 def _live_context_active() -> bool:
@@ -351,7 +375,7 @@ def _enter_live_context() -> None:
 def _exit_live_context() -> None:
     with _LIVE_CONTEXT_LOCK:
         _LIVE_CONTEXT["depth"] = max(0, _LIVE_CONTEXT["depth"] - 1)
-    _JOB_BOARD.on_live_context_exit()
+    _job_board_action(_JOB_BOARD.on_live_context_exit)
 
 
 @cache

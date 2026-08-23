@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from misen.utils.serde.base import Serializer
+from misen.utils.serde.base import Serializer, translate_errors
 
 __all__ = ["altair_serializers", "altair_serializers_by_type"]
 
@@ -27,16 +27,24 @@ if importlib.util.find_spec("altair") is not None:
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
             import altair as alt
 
-            json_str = obj.to_json()
-            (directory / "chart.json").write_text(json_str, encoding="utf-8")
+            with translate_errors(
+                "Could not serialize the Altair chart",
+                (OSError, TypeError, ValueError, alt.utils.schemapi.SchemaValidationError),
+            ):
+                json_str = obj.to_json()
+                (directory / "chart.json").write_text(json_str, encoding="utf-8")
             return {"altair_version": alt.__version__}
 
         @staticmethod
         def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import altair as alt
 
-            json_str = (directory / "chart.json").read_text(encoding="utf-8")
-            return alt.Chart.from_json(json_str)
+            with translate_errors(
+                "Could not deserialize the Altair chart",
+                (OSError, TypeError, ValueError, alt.utils.schemapi.SchemaValidationError),
+            ):
+                json_str = (directory / "chart.json").read_text(encoding="utf-8")
+                return alt.Chart.from_json(json_str)
 
     altair_serializers = [AltairChartSerializer]
     altair_serializers_by_type = {

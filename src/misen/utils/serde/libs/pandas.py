@@ -23,52 +23,54 @@ from pathlib import Path
 from typing import Any
 
 from misen.exceptions import SerializationError
-from misen.utils.serde.base import LeafSerializer, Serializer
+from misen.utils.serde.base import BaseSerializer, LeafSerializer, Serializer, translate_errors
 
 __all__ = ["pandas_serializers", "pandas_serializers_by_type"]
 
-pandas_serializers: list[type[Serializer]] = []
-pandas_serializers_by_type: dict[str, type[Serializer]] = {}
+pandas_serializers: list[type[BaseSerializer]] = []
+pandas_serializers_by_type: dict[str, type[BaseSerializer]] = {}
 
 if importlib.util.find_spec("pandas") is not None:
+    import pandas as pd
+
+    from misen.utils.type_registry import qualified_type_name
 
     class PandasDataFrameSerializer(Serializer[Any]):
         """Serialize ``pandas.DataFrame`` via Parquet."""
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import pandas as pd
-
             return isinstance(obj, pd.DataFrame)
 
         @staticmethod
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            import pandas as pd
-
-            obj.to_parquet(directory / "data.parquet")
+            with translate_errors(
+                f"Could not encode pandas DataFrame in {directory}", (ImportError, OSError, TypeError, ValueError)
+            ):
+                obj.to_parquet(directory / "data.parquet")
             return {"pandas_version": pd.__version__}
 
         @staticmethod
         def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
-            import pandas as pd
-
-            return pd.read_parquet(directory / "data.parquet")
+            with translate_errors(
+                f"Could not decode pandas DataFrame in {directory}", (ImportError, OSError, TypeError, ValueError)
+            ):
+                return pd.read_parquet(directory / "data.parquet")
 
     class PandasSeriesSerializer(Serializer[Any]):
         """Serialize ``pandas.Series`` via Parquet (single-column DataFrame)."""
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import pandas as pd
-
             return isinstance(obj, pd.Series)
 
         @staticmethod
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            import pandas as pd
-
             df = obj.to_frame(name="__series__")
-            df.to_parquet(directory / "data.parquet")
+            with translate_errors(
+                f"Could not encode pandas Series in {directory}", (ImportError, OSError, TypeError, ValueError)
+            ):
+                df.to_parquet(directory / "data.parquet")
             return {
                 "pandas_version": pd.__version__,
                 "series_name": obj.name,
@@ -76,11 +78,13 @@ if importlib.util.find_spec("pandas") is not None:
 
         @staticmethod
         def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:
-            import pandas as pd
-
-            df = pd.read_parquet(directory / "data.parquet")
-            series = df["__series__"]
-            series.name = meta.get("series_name")
+            with translate_errors(
+                f"Could not decode pandas Series in {directory}",
+                (ImportError, OSError, KeyError, TypeError, ValueError),
+            ):
+                df = pd.read_parquet(directory / "data.parquet")
+                series = df["__series__"]
+                series.name = meta.get("series_name")
             return series
 
     class PandasIndexSerializer(Serializer[Any]):
@@ -92,16 +96,15 @@ if importlib.util.find_spec("pandas") is not None:
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import pandas as pd
-
             return isinstance(obj, pd.Index)
 
         @staticmethod
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            import pandas as pd
-
             df = obj.to_frame(index=False)
-            df.to_parquet(directory / "data.parquet")
+            with translate_errors(
+                f"Could not encode pandas Index in {directory}", (ImportError, OSError, TypeError, ValueError)
+            ):
+                df.to_parquet(directory / "data.parquet")
             return {
                 "pandas_version": pd.__version__,
                 "index_name": obj.name,
@@ -110,14 +113,16 @@ if importlib.util.find_spec("pandas") is not None:
 
         @staticmethod
         def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:
-            import pandas as pd
-
-            df = pd.read_parquet(directory / "data.parquet")
-            if meta.get("is_multi"):
-                idx = pd.MultiIndex.from_frame(df)
-            else:
-                idx = pd.Index(df.iloc[:, 0])
-                idx.name = meta.get("index_name")
+            with translate_errors(
+                f"Could not decode pandas Index in {directory}",
+                (ImportError, OSError, KeyError, TypeError, ValueError),
+            ):
+                df = pd.read_parquet(directory / "data.parquet")
+                if meta.get("is_multi"):
+                    idx = pd.MultiIndex.from_frame(df)
+                else:
+                    idx = pd.Index(df.iloc[:, 0])
+                    idx.name = meta.get("index_name")
             return idx
 
     def _encode_pandas_scalar(obj: Any) -> dict[str, Any]:
@@ -128,8 +133,6 @@ if importlib.util.find_spec("pandas") is not None:
         for Timedeltas, ``str(period)`` + freq alias for Periods, and
         the literal endpoints + closed side for Intervals.
         """
-        import pandas as pd
-
         if isinstance(obj, pd.Timestamp):
             tz = obj.tz
             return {
@@ -153,8 +156,6 @@ if importlib.util.find_spec("pandas") is not None:
 
     def _encode_interval_endpoint(v: Any) -> Any:
         """Endpoint of a pandas Interval — pandas accepts ints, floats, and Timestamps."""
-        import pandas as pd
-
         if isinstance(v, pd.Timestamp):
             return {"_pd_ts": v.isoformat(), "tz": str(v.tz) if v.tz is not None else None}
         if isinstance(v, (int, float)):
@@ -163,15 +164,11 @@ if importlib.util.find_spec("pandas") is not None:
         raise SerializationError(msg)
 
     def _decode_interval_endpoint(v: Any) -> Any:
-        import pandas as pd
-
         if isinstance(v, dict) and "_pd_ts" in v:
             return pd.Timestamp(v["_pd_ts"], tz=v.get("tz"))
         return v
 
     def _decode_pandas_scalar(payload: dict[str, Any]) -> Any:
-        import pandas as pd
-
         kind = payload["type"]
         if kind == "Timestamp":
             return pd.Timestamp(payload["iso"], tz=payload.get("tz"))
@@ -201,8 +198,6 @@ if importlib.util.find_spec("pandas") is not None:
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import pandas as pd
-
             return isinstance(obj, (pd.Timestamp, pd.Timedelta, pd.Period, pd.Interval))
 
         @classmethod
@@ -214,8 +209,6 @@ if importlib.util.find_spec("pandas") is not None:
             entries: list[tuple[str, Any, Mapping[str, Any]]],
             directory: Path,
         ) -> Mapping[str, Any]:
-            import pandas as pd
-
             bundle = {leaf_id: payload for leaf_id, payload, _ in entries}
             (directory / "scalars.json").write_text(json.dumps(bundle), encoding="utf-8")
             return {"pandas_version": pd.__version__}
@@ -241,14 +234,10 @@ if importlib.util.find_spec("pandas") is not None:
 
         @staticmethod
         def match(obj: Any) -> bool:
-            import pandas as pd
-
             return isinstance(obj, pd.CategoricalDtype)
 
         @staticmethod
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
-            import pandas as pd
-
             cats = obj.categories
             payload = {
                 "categories": cats.tolist(),
@@ -261,7 +250,6 @@ if importlib.util.find_spec("pandas") is not None:
         @staticmethod
         def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import numpy as np
-            import pandas as pd
 
             payload = json.loads((directory / "dtype.json").read_text(encoding="utf-8"))
             # Rehydrate ``categories`` to the original dtype before constructing the dtype —
@@ -282,19 +270,15 @@ if importlib.util.find_spec("pandas") is not None:
     # reaches ``PandasScalarSerializer`` before ``datetime.datetime``
     # (``pd.Timestamp`` subclasses ``datetime.datetime`` and otherwise
     # routes to :class:`MsgpackLeafSerializer` via the MRO walk).
-    from misen.utils.type_registry import qualified_type_name as _qname
-
-    import pandas as _pd
-
     pandas_serializers_by_type = {
-        _qname(_pd.DataFrame): PandasDataFrameSerializer,
-        _qname(_pd.Series): PandasSeriesSerializer,
+        qualified_type_name(pd.DataFrame): PandasDataFrameSerializer,
+        qualified_type_name(pd.Series): PandasSeriesSerializer,
         # Index subclasses (DatetimeIndex, PeriodIndex, MultiIndex, ...)
         # dispatch here via the MRO walk.
-        _qname(_pd.Index): PandasIndexSerializer,
-        _qname(_pd.CategoricalDtype): PandasCategoricalDtypeSerializer,
-        _qname(_pd.Timestamp): PandasScalarSerializer,
-        _qname(_pd.Timedelta): PandasScalarSerializer,
-        _qname(_pd.Period): PandasScalarSerializer,
-        _qname(_pd.Interval): PandasScalarSerializer,
+        qualified_type_name(pd.Index): PandasIndexSerializer,
+        qualified_type_name(pd.CategoricalDtype): PandasCategoricalDtypeSerializer,
+        qualified_type_name(pd.Timestamp): PandasScalarSerializer,
+        qualified_type_name(pd.Timedelta): PandasScalarSerializer,
+        qualified_type_name(pd.Period): PandasScalarSerializer,
+        qualified_type_name(pd.Interval): PandasScalarSerializer,
     }

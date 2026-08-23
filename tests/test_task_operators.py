@@ -85,9 +85,7 @@ def test_matmul_builds_task() -> None:
         (lambda t: ~t, operator.invert, -8),
     ],
 )
-def test_unary_operators_build_tasks(
-    build: object, expected_op: object, value: int
-) -> None:
+def test_unary_operators_build_tasks(build: object, expected_op: object, value: int) -> None:
     a = Task(operator.add, 7, 0)
     built = build(a)  # ty:ignore[call-non-callable]
     assert built.func is expected_op

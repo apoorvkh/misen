@@ -25,17 +25,19 @@ import itertools
 import logging
 import shutil
 import tempfile
-from contextlib import nullcontext
+import time
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Generic, Literal, ParamSpec, TypeVar, Unpack, cast
 
-from misen.exceptions import CacheError
+from misen.exceptions import CacheError, LockUnavailableError, StorageError
 from misen.sentinels import SCRATCH_DIR
 from misen.task_metadata import Resources, TaskMetadata, _normalize_resources, resolve_task_metadata
 from misen.utils.frozen_mixin import FrozenMixin
 from misen.utils.function_introspection import is_function_object, task_function_signature
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
+from misen.utils.runtime_events import runtime_event, task_label
 from misen.utils.task_operators import TaskOperatorsMixin
 from misen.utils.task_utils import (
     collect_task_dependencies,
@@ -62,6 +64,13 @@ P = ParamSpec("P")
 R = TypeVar("R")
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
+
+
+def _require_runtime_lock(lock: LockLike, task: Task[Any]) -> None:
+    """Fail before commit when a task no longer owns its runtime lock."""
+    if not lock.is_locked():
+        msg = f"Lost the runtime lock for task {task} before its result could be committed."
+        raise LockUnavailableError(msg)
 
 
 class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
@@ -103,6 +112,10 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 function-signature default or nested inside a container
                 argument instead of bound as a top-level ``Task(...)``
                 argument.
+            ValueError: If task metadata, resource requests, or callable
+                signature metadata is invalid.
+            HashError: If an argument has no registered stable-hash handler
+                or cannot be hashed by its registered handler.
         """
         if not is_function_object(func):
             msg = "Task func must be a Python function or C builtin function."
@@ -302,9 +315,9 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         """
         try:
             return self._runtime_lock(workspace=workspace).is_locked()
-        except RuntimeError:
-            # Raised when dependencies are unresolved and therefore the runtime
-            # lock key (resolved hash) cannot be computed yet.
+        except CacheError:
+            # Dependencies are unresolved, so the runtime-lock key cannot be
+            # computed yet. Operational lock-backend failures still propagate.
             return False
 
     def result(
@@ -335,6 +348,15 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         Raises:
             CacheError: If required cache entries are missing and computation
                 flags do not permit executing missing nodes.
+            ConfigError: If an automatic workspace configuration cannot be resolved.
+            SerializationError: If a cached result cannot be encoded or decoded.
+            StorageError: If workspace hashes, results, scratch data, or logs
+                cannot be read or persisted.
+            LockUnavailableError: If the workspace cannot acquire its runtime
+                or result lock.
+            ExecutionError: If the task requests interpreter exit instead of returning.
+            Exception: Any exception raised by the task callable is propagated
+                unchanged, with its original traceback.
 
         Notes:
             Cacheable tasks acquire a workspace runtime lock before execution.
@@ -365,10 +387,12 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         )
 
         # Fast path: return cached payload for cacheable tasks.
+        dangling_result = False
         if self.meta.cache:
             try:
                 result = workspace.results[self]
-            except KeyError:
+            except KeyError as exc:
+                dangling_result = not isinstance(exc.__cause__, CacheError)
                 logger.log(TRACE_LEVEL, "Cache miss for %s.", self)
             else:
                 logger.log(TRACE_LEVEL, "Cache hit for %s.", self)
@@ -402,23 +426,36 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             for dependency in self.dependencies
         }
 
-        lock_context = (
-            self._runtime_lock(workspace=workspace).context(blocking=False) if self.meta.cache else nullcontext()
-        )
+        runtime_lock = self._runtime_lock(workspace=workspace) if self.meta.cache else None
+        lock_context = runtime_lock.context(blocking=False) if runtime_lock is not None else nullcontext()
+        check_lock = None if runtime_lock is None else lambda: _require_runtime_lock(runtime_lock, self)
 
         if self.meta.cache:
             logger.debug("Acquiring runtime lock for %s.", self)
 
-        # Create the scratch directory eagerly (before the lock) so both the
-        # success and failure paths can see it for cleanup. The lifecycle is:
+        # Create scratch storage only after acquiring the lock and rechecking
+        # the cache. The lifecycle is:
         #   - cacheable + success: workspace.remove_scratch_dir (local + durable)
         #   - cacheable + failure: preserve (preemption-resume affordance)
         #   - non-cacheable + success: rmtree (ephemeral tempdir)
         #   - non-cacheable + failure: rmtree
-        scratch_dir = self._create_scratch_dir(workspace=workspace) if self._requests_scratch_dir() else None
+        scratch_dir: Path | None = None
 
+        execution_started_at = time.perf_counter()
+        function_completed = False
         try:
             with lock_context:
+                if dangling_result:
+                    try:
+                        cached_result = workspace.results[self]
+                    except KeyError:
+                        # Heal a pointer whose payload disappeared out of band.
+                        workspace.clear_result_hash(self)
+                    else:
+                        logger.log(TRACE_LEVEL, "Cache filled before %s acquired its runtime lock.", self)
+                        return cached_result
+                if self._requests_scratch_dir():
+                    scratch_dir = self._create_scratch_dir(workspace=workspace)
                 result = execute_task(
                     task=self,
                     workspace=workspace,
@@ -428,23 +465,42 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                     scratch_dir=scratch_dir,
                     runtime_values=_runtime_values,
                 )
-                save_task_result(task=self, result=result, workspace=workspace)
+                function_completed = True
+                save_task_result(
+                    task=self,
+                    result=result,
+                    workspace=workspace,
+                    check_ownership=check_lock,
+                )
                 logger.debug("Persisted task result metadata for %s.", self)
-        except BaseException:
-            if scratch_dir is not None and not self.meta.cache and scratch_dir.exists():
-                shutil.rmtree(scratch_dir, ignore_errors=True)
-                logger.debug("Removed scratch directory after failure for %s at %s.", self, scratch_dir)
+        except BaseException as exc:
+            if function_completed:
+                exc.add_note(f"Task function {task_label(self)} returned, but its result could not be finalized.")
+            if not self.meta.cache:
+                try:
+                    self._remove_scratch_dir(workspace, scratch_dir)
+                except BaseException as cleanup_error:  # noqa: BLE001 -- cleanup must not mask the task failure
+                    exc.add_note(
+                        "Additionally, removing ephemeral scratch directory "
+                        f"{scratch_dir} failed: {type(cleanup_error).__name__}: {cleanup_error}"
+                    )
             raise
 
-        if scratch_dir is not None:
-            if self.meta.cache:
-                workspace.remove_scratch_dir(task=self)
-                logger.debug("Removed scratch directory (local + durable) for %s.", self)
-            else:
-                if scratch_dir.exists():
-                    shutil.rmtree(scratch_dir)
-                logger.debug("Removed ephemeral scratch directory for %s at %s.", self, scratch_dir)
+        try:
+            self._remove_scratch_dir(workspace, scratch_dir)
+        except (OSError, StorageError) as exc:
+            error = exc
+            if isinstance(exc, OSError):
+                msg = f"Could not remove scratch directory {scratch_dir} for task {self}: {exc}"
+                error = StorageError(msg)
+            error.add_note("The task result was committed successfully before scratch cleanup failed.")
+            if error is exc:
+                raise
+            raise error from exc
 
+        elapsed_s = time.perf_counter() - execution_started_at
+        logger.info("Task finished: %s in %.2fs.", self, elapsed_s)
+        runtime_event(f"Task finished: {task_label(self)} in {elapsed_s:.2f}s", style="green")
         return result
 
     def _requests_scratch_dir(self) -> bool:
@@ -455,12 +511,26 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         """Return whether a runtime sentinel is bound directly to this task."""
         return any(value is sentinel for value in itertools.chain(self.args, self.kwargs.values()))
 
+    def _remove_scratch_dir(self, workspace: Workspace, scratch_dir: Path | None) -> None:
+        if scratch_dir is None:
+            return
+        if self.meta.cache:
+            workspace.remove_scratch_dir(task=self)
+        else:
+            with suppress(FileNotFoundError):
+                shutil.rmtree(scratch_dir)
+        logger.debug("Removed scratch directory for %s at %s.", self, scratch_dir)
+
     def _create_scratch_dir(self, workspace: Workspace) -> Path:
         """Return a fresh scratch directory: workspace-backed for cacheable tasks, tempdir otherwise."""
         if self.meta.cache:
             return workspace.get_scratch_dir(task=self)
         resolved = self.resolved_hash(workspace=workspace).b32()
-        return Path(tempfile.mkdtemp(prefix=f"misen-scratch-{resolved}-"))
+        try:
+            return Path(tempfile.mkdtemp(prefix=f"misen-scratch-{resolved}-"))
+        except OSError as exc:
+            msg = f"Could not create an ephemeral scratch directory for task {self}: {exc}"
+            raise StorageError(msg) from exc
 
     def submit(
         self,
@@ -479,6 +549,13 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         Returns:
             Dependency graph of job handles for scheduled work units.
+
+        Raises:
+            JobFailedError: If ``blocking`` is true and any submitted job fails.
+            MisenError: If configuration, snapshot, storage, submission, or
+                status handling fails at a Misen-owned boundary.
+            Exception: Any exception raised by a user task when the selected
+                executor runs it synchronously in the current process.
         """
         from misen.executor import Executor
         from misen.workspace import Workspace
@@ -495,6 +572,12 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
 
         Returns:
             Per-task workspace directory.
+
+        Raises:
+            ConfigError: If ``workspace="auto"`` cannot be resolved.
+            RuntimeError: If the task is non-cacheable.
+            StorageError: If the workspace cannot create or restore the
+                scratch directory.
         """
         from misen.workspace import Workspace
 
@@ -576,7 +659,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             Lock-like object keyed by resolved hash.
 
         Raises:
-            RuntimeError: If dependencies are not cached yet.
+            CacheError: If dependencies are not cached yet.
 
         Notes:
             This lock is used only for cacheable tasks. It enforces that, for a
@@ -585,7 +668,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         """
         if not self.are_deps_cached(workspace=workspace):
             msg = f"Dependencies of {self} must be run before acquiring runtime lock"
-            raise RuntimeError(msg)
+            raise CacheError(msg)
         return workspace.lock(namespace="task", key=self.resolved_hash(workspace=workspace).b32())
 
     def __hash__(self) -> int:

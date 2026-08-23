@@ -14,9 +14,10 @@ import types
 import uuid
 import zoneinfo
 from collections import ChainMap, Counter, OrderedDict, UserDict, UserList, UserString, defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
+from misen.exceptions import HashError
 from misen.utils.hashing.base import (
     CollectionHandler,
     ElementHasher,
@@ -65,6 +66,16 @@ class _InstanceMatch:
         return isinstance(obj, cls._types) and not isinstance(obj, cls._excluded_types)
 
 
+class _ProjectedPrimitive(_InstanceMatch, PrimitiveHandler):
+    """Hash a primitive through its handler-specific canonical projection."""
+
+    _project: Callable[[Any], Any]
+
+    @classmethod
+    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
+        return hash_values(cls._project(obj))
+
+
 class NoneHandler(PrimitiveHandler):
     @staticmethod
     def match(obj: Any) -> bool:
@@ -83,21 +94,15 @@ class EnumHandler(_InstanceMatch, Handler):
         return element_hash(obj.value)
 
 
-class BoolHandler(_InstanceMatch, PrimitiveHandler):
+class BoolHandler(_ProjectedPrimitive):
     _types = bool
-
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(bool(obj))
+    _project = bool
 
 
-class IntHandler(_InstanceMatch, PrimitiveHandler):
+class IntHandler(_ProjectedPrimitive):
     _types = int
     _excluded_types = (bool, enum.Enum)
-
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(int(obj))
+    _project = int
 
 
 class FloatHandler(_InstanceMatch, PrimitiveHandler):
@@ -122,28 +127,19 @@ class ComplexHandler(_InstanceMatch, PrimitiveHandler):
         )
 
 
-class StrHandler(_InstanceMatch, PrimitiveHandler):
+class StrHandler(_ProjectedPrimitive):
     _types = str
-
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(str(obj))
+    _project = str
 
 
-class BytearrayHandler(_InstanceMatch, PrimitiveHandler):
+class BytearrayHandler(_ProjectedPrimitive):
     _types = bytearray
-
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(bytes(obj))
+    _project = bytes
 
 
-class BytesHandler(_InstanceMatch, PrimitiveHandler):
+class BytesHandler(_ProjectedPrimitive):
     _types = bytes
-
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(bytes(obj))
+    _project = bytes
 
 
 class MemoryviewHandler(_InstanceMatch, PrimitiveHandler):
@@ -151,17 +147,21 @@ class MemoryviewHandler(_InstanceMatch, PrimitiveHandler):
 
     @classmethod
     def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        view = memoryview(obj)
-        return hash_values(
-            (
-                view.format,
-                view.ndim,
-                view.shape,
-                view.strides,
-                view.readonly,
-                view.tobytes(),
+        try:
+            view = memoryview(obj)
+            return hash_values(
+                (
+                    view.format,
+                    view.ndim,
+                    view.shape,
+                    view.strides,
+                    view.readonly,
+                    view.tobytes(),
+                )
             )
-        )
+        except ValueError as exc:
+            msg = "Cannot produce a stable hash for a released memoryview."
+            raise HashError(msg) from exc
 
 
 class DatetimeHandler(_InstanceMatch, PrimitiveHandler):
@@ -226,12 +226,9 @@ class UUIDHandler(_InstanceMatch, PrimitiveHandler):
         return hash_values(obj.bytes)
 
 
-class DecimalHandler(_InstanceMatch, PrimitiveHandler):
+class DecimalHandler(_ProjectedPrimitive):
     _types = decimal.Decimal
-
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(str(obj))
+    _project = str
 
 
 class FractionHandler(_InstanceMatch, PrimitiveHandler):
@@ -294,11 +291,11 @@ class ZoneInfoHandler(_InstanceMatch, PrimitiveHandler):
         key = getattr(obj, "key", None)
         if key is None:
             msg = "ZoneInfo objects must expose a stable key."
-            raise ValueError(msg)
+            raise HashError(msg)
         return hash_values(key)
 
 
-class IPAddressHandler(_InstanceMatch, PrimitiveHandler):
+class IPAddressHandler(_ProjectedPrimitive):
     _types = (
         ipaddress.IPv4Address,
         ipaddress.IPv6Address,
@@ -308,9 +305,7 @@ class IPAddressHandler(_InstanceMatch, PrimitiveHandler):
         ipaddress.IPv6Interface,
     )
 
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(str(obj))
+    _project = str
 
 
 class ArrayHandler(_InstanceMatch, PrimitiveHandler):
@@ -388,12 +383,9 @@ class UserListHandler(_InstanceMatch, CollectionHandler):
         return list(obj.data)
 
 
-class UserStringHandler(_InstanceMatch, PrimitiveHandler):
+class UserStringHandler(_ProjectedPrimitive):
     _types = UserString
-
-    @classmethod
-    def digest(cls, obj: Any, _element_hash: ElementHasher, /) -> int:
-        return hash_values(str(obj))
+    _project = str
 
 
 class NamedTupleHandler(CollectionHandler):

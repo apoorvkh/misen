@@ -99,13 +99,24 @@ def _encode_callable_name(fn: Any) -> str | None:
     return f"{module}.{qname}"
 
 
-def _import_optional(qualified: str | None) -> Any:
-    if not qualified:
+def _decode_default_factory(qualified: Any) -> Any:
+    if qualified is None:
         return None
+    if not isinstance(qualified, str) or not qualified:
+        msg = (
+            "Persisted defaultdict default_factory metadata must be a non-empty qualified name "
+            f"or null, got {qualified!r}."
+        )
+        raise SerializationError(msg)
     try:
-        return import_by_qualified_name(qualified)
-    except ImportError:
-        return None
+        factory = import_by_qualified_name(qualified)
+    except (ImportError, ValueError) as exc:
+        msg = f"Could not resolve persisted defaultdict default_factory {qualified!r}."
+        raise SerializationError(msg) from exc
+    if not callable(factory):
+        msg = f"Persisted defaultdict default_factory {qualified!r} is not callable."
+        raise SerializationError(msg)
+    return factory
 
 
 def _encode_tagged(obj: Any) -> Any:
@@ -253,7 +264,7 @@ def _decode_tagged(obj: Any) -> Any:
             if tag == "Counter":
                 return Counter({_decode_tagged(k): _decode_tagged(v) for k, v in val})
             if tag == "defaultdict":
-                dd: Any = defaultdict(_import_optional(obj.get("factory")))
+                dd: Any = defaultdict(_decode_default_factory(obj.get("factory")))
                 for k, v in val:
                     dd[_decode_tagged(k)] = _decode_tagged(v)
                 return dd
@@ -464,7 +475,14 @@ class DictSerializer(BaseSerializer[Any]):
     @classmethod
     def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
         container = _require_container(cls, node)
-        output = OrderedDict() if container.meta.get("type") == "OrderedDict" else {}
+        container_type = container.meta.get("type")
+        if container_type not in (None, "OrderedDict"):
+            msg = (
+                f"{qualified_type_name(cls)} has invalid 'type' metadata {container_type!r}; "
+                "expected 'OrderedDict' or no value."
+            )
+            raise SerializationError(msg)
+        output = OrderedDict() if container_type == "OrderedDict" else {}
         return _decode_mapping(container, ctx, output)
 
 
@@ -518,7 +536,8 @@ class DefaultDictSerializer(BaseSerializer[Any]):
     @classmethod
     def decode(cls, node: Node, ctx: DecodeCtx) -> Any:
         container = _require_container(cls, node)
-        return _decode_mapping(container, ctx, defaultdict(_import_optional(container.meta.get("factory"))))
+        factory = _decode_default_factory(container.meta.get("factory"))
+        return _decode_mapping(container, ctx, defaultdict(factory))
 
 
 class ChainMapSerializer(BaseSerializer[Any]):
@@ -635,9 +654,21 @@ class MsgpackLeafSerializer(LeafSerializer[Any]):
     def read_batch(directory: Path, kind_meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
         data = (directory / "data.msgpack").read_bytes()
         blob = msgspec.msgpack.decode(data)
+        if not isinstance(blob, dict):
+            msg = f"Msgpack batch in {directory} must contain a leaf mapping."
+            raise SerializationError(msg)
 
         def reader(leaf_id: str) -> Any:
-            return _decode_tagged(blob[leaf_id])
+            try:
+                payload = blob[leaf_id]
+            except KeyError as exc:
+                msg = f"Msgpack batch in {directory} does not contain leaf {leaf_id!r}."
+                raise SerializationError(msg) from exc
+            try:
+                return _decode_tagged(payload)
+            except (KeyError, TypeError, ValueError) as exc:
+                msg = f"Msgpack leaf {leaf_id!r} in {directory} is corrupt or incompatible."
+                raise SerializationError(msg) from exc
 
         return reader
 

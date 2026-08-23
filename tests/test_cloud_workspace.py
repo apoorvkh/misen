@@ -16,14 +16,17 @@ from typing import TYPE_CHECKING, Any
 
 import obstore as obs
 import pytest
+from obstore.exceptions import GenericError, PreconditionError
 from obstore.store import MemoryStore
 
 from misen import SCRATCH_DIR, Task, meta
-from misen.exceptions import LockUnavailableError
+from misen.exceptions import LockUnavailableError, StorageError
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, ObjectStoreLock
+from misen.utils import locks as locks_module
 from misen.utils.settings import Settings
 from misen.workspace import Workspace
+from misen.workspaces import cloud as cloud_mod
 from misen.workspaces.cloud import CloudWorkspace, ObstoreMapping, ObstoreResultStore
 
 if TYPE_CHECKING:
@@ -140,12 +143,8 @@ def test_cloud_workspace_id_isolates_distinct_workspaces(tmp_path) -> None:
     base = tmp_path / "cache"
     ws_default = _MemoryCloudWorkspace(backend="s3", bucket="b", cache_dir=str(base))
     ws_prefix = _MemoryCloudWorkspace(backend="s3", bucket="b", prefix="x", cache_dir=str(base))
-    ws_endpoint = _MemoryCloudWorkspace(
-        backend="s3", bucket="b", endpoint="https://r2.example", cache_dir=str(base)
-    )
-    ws_region = _MemoryCloudWorkspace(
-        backend="s3", bucket="b", s3_region="us-west-2", cache_dir=str(base)
-    )
+    ws_endpoint = _MemoryCloudWorkspace(backend="s3", bucket="b", endpoint="https://r2.example", cache_dir=str(base))
+    ws_region = _MemoryCloudWorkspace(backend="s3", bucket="b", s3_region="us-west-2", cache_dir=str(base))
 
     ids = {ws.workspace_id for ws in (ws_default, ws_prefix, ws_endpoint, ws_region)}
     assert len(ids) == 4
@@ -307,6 +306,43 @@ def test_object_store_lock_against_memory_store_conditional_writes() -> None:
     lock_b.release()
 
 
+def test_object_store_lock_verifies_ownership_synchronously(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MemoryStore()
+    lock = ObjectStoreLock(store=store, key="locks/verify", lifetime=60, refresh_interval=None)
+    lock.acquire(blocking=True)
+
+    def lose_lease(*_args: object, **_kwargs: object) -> None:
+        raise PreconditionError("stale token")
+
+    monkeypatch.setattr(locks_module._obs, "put", lose_lease)
+
+    assert not lock.is_locked()
+    with pytest.raises(LockUnavailableError, match="Lost the lease"):
+        lock.release()
+
+
+def test_object_store_lock_surfaces_background_storage_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed refresh remains a storage failure during verification and release."""
+    lock = ObjectStoreLock(store=MemoryStore(), key="locks/refresh", lifetime=60, refresh_interval=None)
+    lock.acquire(blocking=True)
+
+    def fail_refresh(*_args: object, **_kwargs: object) -> None:
+        error = OSError("backend unavailable")
+        raise error
+
+    monkeypatch.setattr(locks_module._obs, "put", fail_refresh)
+    lock._refresh_interval = 0.01
+    lock._start_refresh()
+    assert lock._thread is not None
+    lock._thread.join(timeout=1)
+    assert not lock._thread.is_alive()
+
+    with pytest.raises(StorageError, match="Could not refresh"):
+        lock.is_locked()
+    with pytest.raises(StorageError, match="Could not refresh"):
+        lock.release()
+
+
 def test_object_store_lock_takes_over_after_lease_expiry() -> None:
     """A new holder takes over after the previous lease's expiry has elapsed."""
     store = MemoryStore()
@@ -383,6 +419,18 @@ def test_obstore_mapping_iter_and_delete() -> None:
         del mapping[keys[0]]
 
 
+def test_obstore_mapping_corrupt_value_raises_storage_error() -> None:
+    store = MemoryStore()
+    mapping: ObstoreMapping[TaskHash, ResolvedTaskHash] = ObstoreMapping[TaskHash, ResolvedTaskHash](store, "resolved")
+    key = TaskHash.from_object("corrupt")
+    obs.put(store, f"resolved/{key.b32()}", b"corrupt")
+
+    with pytest.raises(StorageError, match="corrupt or incompatible") as raised:
+        _ = mapping[key]
+
+    assert isinstance(raised.value.__cause__, ValueError)
+
+
 def test_obstore_result_store_setitem_skips_when_present(tmp_path) -> None:
     """Re-setting a result hash is a no-op so existing payloads are preserved."""
     store = MemoryStore()
@@ -417,6 +465,84 @@ def test_obstore_result_store_ignores_uncommitted_payloads(tmp_path) -> None:
     assert list(rs) == []
     with pytest.raises(KeyError):
         _ = rs[rh]
+
+    with pytest.raises(KeyError):
+        del rs[rh]
+
+
+def test_obstore_result_store_isolates_interleaved_generations(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale upload cannot overwrite files from the committed generation."""
+    store = MemoryStore()
+    rs = ObstoreResultStore(store, "results", cache_dir=tmp_path / "cache")
+    rh = ResultHash.from_object(("res", "interleaved"))
+
+    stale = tmp_path / "stale"
+    winner = tmp_path / "winner"
+    for directory, label in ((stale, "stale"), (winner, "winner")):
+        directory.mkdir()
+        (directory / "a.bin").write_text(f"{label}-a")
+        (directory / "manifest.json").write_text(f"{label}-manifest")
+        (directory / "z.bin").write_text(f"{label}-z")
+
+    real_put = cloud_mod.obs.put
+    interleaved = False
+
+    def put_with_winner(store_arg: Any, path: str, payload: Any, **kwargs: Any) -> Any:
+        nonlocal interleaved
+        if not interleaved and path.endswith("/z.bin"):
+            interleaved = True
+            rs.commit(rh, winner, before_commit=lambda: None)
+        return real_put(store_arg, path, payload, **kwargs)
+
+    monkeypatch.setattr(cloud_mod.obs, "put", put_with_winner)
+
+    def lost_ownership() -> None:
+        msg = "lost runtime lease"
+        raise LockUnavailableError(msg)
+
+    with pytest.raises(LockUnavailableError, match="lost runtime lease"):
+        rs.commit(rh, stale, before_commit=lost_ownership)
+
+    materialized = rs[rh]
+    assert {path.name: path.read_text() for path in materialized.iterdir()} == {
+        "a.bin": "winner-a",
+        "manifest.json": "winner-manifest",
+        "z.bin": "winner-z",
+    }
+    assert list(rs) == [rh]
+
+
+def test_obstore_result_store_reads_and_deletes_legacy_layout(tmp_path) -> None:
+    """Existing root-level payloads remain readable and fully deletable."""
+    store = MemoryStore()
+    rs = ObstoreResultStore(store, "results", cache_dir=tmp_path / "cache")
+    rh = ResultHash.from_object(("res", "legacy"))
+    prefix = f"results/{rh.b32()}"
+    obs.put(store, f"{prefix}/manifest.json", b"legacy-manifest")
+    obs.put(store, f"{prefix}/leaves/data.bin", b"legacy-data")
+    obs.put(store, f"{prefix}/.builds/ORPHAN/manifest.json", b"orphan")
+
+    materialized = rs[rh]
+    assert (materialized / "manifest.json").read_bytes() == b"legacy-manifest"
+    assert (materialized / "leaves/data.bin").read_bytes() == b"legacy-data"
+    assert not (materialized / ".builds").exists()
+    assert list(rs) == [rh]
+
+    del rs[rh]
+    assert list(obs.list(store, prefix=f"{prefix}/")) == []
+
+
+def test_obstore_mapping_fenced_commit_does_not_overwrite_winner() -> None:
+    """A stale create cannot overwrite a pointer published during its fence."""
+    store = MemoryStore()
+    mapping = ObstoreMapping[ResolvedTaskHash, ResultHash](store, "result_hashes")
+    key = ResolvedTaskHash(1)
+    stale, winner = ResultHash(1), ResultHash(2)
+
+    with pytest.raises(LockUnavailableError, match="Another writer"):
+        mapping.commit(key, stale, before_commit=lambda: mapping.__setitem__(key, winner))
+
+    assert mapping[key] == winner
 
 
 def test_workspace_auto_resolves_cloud_from_toml(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -685,6 +811,48 @@ def test_cloud_workspace_finalize_job_log_is_idempotent(tmp_path) -> None:
     assert paths[0].read_text() == "content"
 
 
+def test_cloud_workspace_final_log_failure_raises_storage_error(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed canonical log upload is observable and retains its cause."""
+    workspace = _workspace(tmp_path, "test-final-log-failure")
+    work_unit = _work_unit_for(cloud_test_task_a)
+    log_path = workspace.get_job_log(job_id="job-1", work_unit=work_unit)
+    log_path.write_text("content")
+    failure = GenericError("object store unavailable")
+
+    def fail_put(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001
+        raise failure
+
+    monkeypatch.setattr(obs, "put", fail_put)
+
+    with pytest.raises(StorageError, match="Could not finalize log") as exc_info:
+        workspace.finalize_job_log(log_path)
+
+    assert exc_info.value.__cause__ is failure
+
+
+def test_cloud_workspace_final_log_does_not_wrap_programmer_error(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unexpected implementation errors remain visible during finalization."""
+    workspace = _workspace(tmp_path, "test-final-log-programmer-error")
+    work_unit = _work_unit_for(cloud_test_task_a)
+    log_path = workspace.get_job_log(job_id="job-1", work_unit=work_unit)
+    log_path.write_text("content")
+
+    def fail_put(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001
+        msg = "uploader bug"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(obs, "put", fail_put)
+
+    with pytest.raises(AssertionError, match="uploader bug"):
+        workspace.finalize_job_log(log_path)
+
+
 def test_cloud_workspace_job_log_iter_filters_by_work_unit(tmp_path) -> None:
     """job_log_iter merges local + remote and respects the work_unit filter."""
     workspace = _workspace(tmp_path, "test-jli-filter")
@@ -803,6 +971,39 @@ def test_cloud_workspace_job_log_live_streamed_to_bucket(tmp_path) -> None:
     assert paths[0].read_text().splitlines() == ["partial output", "more output"]
 
 
+def test_live_log_background_upload_retries_operational_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient background upload error is logged and retried on the next tick."""
+    workspace = _workspace(tmp_path, "test-live-log-retry")
+    local_path = tmp_path / "live.log"
+    local_path.write_text("content")
+    remote_key = workspace._under("job_logs", "live.log")
+    real_put = obs.put
+    attempts = 0
+
+    def flaky_put(store: Any, path: str, file: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        if path.startswith(f"{remote_key}.chunks/"):
+            attempts += 1
+            if attempts == 1:
+                msg = "temporary upload failure"
+                raise OSError(msg)
+        return real_put(store, path, file, **kwargs)
+
+    monkeypatch.setattr(obs, "put", flaky_put)
+    uploader = cloud_mod._LiveLogUploader(workspace._store, local_path, remote_key, 0.02)
+    uploader.start()
+    try:
+        time.sleep(0.15)
+    finally:
+        uploader.stop(final_upload=False)
+
+    assert attempts >= 2
+    assert f"{remote_key}.state.json" in _store_paths(workspace, "job_logs")
+
+
 def test_cloud_workspace_read_does_not_truncate_sibling_writer_task_log(tmp_path) -> None:
     """A read in one workspace must not clobber a sibling writer on the same FS.
 
@@ -907,6 +1108,58 @@ def test_cloud_workspace_close_stops_live_uploaders(tmp_path) -> None:
     assert workspace._live_log_uploaders
     workspace.close()
     assert not workspace._live_log_uploaders
+
+
+def test_cloud_workspace_producer_finalizer_uploads_writes_after_close(tmp_path) -> None:
+    """A producer still owns the final commit when workspace close races it."""
+    workspace = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket="test-close-producer-finalizer",
+        cache_dir=str(tmp_path / "cache"),
+        log_flush_interval_s=60,
+    )
+    work_unit = _work_unit_for(cloud_test_task_a)
+    log_path = workspace.get_job_log(job_id="job-race", work_unit=work_unit)
+
+    with workspace.streaming_job_log(log_path):
+        log_path.write_text("before-close\n")
+        workspace.close()
+        with log_path.open("a") as fp:
+            fp.write("after-close\n")
+
+    remote_key = workspace._job_log_remote_key(log_path)
+    assert bytes(obs.get(workspace._store, remote_key).bytes()) == b"before-close\nafter-close\n"
+
+
+def test_cloud_workspace_producer_finalizer_uploads_after_failed_close(tmp_path) -> None:
+    """A different close failure cannot suppress a producer's final upload."""
+    workspace = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket="test-failed-close-producer-finalizer",
+        cache_dir=str(tmp_path / "cache"),
+        log_flush_interval_s=60,
+    )
+    work_unit = _work_unit_for(cloud_test_task_a)
+    log_path = workspace.get_job_log(job_id="job-race", work_unit=work_unit)
+
+    class FailingSync:
+        def stop(self, *, final_upload: bool) -> None:
+            assert final_upload
+            raise StorageError("scratch finalization failed")
+
+    workspace._scratch_dir_syncs["failing"] = FailingSync()  # type: ignore[assignment]
+    with workspace.streaming_job_log(log_path):
+        log_path.write_text("before-close\n")
+        with pytest.raises(StorageError, match="scratch finalization failed"):
+            workspace.close()
+        with log_path.open("a") as fp:
+            fp.write("after-close\n")
+
+    remote_key = workspace._job_log_remote_key(log_path)
+    assert bytes(obs.get(workspace._store, remote_key).bytes()) == b"before-close\nafter-close\n"
+
+    workspace._scratch_dir_syncs.clear()
+    workspace.close()
 
 
 def test_cloud_workspace_results_iter(tmp_path) -> None:
@@ -1053,6 +1306,30 @@ def test_cloud_workspace_close_stops_scratch_dir_syncs(tmp_path) -> None:
     assert not workspace._scratch_dir_syncs
 
 
+def test_cloud_workspace_scratch_finalizer_mirrors_changes_after_close(tmp_path) -> None:
+    """Task finalization publishes scratch changes made after workspace close."""
+    workspace = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket="test-scratchdir-close-race",
+        cache_dir=str(tmp_path / "cache"),
+        scratch_dir_sync_interval_s=60,
+    )
+    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "data")
+    workspace.start_scratch_dir_sync(task=task)
+    local_dir = workspace._get_scratch_dir(task)
+    obsolete = local_dir / "obsolete.txt"
+    obsolete.write_text("old")
+
+    workspace.close()
+    obsolete.unlink()
+    (local_dir / "final.txt").write_text("new")
+    workspace.finalize_scratch_dir(task=task)
+
+    remote_prefix = workspace._scratch_dir_remote_prefix(task)
+    assert _scratch_dir_remote_paths(workspace, task) == {f"{remote_prefix}/final.txt"}
+    assert bytes(obs.get(workspace._store, f"{remote_prefix}/final.txt").bytes()) == b"new"
+
+
 def test_cloud_workspace_scratch_dir_sync_drops_deleted_files(tmp_path) -> None:
     """Files removed locally during execution are removed from the bucket on the next tick."""
     workspace = _MemoryCloudWorkspace(
@@ -1076,3 +1353,64 @@ def test_cloud_workspace_scratch_dir_sync_drops_deleted_files(tmp_path) -> None:
         assert not any(p.endswith("/transient.txt") for p in paths)
     finally:
         workspace.finalize_scratch_dir(task=task)
+
+
+def test_cloud_workspace_final_scratch_sync_failure_raises_storage_error(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed terminal scratch upload propagates with the original cause."""
+    workspace = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket="test-scratch-final-failure",
+        cache_dir=str(tmp_path / "cache"),
+        scratch_dir_sync_interval_s=60,
+    )
+    task = Task(cloud_test_writes_scratchdir, SCRATCH_DIR, "value")
+    workspace.start_scratch_dir_sync(task=task)
+    local_dir = workspace._get_scratch_dir(task)
+    (local_dir / "checkpoint.txt").write_text("checkpoint")
+    failure = OSError("disk read failed")
+
+    def fail_put(*args: Any, **kwargs: Any) -> Any:  # noqa: ARG001
+        raise failure
+
+    monkeypatch.setattr(obs, "put", fail_put)
+
+    with pytest.raises(StorageError, match="Could not finalize scratch directory") as exc_info:
+        workspace.finalize_scratch_dir(task=task)
+
+    assert exc_info.value.__cause__ is failure
+
+
+def test_scratch_background_sync_retries_operational_failure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Periodic scratch syncing remains best-effort across transient failures."""
+    workspace = _workspace(tmp_path, "test-scratch-background-retry")
+    local_dir = tmp_path / "scratch"
+    local_dir.mkdir()
+    (local_dir / "checkpoint.txt").write_text("checkpoint")
+    remote_prefix = workspace._under("scratch_dirs", "retry")
+    real_put = obs.put
+    attempts = 0
+
+    def flaky_put(store: Any, path: str, file: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            msg = "temporary scratch upload failure"
+            raise OSError(msg)
+        return real_put(store, path, file, **kwargs)
+
+    monkeypatch.setattr(obs, "put", flaky_put)
+    sync = cloud_mod._ScratchDirSync(workspace._store, local_dir, remote_prefix, 0.02)
+    sync.start()
+    try:
+        time.sleep(0.15)
+    finally:
+        sync.stop(final_upload=False)
+
+    assert attempts >= 2
+    assert f"{remote_prefix}/checkpoint.txt" in _store_paths(workspace, "scratch_dirs")

@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from misen import DASK_CLIENT, Task, meta
+from misen import DASK_CLIENT, SubmissionError, Task, meta
 from misen.executors.in_process import InProcessExecutor
 
 if TYPE_CHECKING:
@@ -23,11 +23,11 @@ def _dask_task(client: object) -> None:
 
 def test_in_process_executor_rejects_multiple_nodes() -> None:
     """An in-process executor cannot realize a multi-node allocation."""
-    with pytest.raises(ValueError, match="only single-node"):
+    with pytest.raises(SubmissionError, match="only single-node"):
         InProcessExecutor().submit({Task(_multinode_task)}, cast("Workspace", None))
 
 
 def test_in_process_executor_rejects_dask_client() -> None:
     """An in-process executor cannot isolate an allocation-scoped Dask runtime."""
-    with pytest.raises(ValueError, match="cannot provide DASK_CLIENT"):
+    with pytest.raises(SubmissionError, match="cannot provide DASK_CLIENT"):
         InProcessExecutor().submit({Task(_dask_task, DASK_CLIENT)}, cast("Workspace", None))

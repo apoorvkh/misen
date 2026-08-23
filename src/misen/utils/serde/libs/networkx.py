@@ -25,12 +25,13 @@ at save time):
 """
 
 import importlib.util
+import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from misen.exceptions import SerializationError
-from misen.utils.serde.base import Serializer
+from misen.utils.serde.base import Serializer, translate_errors
 
 __all__ = ["networkx_serializers", "networkx_serializers_by_type"]
 
@@ -39,6 +40,7 @@ networkx_serializers_by_type: dict[str, type[Serializer]] = {}
 
 # GraphML's attribute schema only knows these scalar types.
 _GRAPHML_SCALARS = (bool, int, float, str)
+_ERROR_PREVIEW_LIMIT = 6
 # Identifier types we can faithfully cast back via ``read_graphml(node_type=...)``.
 _GRAPHML_ID_TYPES: dict[type, str] = {int: "int", str: "str"}
 _GRAPHML_ID_TYPE_BY_NAME: dict[str, type] = {"int": int, "str": str}
@@ -57,10 +59,7 @@ def _detect_id_type(values: Any) -> type | None:
         raise SerializationError(msg)
     (id_type,) = types
     if id_type not in _GRAPHML_ID_TYPES:
-        msg = (
-            f"GraphML supports only int/str identifiers; got {id_type.__name__}. "
-            "Convert IDs before saving."
-        )
+        msg = f"GraphML supports only int/str identifiers; got {id_type.__name__}. Convert IDs before saving."
         raise SerializationError(msg)
     return id_type
 
@@ -82,10 +81,11 @@ def _check_attrs_serializable(graph: Any) -> None:
     if bad:
         msg = (
             "GraphML only supports primitive attribute values (bool/int/float/str); "
-            "the following attributes need to be normalized before serialization: " + ", ".join(bad[:6])
+            "the following attributes need to be normalized before serialization: "
+            + ", ".join(bad[:_ERROR_PREVIEW_LIMIT])
         )
-        if len(bad) > 6:
-            msg += f" (+{len(bad) - 6} more)"
+        if len(bad) > _ERROR_PREVIEW_LIMIT:
+            msg += f" (+{len(bad) - _ERROR_PREVIEW_LIMIT} more)"
         raise SerializationError(msg)
 
 
@@ -118,7 +118,11 @@ if importlib.util.find_spec("networkx") is not None:
                 # just the keys.
                 edge_key_type = _detect_id_type(k for _, _, k in obj.edges(keys=True))
 
-            nx.write_graphml(obj, directory / "graph.graphml")
+            with translate_errors(
+                f"Could not encode NetworkX graph in {directory}",
+                (OSError, KeyError, TypeError, ValueError, ET.ParseError, nx.NetworkXException),
+            ):
+                nx.write_graphml(obj, directory / "graph.graphml")
             return {
                 "networkx_version": nx.__version__,
                 "is_directed": bool(obj.is_directed()),
@@ -134,11 +138,15 @@ if importlib.util.find_spec("networkx") is not None:
 
             node_type = _GRAPHML_ID_TYPE_BY_NAME.get(meta.get("node_type") or "", str)
             edge_key_type = _GRAPHML_ID_TYPE_BY_NAME.get(meta.get("edge_key_type") or "", int)
-            g = nx.read_graphml(
-                directory / "graph.graphml",
-                node_type=node_type,
-                edge_key_type=edge_key_type,
-            )
+            with translate_errors(
+                f"Could not decode NetworkX graph in {directory}",
+                (OSError, KeyError, TypeError, ValueError, ET.ParseError, nx.NetworkXException),
+            ):
+                g = nx.read_graphml(
+                    directory / "graph.graphml",
+                    node_type=node_type,
+                    edge_key_type=edge_key_type,
+                )
             # ``read_graphml`` picks the directed/undirected base from the
             # GraphML header but doesn't distinguish multi from simple — that
             # flag lives in our subdir meta.  Re-route through the desired

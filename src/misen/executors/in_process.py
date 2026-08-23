@@ -10,6 +10,7 @@ import logging
 from operator import is_
 from typing import TYPE_CHECKING
 
+from misen.exceptions import SubmissionError
 from misen.executor import CompletedJob, Executor
 from misen.sentinels import DASK_CLIENT
 from misen.tasks import Task
@@ -63,6 +64,12 @@ class InProcessExecutor(Executor[CompletedJob]):
 
         Returns:
             Single-node job graph (or empty graph when no tasks were submitted).
+
+        Raises:
+            SubmissionError: If a task requests multiple nodes or a Dask
+                client, which this executor cannot provide.
+            Exception: Any exception raised by a user task function, preserved
+                with its original type and traceback.
         """
         _ = blocking
         logger.info("InProcessExecutor executing %d root task(s) synchronously.", len(tasks))
@@ -76,7 +83,7 @@ class InProcessExecutor(Executor[CompletedJob]):
             for task in task_graph.nodes()
         ):
             msg = "InProcessExecutor supports only single-node tasks and cannot provide DASK_CLIENT."
-            raise ValueError(msg)
+            raise SubmissionError(msg)
 
         with apply_env_files_temporarily():
             WorkUnit.execute(graph=task_graph, workspace=workspace, job_id=job_id)

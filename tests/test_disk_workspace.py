@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from misen.exceptions import LockUnavailableError, StorageError
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.workspaces.disk import FileKVMapping
 
@@ -64,6 +65,19 @@ def test_setitem_overwrites(tmp_path: Path) -> None:
     assert len(cache) == 1
 
 
+def test_fenced_commit_does_not_overwrite_winner(tmp_path: Path) -> None:
+    cache: FileKVMapping[ResolvedTaskHash, ResultHash] = FileKVMapping[ResolvedTaskHash, ResultHash](
+        tmp_path / "result_hash_cache"
+    )
+    key = ResolvedTaskHash(1)
+    stale, winner = ResultHash(1), ResultHash(2)
+
+    with pytest.raises(LockUnavailableError, match="Another writer"):
+        cache.commit(key, stale, before_commit=lambda: cache.__setitem__(key, winner))
+
+    assert cache[key] == winner
+
+
 def test_sharded_layout(tmp_path: Path) -> None:
     cache = _resolved_cache(tmp_path)
     key = TaskHash(0x1234)
@@ -78,6 +92,19 @@ def test_getitem_missing_raises_keyerror(tmp_path: Path) -> None:
     cache = _resolved_cache(tmp_path)
     with pytest.raises(KeyError):
         _ = cache[TaskHash(0xDEAD)]
+
+
+def test_getitem_corrupt_value_raises_storage_error(tmp_path: Path) -> None:
+    cache = _resolved_cache(tmp_path)
+    key = TaskHash(0xDEAD)
+    path = tmp_path / "resolved_hash_cache" / key.b32()[:2] / key.b32()
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"corrupt")
+
+    with pytest.raises(StorageError, match="corrupt or incompatible") as raised:
+        _ = cache[key]
+
+    assert isinstance(raised.value.__cause__, ValueError)
 
 
 def test_delitem_missing_raises_keyerror(tmp_path: Path) -> None:

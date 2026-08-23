@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from misen.exceptions import SnapshotError
 from misen.utils.snapshot import ProjectSnapshot
 from misen.workspaces.disk import DiskWorkspace
 
@@ -66,7 +67,7 @@ def test_project_snapshot_rejects_pypi_dependencies(tmp_path: Path, monkeypatch:
     )
     monkeypatch.chdir(project_root)
 
-    with pytest.raises(RuntimeError, match="pypi dependencies"):
+    with pytest.raises(SnapshotError, match="pypi dependencies"):
         ProjectSnapshot(workspace=_workspace(tmp_path))
 
 
@@ -78,7 +79,7 @@ def test_project_snapshot_rejects_missing_manifest(tmp_path: Path, monkeypatch: 
     shutil.copy(ZLIB_XZ_LOCK, project_root / "pixi.lock")
     monkeypatch.chdir(project_root)
 
-    with pytest.raises(RuntimeError, match="no pixi"):
+    with pytest.raises(SnapshotError, match="no pixi"):
         ProjectSnapshot(workspace=_workspace(tmp_path))
 
 
@@ -139,7 +140,7 @@ def test_prewarmed_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: 
     result = subprocess.run(wrapped, capture_output=True, text=True, check=True)  # noqa: S603
     conda_prefix, path_value, *_ = result.stdout.splitlines()
     assert Path(conda_prefix).resolve() == prefix_dir.resolve()
-    assert path_value.split(":")[0] == str(prefix_dir / "bin")
+    assert Path(path_value.split(":")[0]).resolve() == (prefix_dir / "bin").resolve()
 
     # A second snapshot reuses the conda env entry instead of reinstalling.
     second = ProjectSnapshot(workspace=workspace, env_store_dir=str(store_root), prewarm=True)

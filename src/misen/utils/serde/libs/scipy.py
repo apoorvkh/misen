@@ -22,20 +22,32 @@ contains ndarrays that should batch through the numpy path.
 """
 
 import importlib.util
+import zipfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from misen.exceptions import SerializationError
-from misen.utils.serde.base import BaseSerializer, Container, DecodeCtx, EncodeCtx, Node, Serializer
+from misen.utils.serde.base import (
+    BaseSerializer,
+    Container,
+    DecodeCtx,
+    EncodeCtx,
+    Node,
+    Serializer,
+    translate_errors,
+)
 from misen.utils.type_registry import import_by_qualified_name, qualified_type_name
 
 __all__ = ["scipy_serializers", "scipy_serializers_by_type"]
 
-scipy_serializers: list[type[Serializer]] = []
-scipy_serializers_by_type: dict[str, type[Serializer]] = {}
+scipy_serializers: list[type[BaseSerializer]] = []
+scipy_serializers_by_type: dict[str, type[BaseSerializer]] = {}
 
 if importlib.util.find_spec("scipy") is not None:
+    from scipy import optimize
+
+    from misen.utils.type_registry import qualified_type_name
 
     class ScipySparseSerializer(Serializer[Any]):
         """Serialize scipy sparse matrices via ``save_npz``/``load_npz``."""
@@ -51,14 +63,21 @@ if importlib.util.find_spec("scipy") is not None:
             import scipy
             import scipy.sparse
 
-            scipy.sparse.save_npz(directory / "data.npz", obj)
+            with translate_errors(
+                f"Could not encode SciPy sparse matrix in {directory}", (OSError, TypeError, ValueError)
+            ):
+                scipy.sparse.save_npz(directory / "data.npz", obj)
             return {"scipy_version": scipy.__version__}
 
         @staticmethod
         def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import scipy.sparse
 
-            return scipy.sparse.load_npz(directory / "data.npz")
+            with translate_errors(
+                f"Could not decode SciPy sparse matrix in {directory}",
+                (OSError, EOFError, TypeError, ValueError, zipfile.BadZipFile),
+            ):
+                return scipy.sparse.load_npz(directory / "data.npz")
 
     class ScipyStatsFrozenSerializer(BaseSerializer[Any]):
         """Serialize frozen ``scipy.stats`` distributions by re-applying their constructor.
@@ -105,9 +124,12 @@ if importlib.util.find_spec("scipy") is not None:
                 msg = f"Unknown scipy.stats distribution {dist_name!r} on decode."
                 raise SerializationError(msg)
             dist = getattr(scipy.stats, dist_name)
-            args = ctx.decode(node.children["args"])
-            kwds = ctx.decode(node.children["kwds"])
-            return dist(*args, **kwds)
+            with translate_errors(
+                f"Could not reconstruct scipy.stats distribution {dist_name!r}", (KeyError, TypeError, ValueError)
+            ):
+                args = ctx.decode(node.children["args"])
+                kwds = ctx.decode(node.children["kwds"])
+                return dist(*args, **kwds)
 
     class ScipyInterpolatorSerializer(BaseSerializer[Any]):
         """Serialize PPoly/BPoly/BSpline (and PPoly subclasses) by their canonical attrs.
@@ -177,23 +199,26 @@ if importlib.util.find_spec("scipy") is not None:
             if not isinstance(node, Container):
                 msg = f"{qualified_type_name(cls)} expected a Container node, got {type(node).__name__}."
                 raise SerializationError(msg)
-            try:
+            with translate_errors(
+                f"Cannot import interpolator class {node.meta.get('cls')!r}", (ImportError, KeyError)
+            ):
                 target_cls = import_by_qualified_name(node.meta["cls"])
-            except (ImportError, KeyError) as exc:
-                msg = f"Cannot import interpolator class {node.meta.get('cls')!r}: {exc}"
-                raise SerializationError(msg) from exc
-            extrapolate = _decode_extrapolate(node.meta.get("extrapolate", True))
-            axis = int(node.meta.get("axis", 0))
-            kind = node.meta.get("kind")
-            if kind == "BSpline":
-                t = ctx.decode(node.children["t"])
-                c = ctx.decode(node.children["c"])
-                k = int(node.meta["k"])
-                return target_cls.construct_fast(t, c, k, extrapolate, axis)
-            if kind in ("PPoly", "BPoly"):
-                c = ctx.decode(node.children["c"])
-                x = ctx.decode(node.children["x"])
-                return target_cls.construct_fast(c, x, extrapolate, axis)
+            with translate_errors(
+                f"Could not reconstruct SciPy interpolator {node.meta.get('cls')!r}",
+                (AttributeError, KeyError, TypeError, ValueError),
+            ):
+                extrapolate = _decode_extrapolate(node.meta.get("extrapolate", True))
+                axis = int(node.meta.get("axis", 0))
+                kind = node.meta.get("kind")
+                if kind == "BSpline":
+                    t = ctx.decode(node.children["t"])
+                    c = ctx.decode(node.children["c"])
+                    k = int(node.meta["k"])
+                    return target_cls.construct_fast(t, c, k, extrapolate, axis)
+                if kind in ("PPoly", "BPoly"):
+                    c = ctx.decode(node.children["c"])
+                    x = ctx.decode(node.children["x"])
+                    return target_cls.construct_fast(c, x, extrapolate, axis)
             msg = f"Unknown interpolator kind {kind!r}"
             raise SerializationError(msg)
 
@@ -230,8 +255,12 @@ if importlib.util.find_spec("scipy") is not None:
                 raise SerializationError(msg)
             out = scipy.optimize.OptimizeResult()
             ctx.remember_node(node, out)
-            for k, v in node.children.items():
-                out[k] = ctx.decode(v)
+            with translate_errors(
+                "Could not reconstruct scipy.optimize.OptimizeResult",
+                (AttributeError, KeyError, TypeError, ValueError),
+            ):
+                for k, v in node.children.items():
+                    out[k] = ctx.decode(v)
             return out
 
     def _encode_extrapolate(value: Any) -> Any:
@@ -255,9 +284,6 @@ if importlib.util.find_spec("scipy") is not None:
     # sparse serializer relies on ``match()``.  Frozen distributions and
     # interpolators have many subclasses dispatched via the linear scan
     # too.  ``OptimizeResult`` has a stable concrete type — register it.
-    import scipy.optimize as _opt
-    from misen.utils.type_registry import qualified_type_name as _qname
-
     scipy_serializers_by_type = {
-        _qname(_opt.OptimizeResult): ScipyOptimizeResultSerializer,
+        qualified_type_name(optimize.OptimizeResult): ScipyOptimizeResultSerializer,
     }

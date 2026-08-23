@@ -19,12 +19,13 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar, cast
 
+from misen.exceptions import JobFailedError, JobFailure, StatusQueryError, StorageError, SubmissionError
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, task_label, work_unit_label
 from misen.utils.settings import Configurable
 from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
     from misen.task_metadata import Resources
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
-__all__ = ["Executor", "Job", "JobState", "bulk_job_states"]
+__all__ = ["Executor", "Job", "JobState", "bulk_job_states", "raise_for_failed_jobs"]
 
 ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
 JobState: TypeAlias = Literal["pending", "running", "done", "failed", "unknown"]
@@ -87,6 +88,13 @@ class Executor(Configurable, Generic[JobT]):
             published snapshot, per-job payloads, env-file copies) are
             retained in the workspace — payloads must outlive scheduler
             requeues, so nothing is deleted when a submit call ends.
+
+        Raises:
+            MisenError: If configuration, snapshots, storage, submission, or
+                status handling fails at a Misen-owned boundary.
+            JobFailedError: If a blocking submission contains failed jobs.
+            ValueError: If task resource requests cannot form a valid work
+                graph, such as an invalid Dask topology.
         """
         work_graph: DependencyGraph[WorkUnit] = build_work_graph(tasks=tasks)
         work_units = list(work_graph)
@@ -168,7 +176,7 @@ class Executor(Configurable, Generic[JobT]):
                             dispatched_job.job_id or "n/a",
                             time.perf_counter() - started_at,
                         )
-                    except Exception:
+                    except Exception as exc:
                         elapsed_s = time.perf_counter() - started_at
                         logger.exception(
                             "%s failed to dispatch %s after %.2fs.",
@@ -184,6 +192,16 @@ class Executor(Configurable, Generic[JobT]):
                             ),
                             style="bold red",
                         )
+                        submitted = tuple(job for job in jobs.values() if not isinstance(job, CompletedJob))
+                        if submitted and isinstance(exc, SubmissionError):
+                            msg = (
+                                f"Could not submit {work_unit_label(work_unit)} after "
+                                f"{len(submitted)} earlier job(s) were accepted: {exc}"
+                            )
+                            raise SubmissionError(msg, submitted_jobs=(*submitted, *exc.submitted_jobs)) from exc
+                        if submitted:
+                            labels = ", ".join(job.label for job in submitted)
+                            exc.add_note(f"Already submitted jobs: {labels}.")
                         raise
                     progress_bar(1)
 
@@ -217,12 +235,7 @@ class Executor(Configurable, Generic[JobT]):
                 states = bulk_job_states(blocking_jobs)
             logger.info("%s observed all blocking jobs reach terminal states.", executor_name)
 
-            failed_jobs = [job for job, state in states.items() if state == "failed"]
-            if failed_jobs:
-                failed_labels = ", ".join(job.label for job in failed_jobs)
-                msg = f"{executor_name} observed {len(failed_jobs)} failed job(s): {failed_labels}"
-                logger.error(msg)
-                runtime_event(msg, style="bold red")
+            raise_for_failed_jobs(states, context=executor_name)
 
         return job_graph
 
@@ -246,13 +259,13 @@ class Executor(Configurable, Generic[JobT]):
 class Job(ABC):
     """Abstract job handle returned by an executor backend.
 
-    Job-log lifecycle is owned by the worker that produces the log
-    (see :meth:`Workspace.streaming_job_log`), so this base class does
-    not participate in log finalization -- subclasses just implement
-    :meth:`state` directly.
+    Subclasses implement backend state queries; this base class supplies
+    bounded polling, failure diagnostics, and terminal log finalization.
     """
 
-    __slots__ = ("job_id", "log_path", "work_unit")
+    __slots__ = ("_failure_reason", "_log_finalized", "_unknown_since", "job_id", "log_path", "work_unit")
+
+    unknown_state_timeout_s: ClassVar[float] = 60.0
 
     job_id: str | None
     log_path: Path | None
@@ -269,6 +282,9 @@ class Job(ABC):
         self.work_unit = work_unit
         self.job_id = job_id
         self.log_path = log_path
+        self._failure_reason: str | None = None
+        self._log_finalized = False
+        self._unknown_since: float | None = None
 
     @property
     def root(self) -> Task:
@@ -284,6 +300,54 @@ class Job(ABC):
     def label(self) -> str:
         """Return compact human-readable label for this job."""
         return work_unit_label(self.work_unit)
+
+    @property
+    def failure(self) -> JobFailure:
+        """Return immutable diagnostic facts for this job."""
+        return JobFailure(
+            label=self.label,
+            job_id=self.job_id,
+            log_path=str(self.log_path) if self.log_path is not None else None,
+            reason=self._failure_reason,
+        )
+
+    def _record_failure(self, reason: str) -> None:
+        """Record a concise failure reason while retaining earlier diagnostics."""
+        if self._failure_reason is None:
+            self._failure_reason = reason
+        elif reason not in self._failure_reason:
+            self._failure_reason = f"{self._failure_reason} {reason}"
+
+    def _finalize_log(self, workspace: Workspace, *, failed: bool) -> None:
+        """Publish a terminal log without replacing an existing job failure."""
+        if self._log_finalized or self.log_path is None:
+            return
+        try:
+            workspace.finalize_job_log(self.log_path)
+        except (OSError, StorageError) as exc:
+            if not failed:
+                if isinstance(exc, StorageError):
+                    raise
+                msg = f"Could not finalize terminal job log {self.log_path}: {exc}"
+                raise StorageError(msg) from exc
+            self._record_failure(f"Additionally, finalizing log {self.log_path} failed: {type(exc).__name__}: {exc}")
+            logger.exception("Could not finalize the failed job log %s.", self.log_path)
+        else:
+            self._log_finalized = True
+
+    def _normalize_state(self, state: object, *, queried_at: float) -> JobState:
+        """Normalize one backend state and bound consecutive unknown results."""
+        resolved = cast("JobState", state) if isinstance(state, str) and state in _VALID_JOB_STATES else "unknown"
+        if resolved != "unknown":
+            self._unknown_since = None
+            return resolved
+        if self._unknown_since is None:
+            self._unknown_since = queried_at
+        elif queried_at - self._unknown_since >= self.unknown_state_timeout_s:
+            job_id = f" (job_id={self.job_id})" if self.job_id is not None else ""
+            msg = f"Could not determine status for {self.label}{job_id} for {self.unknown_state_timeout_s:g}s."
+            raise StatusQueryError(msg)
+        return "unknown"
 
     @abstractmethod
     def state(self) -> JobState:
@@ -310,32 +374,97 @@ class Job(ABC):
 
         Args:
             poll_s: Polling interval in seconds.
+
+        Raises:
+            StatusQueryError: If status cannot be determined within the retry
+                budget.
         """
-        while self.state() not in ("done", "failed"):
+        while bulk_job_states([self])[self] not in ("done", "failed"):
             time.sleep(poll_s)
+
+    def raise_for_status(self, state: JobState | None = None) -> None:
+        """Raise if this job has failed.
+
+        Args:
+            state: Previously queried state, avoiding another backend call.
+
+        Raises:
+            JobFailedError: If the resolved state is ``"failed"``.
+            StatusQueryError: If no state was supplied and querying it exceeds
+                the retry budget.
+        """
+        resolved_state = bulk_job_states([self])[self] if state is None else state
+        raise_for_failed_jobs({self: resolved_state})
 
 
 def bulk_job_states(jobs: Iterable[Job]) -> dict[Job, JobState]:
     """Return states for a heterogeneous set of jobs in as few calls as possible.
 
     Groups ``jobs`` by concrete class and dispatches one
-    :meth:`Job.bulk_state` call per class. If a class's ``bulk_state``
-    raises a known query error, every job in that group is reported as
-    ``"unknown"`` rather than letting the failure propagate.
+    :meth:`Job.bulk_state` call per class. Known backend query failures are
+    translated to :class:`StatusQueryError` so callers do not poll forever.
+
+    Raises:
+        StatusQueryError: If a backend keeps failing or returning unknown
+            states beyond its retry budget.
     """
     by_class: dict[type[Job], list[Job]] = {}
     for job in jobs:
         by_class.setdefault(type(job), []).append(job)
     result: dict[Job, JobState] = {}
     for klass, group in by_class.items():
+        query_error: BaseException | None = None
         try:
             states = klass.bulk_state(group)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, StatusQueryError) as exc:
+            if isinstance(exc, StatusQueryError) and not exc.retryable:
+                raise
             states = {}
-        result.update(
-            {job: state if (state := states.get(job, "unknown")) in _VALID_JOB_STATES else "unknown" for job in group}
-        )
+            query_error = exc
+        queried_at = time.monotonic()
+        try:
+            result.update(
+                {
+                    job: job._normalize_state(states.get(job, "unknown"), queried_at=queried_at)  # noqa: SLF001
+                    for job in group
+                }
+            )
+        except StatusQueryError:
+            if query_error is not None:
+                msg = f"Could not query {klass.__name__} job states: {query_error}"
+                raise StatusQueryError(msg) from query_error
+            raise
     return result
+
+
+def raise_for_failed_jobs(states: Mapping[Job, JobState], *, context: str | None = None) -> None:
+    """Raise one structured error when any queried job has failed.
+
+    Args:
+        states: Previously queried state for each job.
+        context: Optional executor or operation name for the summary.
+
+    Raises:
+        JobFailedError: If one or more states are ``"failed"``.
+    """
+    failures = tuple(job.failure for job, state in states.items() if state == "failed")
+    if not failures:
+        return
+
+    def describe(failure: JobFailure) -> str:
+        details: list[str] = []
+        if failure.job_id is not None:
+            details.append(f"job_id={failure.job_id}")
+        if failure.reason is not None:
+            details.append(failure.reason)
+        if failure.log_path is not None:
+            details.append(f"log={failure.log_path}")
+        return f"{failure.label} ({', '.join(details)})" if details else failure.label
+
+    prefix = f"{context} observed " if context is not None else ""
+    noun = "job" if len(failures) == 1 else "jobs"
+    msg = f"{prefix}{len(failures)} failed {noun}: {'; '.join(map(describe, failures))}"
+    raise JobFailedError(msg, failures=failures)
 
 
 class CompletedJob(Job):

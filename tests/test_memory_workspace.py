@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from misen import Task, meta
-from misen.exceptions import LockUnavailableError
+from misen.exceptions import CacheError, LockUnavailableError
 from misen.executors.in_process import InProcessExecutor
 from misen.utils.hashing import ResolvedTaskHash, ResultHash
 from misen.utils.settings import ConfigurableMeta
@@ -94,6 +94,20 @@ def test_hash_round_trip(tmp_path: Path) -> None:
 
     ws.set_result_hash(task, result)
     assert ws.get_result_hash(task) == result
+
+
+def test_clear_result_hash_is_idempotent_without_a_session_cache_entry(tmp_path: Path) -> None:
+    ws = InMemoryWorkspace(directory=str(tmp_path / "ws"))
+    task = Task(_doubler, x=3)
+    ws.set_resolved_hash(task, ResolvedTaskHash(1))
+    ws.set_result_hash(task, ResultHash(2))
+    ws._result_hashes.clear()
+
+    ws.clear_result_hash(task)
+    ws.clear_result_hash(task)
+
+    with pytest.raises(CacheError):
+        ws.get_result_hash(task)
 
 
 def test_lock_per_key_is_independent(tmp_path: Path) -> None:

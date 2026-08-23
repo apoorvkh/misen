@@ -3,15 +3,19 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import MagicMock
 
 import misen.executors.local as local_module
 from misen import Task, meta
+from misen.exceptions import StorageError
 from misen.executors.local import LocalJob
 from misen.utils.work_unit import WorkUnit
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from pathlib import Path
 
     import pytest
 
@@ -170,6 +174,83 @@ def test_failed_job_transitively_fails_dependents(monkeypatch: pytest.MonkeyPatc
     assert not scheduler._waiting
 
 
+def test_log_finalization_failure_only_fails_affected_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    scheduler = _scheduler(monkeypatch)
+    affected, sibling = _job(0), _job(1)
+    workspace = MagicMock()
+    workspace.finalize_job_log.side_effect = StorageError("object store unavailable")
+    affected.workspace = cast("Workspace", workspace)
+    affected.log_path = tmp_path / "affected.log"
+    affected._cached_state = "done"
+    affected.assigned_cpu_indices = [0]
+    sibling._cached_state = "running"
+    sibling_process = MagicMock()
+    sibling_process.poll.return_value = None
+    sibling._process = sibling_process
+    sibling.assigned_cpu_indices = [1]
+
+    scheduler.available_budget = scheduler.available_budget.subtract(affected.resources).subtract(sibling.resources)
+    scheduler.available_cpu_indices.clear()
+    scheduler._running[affected] = None
+    scheduler._running[sibling] = None
+
+    with scheduler._condition:
+        scheduler._collect_finished_locked()
+
+    assert affected._cached_state == "failed"
+    assert affected.failure.reason == "Finalizing the job log failed: object store unavailable"
+    assert affected not in scheduler._running
+    assert sibling in scheduler._running
+    assert scheduler._fatal_error is None
+    assert scheduler.available_budget.cpus == 1
+    assert scheduler.available_cpu_indices == [0]
+    workspace.finalize_job_log.assert_called_once_with(affected.log_path)
+
+
+def test_process_group_kill_uses_portable_popen_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = MagicMock()
+    monkeypatch.setattr(local_module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(local_module, "signal", SimpleNamespace(SIGTERM=15))
+
+    local_module._signal_process_group(process, "kill")
+
+    process.kill.assert_called_once_with()
+    process.terminate.assert_not_called()
+
+
+def test_process_group_kill_uses_killpg_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = MagicMock(spec=local_module.subprocess.Popen)
+    process.pid = 1234
+    fake_os = SimpleNamespace(name="posix", killpg=MagicMock())
+    monkeypatch.setattr(local_module, "os", fake_os)
+    monkeypatch.setattr(local_module, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
+
+    local_module._signal_process_group(process, "kill")
+
+    fake_os.killpg.assert_called_once_with(1234, 9)
+    process.kill.assert_not_called()
+
+
+def test_shutdown_force_kills_every_job_after_polling_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = _scheduler(monkeypatch)
+    failed_poll = MagicMock(spec=LocalJob)
+    sibling = MagicMock(spec=LocalJob)
+    failed_poll.state.side_effect = StorageError("log upload failed")
+    sibling.state.return_value = "running"
+    failed_poll.force_kill.return_value = True
+    sibling.force_kill.return_value = True
+    monkeypatch.setattr(local_module, "_SHUTDOWN_TERM_GRACE_S", 0.01)
+    scheduler._running = {failed_poll: None, sibling: None}
+
+    scheduler._terminate_running_jobs()
+
+    failed_poll.force_kill.assert_called_once()
+    sibling.force_kill.assert_called_once()
+
+
 def test_launch_failure_releases_resources_and_fails_dependents(monkeypatch: pytest.MonkeyPatch) -> None:
     scheduler = _scheduler(monkeypatch, cpus=1)
     parent = _job(0)
@@ -186,6 +267,8 @@ def test_launch_failure_releases_resources_and_fails_dependents(monkeypatch: pyt
         scheduler._tick_locked()
 
     assert parent.state() == child.state() == "failed"
+    assert parent.failure.reason == "Launch failed: RuntimeError: launch failed"
+    assert child.failure.reason == "A dependency failed."
     assert scheduler.available_budget.cpus == 1
     assert scheduler.available_cpu_indices == [0]
 

@@ -15,8 +15,7 @@ if importlib.util.find_spec("pydantic") is not None:
 
     def _is_pydantic_model(obj: Any) -> bool:
         return any(
-            base.__name__ == "BaseModel" and base.__module__.split(".")[0] == "pydantic"
-            for base in type(obj).__mro__
+            base.__name__ == "BaseModel" and base.__module__.split(".")[0] == "pydantic" for base in type(obj).__mro__
         )
 
     class PydanticModelHandler(CollectionHandler):

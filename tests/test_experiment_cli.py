@@ -10,8 +10,9 @@ import tyro
 import misen.cli as misen_cli
 import misen.utils.cli.experiment as experiment_module
 import misen.utils.cli.tui as tui_module
-from misen import CacheError, Experiment, Task, meta
-from misen.executor import Executor, Job
+from misen import CacheError, CliUsageError, Experiment, Task, meta
+from misen.exceptions import ExperimentReferenceError, JobFailedError
+from misen.executor import Executor, Job, JobState
 from misen.utils.cli.experiment import _resolve_command, experiment, experiment_cli
 from misen.utils.graph import DependencyGraph
 from misen.utils.runtime_events import task_label, work_unit_label
@@ -128,6 +129,43 @@ def test_experiment_command_reports_invalid_reference(capsys) -> None:
 
     assert exit_code == 2
     assert "Invalid experiment reference." in capsys.readouterr().err
+
+
+def test_named_task_resolution_preserves_errors_from_experiment_tasks() -> None:
+    class BrokenExperiment(Experiment):
+        def tasks(self) -> dict[str, Task[int]]:
+            raise KeyError("programmer bug")
+
+    with pytest.raises(KeyError, match="programmer bug"):
+        experiment_module._resolve_named_task(BrokenExperiment(), "task")
+
+
+def test_resolve_experiment_reference_wraps_missing_requested_module() -> None:
+    with pytest.raises(ExperimentReferenceError, match="could not be imported") as exc_info:
+        experiment_module.resolve_experiment_reference("misen_definitely_missing_module:Experiment")
+
+    assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
+
+
+@pytest.mark.parametrize(
+    ("exception_type", "statement"),
+    [
+        (ValueError, "raise ValueError('module setup failed')"),
+        (ImportError, "raise ImportError('module dependency failed')"),
+    ],
+)
+def test_experiment_reference_preserves_exceptions_from_user_module(
+    monkeypatch,
+    tmp_path,
+    exception_type: type[Exception],
+    statement: str,
+) -> None:
+    module_path = tmp_path / "broken_experiment.py"
+    module_path.write_text(statement, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(exception_type):
+        experiment(["broken_experiment.py:Experiment"])
 
 
 def test_resolve_experiment_class_prefers_local_src_module(monkeypatch, tmp_path) -> None:
@@ -316,7 +354,7 @@ def test_resolve_command_defaults_to_run() -> None:
 
 
 def test_resolve_command_rejects_invalid_command() -> None:
-    with pytest.raises(ValueError, match=r"Unknown command"):
+    with pytest.raises(CliUsageError, match=r"Unknown command"):
         _resolve_command(command_token="bad", unknown_args=[])
 
 
@@ -832,9 +870,8 @@ def test_experiment_cli_run_command_with_task_name(monkeypatch, tmp_path) -> Non
         def __init__(self, task: StubTask) -> None:
             self._task = task
 
-        def __getitem__(self, key: str) -> StubTask:
-            assert key == "task"
-            return self._task
+        def normalized_tasks(self) -> dict[str, StubTask]:
+            return {"task": self._task}
 
     first_args = SimpleNamespace(
         command="run",
@@ -971,7 +1008,7 @@ def test_experiment_cli_tree_command_rejects_unknown_task(monkeypatch, capsys) -
     monkeypatch.setattr(sys, "argv", ["prog", "tree", "missing"])
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: _StatusWorkspace(done_ids=set())))
 
-    with pytest.raises(ValueError, match=r"no task named 'missing'"):
+    with pytest.raises(CliUsageError, match=r"no task named 'missing'"):
         experiment_cli(CliExperiment)
 
 
@@ -1030,13 +1067,16 @@ def test_experiment_cli_result_command(monkeypatch, capsys, tmp_path) -> None:
     config_file = tmp_path / ".misen.toml"
     workspace = object()
 
-    def fake_result(key: str, workspace: object) -> str:
-        assert key == "task"
+    def fake_result(*, workspace: object) -> str:
         assert workspace is workspace_obj
         return "value"
 
+    class FakeExperiment:
+        def normalized_tasks(self) -> dict[str, object]:
+            return {"task": SimpleNamespace(result=fake_result)}
+
     workspace_obj = workspace
-    experiment = SimpleNamespace(result=fake_result)
+    experiment = FakeExperiment()
     first_args = SimpleNamespace(
         command="result",
         result_task=None,
@@ -1061,6 +1101,39 @@ def test_experiment_cli_result_command(monkeypatch, capsys, tmp_path) -> None:
     assert "value" in capsys.readouterr().out
 
 
+def test_experiment_cli_result_preserves_task_key_error(monkeypatch, tmp_path) -> None:
+    config_file = tmp_path / ".misen.toml"
+
+    def fail_result(*, workspace: object) -> None:
+        _ = workspace
+        raise KeyError("missing user data")
+
+    class FakeExperiment:
+        def normalized_tasks(self) -> dict[str, object]:
+            return {"task": SimpleNamespace(result=fail_result)}
+
+    first_args = SimpleNamespace(
+        command="result",
+        result_task=None,
+        config=config_file,
+        executor="auto",
+        workspace="auto",
+    )
+    second_args = SimpleNamespace(
+        command="result",
+        result_task="task",
+        config=config_file,
+        executor="auto",
+        workspace="auto",
+        experiment=FakeExperiment(),
+    )
+    _mock_cli(monkeypatch, first_args, second_args)
+    monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: object()))
+
+    with pytest.raises(KeyError, match="missing user data"):
+        experiment_cli(CliExperiment)
+
+
 def test_experiment_cli_result_command_requires_task_selector(monkeypatch, tmp_path) -> None:
     config_file = tmp_path / ".misen.toml"
     first_args = SimpleNamespace(
@@ -1081,7 +1154,7 @@ def test_experiment_cli_result_command_requires_task_selector(monkeypatch, tmp_p
     _mock_cli(monkeypatch, first_args, second_args)
     monkeypatch.setattr(Workspace, "auto", classmethod(lambda _cls, settings=None: object()))
 
-    with pytest.raises(ValueError, match=r"requires a task name"):
+    with pytest.raises(CliUsageError, match=r"requires a task name"):
         experiment_cli(CliExperiment)
 
 
@@ -1139,11 +1212,12 @@ def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> Non
         job_graph: DependencyGraph[Job],
         workspace: object,
         poll_interval_s: float = 0.2,
-    ) -> None:
+    ) -> dict[Job, JobState]:
         seen["named_tasks"] = named_tasks
         seen["job_graph"] = job_graph
         seen["workspace"] = workspace
         seen["poll_interval_s"] = poll_interval_s
+        return {job: "done" for job in job_graph.nodes()}
 
     workspace = object()
     monkeypatch.setattr(tui_module, "watch_tasks", fake_watch)
@@ -1155,6 +1229,30 @@ def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> Non
     assert seen["job_graph"] is graph
     assert seen["workspace"] is workspace
     assert set(cast("dict[str, Task[int]]", seen["named_tasks"]).keys()) == {"task"}
+
+
+def test_submit_and_watch_jobs_raises_for_failed_job(monkeypatch) -> None:
+    task = Task(source, x=1)
+    graph: DependencyGraph[Job] = DependencyGraph()
+    graph.add_node(FakeJob(work_unit=WorkUnit(root=task, dependencies=set()), states=["failed"]))
+
+    class StubExecutor:
+        def submit(self, **_kwargs: object) -> DependencyGraph[Job]:
+            return graph
+
+    class StubExperiment:
+        def normalized_tasks(self) -> dict[str, Task[int]]:
+            return {"task": task}
+
+    monkeypatch.setattr(tui_module, "watch_tasks", lambda **_kwargs: {job: "failed" for job in graph.nodes()})
+    with pytest.raises(JobFailedError) as exc_info:
+        tui_module.submit_and_watch_jobs(
+            experiment=StubExperiment(),
+            executor=StubExecutor(),
+            workspace=object(),
+        )
+
+    assert len(exc_info.value.failures) == 1
 
 
 def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monkeypatch) -> None:
@@ -1188,10 +1286,11 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
         job_graph: DependencyGraph[Job],
         workspace: object,
         poll_interval_s: float = 0.2,
-    ) -> None:
+    ) -> dict[Job, JobState]:
         _ = named_tasks, job_graph, workspace, poll_interval_s
         seen["during_watch"] = os.environ.get("MISEN_RUNTIME_EVENTS")
         seen["during_watch_job_board"] = os.environ.get("MISEN_RUNTIME_JOB_BOARD")
+        return {job: "done" for job in job_graph.nodes()}
 
     monkeypatch.delenv("MISEN_RUNTIME_EVENTS", raising=False)
     monkeypatch.delenv("MISEN_RUNTIME_JOB_BOARD", raising=False)
@@ -1248,19 +1347,23 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
 
     monkeypatch.setattr(_Console, "is_terminal", property(lambda _self: False))
     monkeypatch.setattr(tui_module.time, "sleep", lambda _: None)
-    tui_module.run_without_tui(experiment=StubExperiment(), executor=executor, workspace=object())
+    with pytest.raises(JobFailedError) as exc_info:
+        tui_module.run_without_tui(experiment=StubExperiment(), executor=executor, workspace=object())
 
     output = capsys.readouterr().err
     # The source is already done, but the monitor keeps polling until the sink
-    # advances through both nonterminal states, then polls once for the final
-    # tree. A foreground run cannot return while any job is still running.
-    assert source_job.state_calls == 4
-    assert sink_job.state_calls == 4
+    # advances through both nonterminal states. The terminal observation is
+    # reused for the final tree and failure check instead of being queried
+    # again. A foreground run cannot return while any job is still running.
+    assert source_job.state_calls == 3
+    assert sink_job.state_calls == 3
     assert "source(x=1)" in output
     assert "sink(x=2)" in output
     # Terminal states render without the trailing job graph bookkeeping.
     assert "complete" in output
     assert "failed" in output
+    assert len(exc_info.value.failures) == 1
+    assert "sink" in exc_info.value.failures[0].label
 
 
 def test_job_state_index_maps_roots_and_jobs() -> None:
@@ -1329,12 +1432,13 @@ def test_watch_tasks_uses_textual_runner(monkeypatch) -> None:
         workspace: object,
         poll_interval_s: float,
         state_poll_interval_s: float,
-    ) -> None:
+    ) -> dict[Job, JobState]:
         seen["named_tasks"] = named_tasks
         seen["job_graph"] = job_graph
         seen["workspace"] = workspace
         seen["poll_interval_s"] = poll_interval_s
         seen["state_poll_interval_s"] = state_poll_interval_s
+        return {job: "done" for job in job_graph.nodes()}
 
     monkeypatch.setattr(tui_module, "_run_textual_task_monitor", fake_run_textual)
 

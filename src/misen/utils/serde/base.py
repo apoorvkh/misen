@@ -36,7 +36,8 @@ Serializer shapes, by user audience:
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar
@@ -55,9 +56,25 @@ __all__ = [
     "Node",
     "Ref",
     "Serializer",
+    "translate_errors",
 ]
 
 T = TypeVar("T")
+
+
+@contextmanager
+def translate_errors(
+    message: str,
+    error_types: type[Exception] | tuple[type[Exception], ...],
+) -> Iterator[None]:
+    """Translate adapter-owned failures without hiding existing domain errors."""
+    try:
+        yield
+    except SerializationError:
+        raise
+    except error_types as exc:
+        detail = f"{message}: {exc}"
+        raise SerializationError(detail) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +252,12 @@ class LeafSerializer(BaseSerializer[T]):
 
     @classmethod
     def encode(cls, obj: T, ctx: "EncodeCtx") -> Node:
+        """Register *obj* as a batched leaf node."""
         return ctx.add_leaf(cls, cls.leaf_kind, cls.to_payload(obj), cls.to_meta(obj))
 
     @classmethod
     def decode(cls, node: Node, ctx: "DecodeCtx") -> T:
+        """Load the value represented by a batched leaf node."""
         if not isinstance(node, Leaf):
             msg = f"{qualified_type_name(cls)} expected a Leaf node, got {type(node).__name__}."
             raise SerializationError(msg)
@@ -274,10 +293,12 @@ class Serializer(BaseSerializer[T]):
 
     @classmethod
     def encode(cls, obj: T, ctx: "EncodeCtx") -> Node:
+        """Register *obj* as a directory-backed leaf node."""
         return ctx.add_directory_leaf(cls, obj)
 
     @classmethod
     def decode(cls, node: Node, ctx: "DecodeCtx") -> T:
+        """Load the value represented by a directory-backed leaf node."""
         if not isinstance(node, DirectoryLeaf):
             msg = f"{qualified_type_name(cls)} expected a DirectoryLeaf node, got {type(node).__name__}."
             raise SerializationError(msg)
@@ -299,6 +320,7 @@ class EncodeCtx:
     """
 
     def __init__(self, registry: Any) -> None:
+        """Initialize an encoding walk using *registry*."""
         self._registry = registry
         # Memo keyed on ``id(obj)`` — the user's reference to the root
         # object keeps every child alive for the whole walk, so no need
@@ -393,14 +415,17 @@ class EncodeCtx:
 
     @property
     def leaves_by_kind(self) -> Mapping[str, list[tuple[str, Any, Mapping[str, Any]]]]:
+        """Return batched leaves grouped by serialization kind."""
         return self._leaves
 
     @property
     def leaf_owners(self) -> Mapping[str, type[BaseSerializer]]:
+        """Return the serializer responsible for each leaf kind."""
         return self._leaf_owner
 
     @property
     def directory_leaves(self) -> list[tuple[type[BaseSerializer], str, Any]]:
+        """Return directory-backed leaves awaiting persistence."""
         return self._dir_leaves
 
 
@@ -414,6 +439,7 @@ class DecodeCtx:
     """
 
     def __init__(self, registry: Any, root_directory: Path, manifest: Mapping[str, Any]) -> None:
+        """Initialize a decoding walk rooted at *root_directory*."""
         self._registry = registry
         self._root = root_directory
         self._manifest = manifest

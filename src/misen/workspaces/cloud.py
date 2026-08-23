@@ -18,23 +18,29 @@ import shutil
 import tarfile
 import tempfile
 import threading
+import uuid
 from collections.abc import Iterator, MutableMapping
 from importlib.metadata import version as package_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TextIO, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Self, TextIO, TypeAlias, TypeVar, cast
 
 import msgspec
 import obstore as obs
+from obstore.exceptions import AlreadyExistsError
+from obstore.exceptions import BaseError as ObstoreError
 from obstore.store import AzureStore, GCSStore, S3Store
 from xxhash import xxh3_64_hexdigest
 
+from misen.exceptions import ConfigError, LockUnavailableError, StorageError
 from misen.utils.bootstrap_transport import render_python_transport
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
-from misen.utils.locks import ObjectStoreLock
+from misen.utils.locks import ObjectStoreLock, _cleanup_on_exit
 from misen.utils.serde import MANIFEST_FILENAME
-from misen.workspace import Workspace
+from misen.workspace import Workspace, _storage_errors
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from misen.tasks import Task
     from misen.utils.locks import LockLike
     from misen.utils.work_unit import WorkUnit
@@ -47,7 +53,36 @@ VT = TypeVar("VT", bound=Hash)
 CloudBackend: TypeAlias = Literal["s3", "gcs", "azure"]
 _CHUNKS = ".chunks"
 _STATE = ".state.json"
+_RESULT_POINTER_PREFIX = b"misen-result-v2:"
 logger = logging.getLogger(__name__)
+
+
+def _result_payload_prefix(remote_prefix: str, pointer: bytes) -> str:
+    """Resolve a committed generation pointer, preserving legacy layouts."""
+    if not pointer.startswith(_RESULT_POINTER_PREFIX):
+        return remote_prefix
+    generation = pointer.removeprefix(_RESULT_POINTER_PREFIX).decode("ascii")
+    if uuid.UUID(hex=generation).hex != generation:
+        msg = f"Invalid result generation {generation!r}."
+        raise ValueError(msg)
+    return f"{remote_prefix}/.builds/{generation}"
+
+
+def _require_result_manifest(directory: Path, key: ResultHash) -> None:
+    if not (directory / MANIFEST_FILENAME).is_file():
+        msg = f"Committed result {key.b32()} has no {MANIFEST_FILENAME}."
+        raise StorageError(msg)
+
+
+@contextlib.contextmanager
+def _cloud_errors(
+    operation: str,
+    *extra: type[BaseException],
+    passthrough: tuple[type[BaseException], ...] = (),
+) -> Iterator[None]:
+    """Translate local/object-store failures at a cloud boundary."""
+    with _storage_errors(operation, OSError, ObstoreError, *extra, passthrough=passthrough):
+        yield
 
 
 # --------------------------------------------------------------------------
@@ -204,41 +239,66 @@ class ObstoreMapping(MutableMapping[KT, VT], Generic[KT, VT]):
 
     def __getitem__(self, key: KT) -> VT:
         try:
-            return self._value_type.decode(bytes(obs.get(self._store, f"{self._prefix}/{key.b32()}").bytes()))
+            with _cloud_errors(
+                f"Could not read stored value for {key!r}",
+                passthrough=(FileNotFoundError,),
+            ):
+                return self._value_type.decode(bytes(obs.get(self._store, f"{self._prefix}/{key.b32()}").bytes()))
         except FileNotFoundError as e:
             raise KeyError(key) from e
+        except ValueError as exc:
+            msg = f"Stored value for {key!r} is corrupt or incompatible."
+            raise StorageError(msg) from exc
 
     def __setitem__(self, key: KT, value: VT) -> None:
-        obs.put(self._store, f"{self._prefix}/{key.b32()}", value.encode(), mode="overwrite")
+        with _cloud_errors(f"Could not persist stored value for {key!r}"):
+            obs.put(self._store, f"{self._prefix}/{key.b32()}", value.encode(), mode="overwrite")
+
+    def commit(self, key: KT, value: VT, *, before_commit: Callable[[], None]) -> None:
+        """Create a fenced, write-once index entry without stale overwrites."""
+        try:
+            with _cloud_errors(
+                f"Could not persist stored value for {key!r}",
+                passthrough=(AlreadyExistsError,),
+            ):
+                before_commit()
+                obs.put(self._store, f"{self._prefix}/{key.b32()}", value.encode(), mode="create")
+        except AlreadyExistsError:
+            if self[key] != value:
+                msg = f"Another writer committed a different value for {key!r}."
+                raise LockUnavailableError(msg) from None
 
     def __delitem__(self, key: KT) -> None:
         path = f"{self._prefix}/{key.b32()}"
         try:
-            obs.head(self._store, path)
+            with _cloud_errors(f"Could not delete stored value for {key!r}", passthrough=(FileNotFoundError,)):
+                obs.head(self._store, path)
+                obs.delete(self._store, path)
         except FileNotFoundError as e:
             raise KeyError(key) from e
-        obs.delete(self._store, path)
 
     def __contains__(self, key: object) -> bool:
         if not isinstance(key, self._key_type):
             return False
         try:
-            obs.head(self._store, f"{self._prefix}/{key.b32()}")
+            with _cloud_errors(f"Could not inspect stored value for {key!r}", passthrough=(FileNotFoundError,)):
+                obs.head(self._store, f"{self._prefix}/{key.b32()}")
         except FileNotFoundError:
             return False
         return True
 
     def __iter__(self) -> Iterator[KT]:
         prefix = f"{self._prefix}/"
-        for batch in obs.list(self._store, prefix=prefix):
-            for entry in batch:
-                rel = entry["path"][len(prefix) :]
-                if not rel:
-                    continue
-                try:
-                    yield self._key_type.from_b32(rel)
-                except (binascii.Error, ValueError, TypeError):
-                    continue
+        with _cloud_errors(f"Could not list stored values under {self._prefix}"):
+            for batch in obs.list(self._store, prefix=prefix):
+                for entry in batch:
+                    rel = entry["path"][len(prefix) :]
+                    if not rel:
+                        continue
+                    try:
+                        yield self._key_type.from_b32(rel)
+                    except (binascii.Error, ValueError, TypeError):
+                        continue
 
     def __len__(self) -> int:
         return sum(1 for _ in self)
@@ -253,52 +313,73 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
         self._store = store
         self._prefix = prefix.rstrip("/")
         self._cache_dir = cache_dir
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        with _storage_errors(f"Could not initialize result cache at {self._cache_dir}"):
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     def __contains__(self, key: object) -> bool:
         if not isinstance(key, ResultHash):
             return False
-        if (self._cache_dir / key.b32()).exists():
+        with _storage_errors(f"Could not inspect the local cache for result {key.b32()}"):
+            cached = (self._cache_dir / key.b32()).exists()
+        if cached:
             return True
         try:
-            obs.head(self._store, f"{self._prefix}/{key.b32()}/{MANIFEST_FILENAME}")
+            with _cloud_errors(f"Could not inspect result {key.b32()}", passthrough=(FileNotFoundError,)):
+                obs.head(self._store, f"{self._prefix}/{key.b32()}/{MANIFEST_FILENAME}")
         except FileNotFoundError:
             return False
         return True
 
     def __getitem__(self, key: ResultHash) -> Path:
         local = self._cache_dir / key.b32()
-        if local.exists():
+        with _storage_errors(f"Could not inspect the local cache for result {key.b32()}"):
+            cached = local.exists()
+        if cached:
             return local
 
         remote_prefix = f"{self._prefix}/{key.b32()}"
         try:
-            obs.head(self._store, f"{remote_prefix}/{MANIFEST_FILENAME}")
+            with _cloud_errors(
+                f"Could not inspect result {key.b32()}",
+                UnicodeError,
+                ValueError,
+                passthrough=(FileNotFoundError,),
+            ):
+                pointer = bytes(obs.get(self._store, f"{remote_prefix}/{MANIFEST_FILENAME}").bytes())
+                payload_prefix = _result_payload_prefix(remote_prefix, pointer)
         except FileNotFoundError as e:
             raise KeyError(key) from e
 
-        tmp = Path(tempfile.mkdtemp(dir=self._cache_dir, prefix=f".{key.b32()}.", suffix=".tmp"))
+        with _storage_errors(f"Could not create a local cache directory for result {key.b32()}"):
+            tmp = Path(tempfile.mkdtemp(dir=self._cache_dir, prefix=f".{key.b32()}.", suffix=".tmp"))
         try:
-            for batch in obs.list(self._store, prefix=f"{remote_prefix}/"):
-                for entry in batch:
-                    rel = entry["path"][len(remote_prefix) + 1 :]
-                    if not rel:
-                        continue
-                    target = tmp / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(bytes(obs.get(self._store, entry["path"]).bytes()))
-            tmp.rename(local)
+            with _cloud_errors(f"Could not materialize result {key.b32()}", passthrough=(FileExistsError,)):
+                for batch in obs.list(self._store, prefix=f"{payload_prefix}/"):
+                    for entry in batch:
+                        rel = entry["path"][len(payload_prefix) + 1 :]
+                        if not rel or (payload_prefix == remote_prefix and rel.startswith(".builds/")):
+                            continue
+                        target = tmp / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(bytes(obs.get(self._store, entry["path"]).bytes()))
+                _require_result_manifest(tmp, key)
+                tmp.rename(local)
         except FileExistsError:
             shutil.rmtree(tmp, ignore_errors=True)
-        except Exception:
+        except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
         return local
 
     def __setitem__(self, key: ResultHash, value: Path) -> None:
+        self.commit(key, value, before_commit=lambda: None)
+
+    def commit(self, key: ResultHash, value: Path, *, before_commit: Callable[[], None]) -> None:
+        """Upload to an immutable generation, then atomically publish its pointer."""
         remote_prefix = f"{self._prefix}/{key.b32()}"
         try:
-            obs.head(self._store, f"{remote_prefix}/{MANIFEST_FILENAME}")
+            with _cloud_errors(f"Could not inspect result {key.b32()}", passthrough=(FileNotFoundError,)):
+                obs.head(self._store, f"{remote_prefix}/{MANIFEST_FILENAME}")
         except FileNotFoundError:
             pass
         else:
@@ -308,35 +389,74 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
         if not manifest.is_file():
             raise FileNotFoundError(manifest)
 
-        for path in sorted(p for p in value.rglob("*") if p.is_file() and p != manifest):
-            with path.open("rb") as f:
-                obs.put(self._store, f"{remote_prefix}/{path.relative_to(value).as_posix()}", f, mode="overwrite")
-        with manifest.open("rb") as f:
-            obs.put(self._store, f"{remote_prefix}/{MANIFEST_FILENAME}", f, mode="overwrite")
+        generation = uuid.uuid4().hex
+        build_prefix = f"{remote_prefix}/.builds/{generation}"
+        uploaded: list[str] = []
+
+        def discard_generation() -> None:
+            if not uploaded:
+                return
+            try:
+                obs.delete(self._store, uploaded)
+            except (OSError, ObstoreError):
+                logger.warning("Could not remove unpublished result generation %s.", build_prefix, exc_info=True)
+
+        try:
+            with _cloud_errors(f"Could not upload result {key.b32()}"):
+                for path in sorted(p for p in value.rglob("*") if p.is_file()):
+                    remote_path = f"{build_prefix}/{path.relative_to(value).as_posix()}"
+                    with path.open("rb") as f:
+                        obs.put(self._store, remote_path, f, mode="overwrite")
+                    uploaded.append(remote_path)
+            before_commit()
+        except BaseException:
+            discard_generation()
+            raise
+
+        try:
+            with _cloud_errors(
+                f"Could not publish result {key.b32()}",
+                passthrough=(AlreadyExistsError,),
+            ):
+                obs.put(
+                    self._store,
+                    f"{remote_prefix}/{MANIFEST_FILENAME}",
+                    _RESULT_POINTER_PREFIX + generation.encode(),
+                    mode="create",
+                )
+        except AlreadyExistsError:
+            discard_generation()
 
     def __delitem__(self, key: ResultHash) -> None:
         prefix = f"{self._prefix}/{key.b32()}/"
-        keys = [entry["path"] for batch in obs.list(self._store, prefix=prefix) for entry in batch]
-        local = self._cache_dir / key.b32()
-        if not keys and not local.exists():
-            raise KeyError(key)
-        if keys:
-            obs.delete(self._store, keys)
-        shutil.rmtree(local, ignore_errors=True)
+        with _cloud_errors(f"Could not delete result {key.b32()}"):
+            keys = [entry["path"] for batch in obs.list(self._store, prefix=prefix) for entry in batch]
+            local = self._cache_dir / key.b32()
+            commit_key = f"{prefix}{MANIFEST_FILENAME}"
+            if commit_key not in keys and not local.exists():
+                raise KeyError(key)
+            if commit_key in keys:
+                obs.delete(self._store, [commit_key])
+                keys.remove(commit_key)
+            if keys:
+                obs.delete(self._store, keys)
+            with contextlib.suppress(FileNotFoundError):
+                shutil.rmtree(local)
 
     def __iter__(self) -> Iterator[ResultHash]:
         prefix = f"{self._prefix}/"
         b32_len = len(ResultHash(0).b32())
-        for batch in obs.list(self._store, prefix=prefix):
-            for entry in batch:
-                rel = entry["path"][len(prefix) :]
-                head, sep, tail = rel.partition("/")
-                if sep != "/" or tail != MANIFEST_FILENAME or len(head) != b32_len:
-                    continue
-                try:
-                    yield ResultHash.from_b32(head)
-                except (binascii.Error, ValueError, TypeError):
-                    continue
+        with _cloud_errors(f"Could not list results under {self._prefix}"):
+            for batch in obs.list(self._store, prefix=prefix):
+                for entry in batch:
+                    rel = entry["path"][len(prefix) :]
+                    head, sep, tail = rel.partition("/")
+                    if sep != "/" or tail != MANIFEST_FILENAME or len(head) != b32_len:
+                        continue
+                    try:
+                        yield ResultHash.from_b32(head)
+                    except (binascii.Error, ValueError, TypeError):
+                        continue
 
     def __len__(self) -> int:
         return sum(1 for _ in self)
@@ -362,8 +482,10 @@ class _ScratchDirSync:
     """
 
     __slots__ = (
+        "_finalized",
         "_interval_s",
         "_known",
+        "_lifecycle_lock",
         "_local_dir",
         "_remote_prefix",
         "_stop",
@@ -379,6 +501,8 @@ class _ScratchDirSync:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._known: dict[str, tuple[int, float]] = {}
+        self._lifecycle_lock = threading.Lock()
+        self._finalized = False
 
     def restore(self) -> None:
         """Download the remote snapshot into the local dir."""
@@ -399,19 +523,28 @@ class _ScratchDirSync:
                 self._known[rel] = (stat.st_size, stat.st_mtime)
 
     def start(self) -> None:
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            daemon=True,
-            name=f"misen-scratch-sync[{self._remote_prefix}]",
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._finalized = False
+            self._thread = threading.Thread(
+                target=self._run,
+                daemon=True,
+                name=f"misen-scratch-sync[{self._remote_prefix}]",
+            )
+            self._thread.start()
+
+    @property
+    def active(self) -> bool:
+        """Return whether periodic sync is running and accepting more work."""
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_s):
             try:
                 self._sync_once()
-            except Exception:
+            except (OSError, ObstoreError):
                 logger.exception("Scratch dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
 
     def _sync_once(self) -> None:
@@ -445,21 +578,65 @@ class _ScratchDirSync:
             del self._known[rel]
 
     def stop(self, *, final_upload: bool = True) -> None:
-        self._stop.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=max(self._interval_s * 2, 2.0))
-        self._thread = None
-        if final_upload:
-            try:
+        """Stop periodic syncing and durably publish the terminal state.
+
+        Raises:
+            StorageError: If the requested final sync cannot access the local
+                directory or backing object store.
+        """
+        with self._lifecycle_lock:
+            self._stop.set()
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                timeout_s = max(self._interval_s * 2, 2.0)
+                thread.join(timeout=timeout_s)
+                if thread.is_alive():
+                    msg = f"Scratch sync for {self._local_dir} did not stop within {timeout_s:g}s."
+                    raise StorageError(msg)
+            self._thread = None
+            if not final_upload:
+                self._finalized = True
+                return
+            if self._finalized:
+                return
+            with _cloud_errors(f"Could not finalize scratch directory {self._local_dir} to {self._remote_prefix}"):
                 self._sync_once()
-            except Exception:
-                logger.exception("Final scratch dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
+            self._finalized = True
+
+    def finalize_current_tree(self) -> None:
+        """Mirror the current local tree after an earlier owner was closed.
+
+        This is used when ``CloudWorkspace.close()`` raced with the task
+        finalizer.  Seeding every remote key with an impossible local stat
+        makes the final sweep both upload every extant local file and delete
+        remote files that the task removed after ``close()`` returned.
+        """
+        with self._lifecycle_lock:
+            prefix = f"{self._remote_prefix}/"
+            with _cloud_errors(f"Could not finalize scratch directory {self._local_dir} to {self._remote_prefix}"):
+                for batch in obs.list(self._store, prefix=prefix):
+                    for entry in batch:
+                        rel = entry["path"][len(prefix) :]
+                        if rel:
+                            self._known[rel] = (-1, -1.0)
+                self._sync_once()
+            self._finalized = True
 
 
 class _LiveLogUploader:
     """Upload appended log chunks in the background, then compact on close."""
 
-    __slots__ = ("_interval_s", "_local_path", "_remote_key", "_stop", "_store", "_thread", "_uploaded_offset")
+    __slots__ = (
+        "_finalized",
+        "_interval_s",
+        "_lifecycle_lock",
+        "_local_path",
+        "_remote_key",
+        "_stop",
+        "_store",
+        "_thread",
+        "_uploaded_offset",
+    )
 
     def __init__(self, store: Any, local_path: Path, remote_key: str, interval_s: float) -> None:
         self._store = store
@@ -469,43 +646,57 @@ class _LiveLogUploader:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._uploaded_offset = 0
+        self._lifecycle_lock = threading.Lock()
+        self._finalized = False
 
     def start(self) -> None:
-        self._stop.clear()
-        self._delete_live_objects()
-        self._thread = threading.Thread(target=self._run, daemon=True, name=f"misen-log-upload[{self._remote_key}]")
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._delete_live_objects()
+            self._finalized = False
+            self._thread = threading.Thread(target=self._run, daemon=True, name=f"misen-log-upload[{self._remote_key}]")
+            self._thread.start()
+
+    @property
+    def active(self) -> bool:
+        """Return whether live upload is running and accepting more work."""
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_s):
             try:
-                size = self._local_path.stat().st_size
-            except FileNotFoundError:
-                continue
-            if size < self._uploaded_offset:
-                self._delete_live_objects()
-                self._uploaded_offset = 0
-            if size <= self._uploaded_offset:
-                continue
-
-            offset = self._uploaded_offset
-            try:
-                with self._local_path.open("rb") as f:
-                    f.seek(offset)
-                    payload = f.read()
-                if not payload:
-                    continue
-                new_offset = offset + len(payload)
-                obs.put(self._store, f"{self._remote_key}{_CHUNKS}/{offset:020d}.chunk", payload, mode="overwrite")
-                obs.put(
-                    self._store,
-                    f"{self._remote_key}{_STATE}",
-                    msgspec.json.encode({"offset": new_offset, "closed": False}),
-                    mode="overwrite",
-                )
-                self._uploaded_offset = new_offset
-            except Exception:
+                self._upload_once()
+            except (OSError, ObstoreError):
                 logger.exception("Live chunk upload failed for %s -> %s.", self._local_path, self._remote_key)
+
+    def _upload_once(self) -> None:
+        try:
+            size = self._local_path.stat().st_size
+        except FileNotFoundError:
+            return
+        if size < self._uploaded_offset:
+            self._delete_live_objects()
+            self._uploaded_offset = 0
+        if size <= self._uploaded_offset:
+            return
+
+        offset = self._uploaded_offset
+        with self._local_path.open("rb") as f:
+            f.seek(offset)
+            payload = f.read()
+        if not payload:
+            return
+        new_offset = offset + len(payload)
+        obs.put(self._store, f"{self._remote_key}{_CHUNKS}/{offset:020d}.chunk", payload, mode="overwrite")
+        obs.put(
+            self._store,
+            f"{self._remote_key}{_STATE}",
+            msgspec.json.encode({"offset": new_offset, "closed": False}),
+            mode="overwrite",
+        )
+        self._uploaded_offset = new_offset
 
     def _delete_live_objects(self) -> None:
         keys = [
@@ -518,27 +709,41 @@ class _LiveLogUploader:
             obs.delete(self._store, keys)
 
     def compact(self) -> None:
-        if not self._local_path.exists():
-            return
+        """Publish the canonical final log and remove superseded live chunks.
+
+        Raises:
+            StorageError: If the local log or backing object store cannot be
+                accessed while publishing the final log.
+        """
         try:
-            with self._local_path.open("rb") as f:
-                obs.put(self._store, self._remote_key, f, mode="overwrite")
-            self._uploaded_offset = self._local_path.stat().st_size
-        except Exception:
-            logger.exception("Final log compaction failed for %s -> %s.", self._local_path, self._remote_key)
+            with _cloud_errors(
+                f"Could not finalize log {self._local_path} to {self._remote_key}",
+                passthrough=(FileNotFoundError,),
+            ):
+                with self._local_path.open("rb") as local_file:
+                    obs.put(self._store, self._remote_key, local_file, mode="overwrite")
+                self._uploaded_offset = self._local_path.stat().st_size
+        except FileNotFoundError:
             return
         try:
             self._delete_live_objects()
-        except Exception:
+        except (OSError, ObstoreError):
             logger.exception("Compacted %s, but live-log cleanup failed for %s.", self._local_path, self._remote_key)
 
     def stop(self, *, final_upload: bool = True) -> None:
-        self._stop.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=max(self._interval_s * 2, 2.0))
-        self._thread = None
-        if final_upload:
-            self.compact()
+        with self._lifecycle_lock:
+            self._stop.set()
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                timeout_s = max(self._interval_s * 2, 2.0)
+                thread.join(timeout=timeout_s)
+                if thread.is_alive():
+                    msg = f"Log uploader for {self._local_path} did not stop within {timeout_s:g}s."
+                    raise StorageError(msg)
+            self._thread = None
+            if final_upload and not self._finalized:
+                self.compact()
+                self._finalized = True
 
 
 class CloudWorkspace(Workspace):
@@ -553,6 +758,7 @@ class CloudWorkspace(Workspace):
     cache_dir: str = ".cache/misen"
     log_flush_interval_s: float = 1.0
     scratch_dir_sync_interval_s: float = 30.0
+    _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
 
     def __post_init__(self) -> None:
         if self.log_flush_interval_s <= 0:
@@ -568,18 +774,30 @@ class CloudWorkspace(Workspace):
             msg = "endpoint is not supported for backend='gcs'."
             raise ValueError(msg)
 
-        self._store = self._build_store()
+        with _cloud_errors(f"Could not initialize {self.backend} object store for bucket {self.bucket!r}"):
+            self._store = self._build_store()
         self._cloud_prefix = self.prefix.strip("/")
         # Append a deterministic id so distinct workspaces never share cache.
         # Two workspaces with identical identity-affecting fields collapse to
         # the same subdir, which is exactly when sharing is safe.
         self._cache = Path(self.cache_dir) / self.workspace_id
-        for subdir in ("tmp", "scratch", "task_logs", "task_log_cache", "job_logs", "job_log_cache", "results_cache"):
-            (self._cache / subdir).mkdir(parents=True, exist_ok=True)
+        with _storage_errors(f"Could not initialize the cloud workspace cache at {self._cache}"):
+            for subdir in (
+                "tmp",
+                "scratch",
+                "task_logs",
+                "task_log_cache",
+                "job_logs",
+                "job_log_cache",
+                "results_cache",
+            ):
+                (self._cache / subdir).mkdir(parents=True, exist_ok=True)
         self._live_log_uploaders: dict[Path, _LiveLogUploader] = {}
         self._live_log_lock = threading.Lock()
         self._scratch_dir_syncs: dict[str, _ScratchDirSync] = {}
         self._scratch_dir_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._closed = False
 
         super()._post_init(
             resolved_hash_cache=ObstoreMapping[TaskHash, ResolvedTaskHash](
@@ -676,7 +894,7 @@ class CloudWorkspace(Workspace):
                 "visible through the executor or scheduler. Configure worker authentication and obstore options "
                 "through the ambient worker environment, or use a custom workspace transport."
             )
-            raise ValueError(msg)
+            raise ConfigError(msg)
         return render_python_transport(
             self._bootstrap_transport,
             requirements=(f"obstore=={package_version('obstore')}",),
@@ -714,21 +932,28 @@ class CloudWorkspace(Workspace):
         return self._cache / "snapshots" / key
 
     def publish_snapshot(self, key: str, staged_dir: Path) -> None:
-        try:
-            obs.head(self._store, _snapshot_object_key(self._cloud_prefix, key))
-        except FileNotFoundError:
-            buffer = io.BytesIO()
-            with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-                tar.add(staged_dir, arcname=".")
-            obs.put(self._store, _snapshot_object_key(self._cloud_prefix, key), buffer.getbuffer(), mode="overwrite")
-        local = self._snapshot_cache_dir(key)
-        if not local.exists():
-            local.parent.mkdir(parents=True, exist_ok=True)
-            with contextlib.suppress(OSError):
-                staged_dir.rename(local)
+        with _cloud_errors(f"Could not publish snapshot {key}", tarfile.TarError):
+            try:
+                obs.head(self._store, _snapshot_object_key(self._cloud_prefix, key))
+            except FileNotFoundError:
+                buffer = io.BytesIO()
+                with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+                    tar.add(staged_dir, arcname=".")
+                obs.put(
+                    self._store,
+                    _snapshot_object_key(self._cloud_prefix, key),
+                    buffer.getbuffer(),
+                    mode="overwrite",
+                )
+            local = self._snapshot_cache_dir(key)
+            if not local.exists():
+                local.parent.mkdir(parents=True, exist_ok=True)
+                with contextlib.suppress(OSError):
+                    staged_dir.rename(local)
 
     def fetch_snapshot(self, key: str) -> Path:
-        return _download_snapshot(self._store, self._cloud_prefix, key, self._snapshot_cache_dir(key))
+        with _cloud_errors(f"Could not fetch snapshot {key}", tarfile.TarError, passthrough=(FileNotFoundError,)):
+            return _download_snapshot(self._store, self._cloud_prefix, key, self._snapshot_cache_dir(key))
 
     # -- job files ------------------------------------------------------
 
@@ -737,7 +962,8 @@ class CloudWorkspace(Workspace):
             msg = f"Invalid job-file name: {name!r}"
             raise ValueError(msg)
         ref = self._under("job_files", submission_id, name)
-        obs.put(self._store, ref, data, mode="overwrite")
+        with _cloud_errors(f"Could not publish job file {name!r}"):
+            obs.put(self._store, ref, data, mode="overwrite")
         return ref
 
     def _get_scratch_dir(self, task: Task) -> Path:
@@ -751,28 +977,47 @@ class CloudWorkspace(Workspace):
     def start_scratch_dir_sync(self, task: Task) -> None:
         if not task.meta.cache:
             return
-        local_path = self._get_scratch_dir(task)
+        local_path = self.get_scratch_dir(task)
         remote_prefix = self._scratch_dir_remote_prefix(task)
         key = task.resolved_hash(workspace=self).b32()
-        with self._scratch_dir_lock:
-            if key in self._scratch_dir_syncs:
-                return
+        with self._lifecycle_lock, self._scratch_dir_lock:
+            if self._closed:
+                msg = "Cannot start scratch sync on a closed CloudWorkspace."
+                raise StorageError(msg)
+            existing = self._scratch_dir_syncs.get(key)
+            if existing is not None:
+                if existing.active:
+                    return
+                existing.stop(final_upload=True)
+                del self._scratch_dir_syncs[key]
             sync = _ScratchDirSync(self._store, local_path, remote_prefix, self.scratch_dir_sync_interval_s)
+            with _cloud_errors(f"Could not start scratch sync for {local_path}"):
+                sync.restore()
+                sync.start()
             self._scratch_dir_syncs[key] = sync
-        sync.restore()
-        sync.start()
 
     def finalize_scratch_dir(self, task: Task) -> None:
         if not task.meta.cache:
             return
         key = task.resolved_hash(workspace=self).b32()
-        with self._scratch_dir_lock:
-            sync = self._scratch_dir_syncs.pop(key, None)
-        if sync is not None:
-            sync.stop(final_upload=True)
+        with self._lifecycle_lock, self._scratch_dir_lock:
+            sync = self._scratch_dir_syncs.get(key)
+            if sync is not None:
+                sync.stop(final_upload=True)
+                del self._scratch_dir_syncs[key]
+            else:
+                # A producer may keep writing after close; its own finalizer
+                # remains the true commit point and performs an exact mirror.
+                _ScratchDirSync(
+                    self._store,
+                    self.get_scratch_dir(task),
+                    self._scratch_dir_remote_prefix(task),
+                    self.scratch_dir_sync_interval_s,
+                ).finalize_current_tree()
 
     def _delete_scratch_dir_remote(self, remote_prefix: str) -> None:
-        _delete_prefix(self._store, f"{remote_prefix}/")
+        with _cloud_errors(f"Could not remove remote scratch directory {remote_prefix}"):
+            _delete_prefix(self._store, f"{remote_prefix}/")
 
     def remove_scratch_dir(self, task: Task) -> None:
         if not task.meta.cache:
@@ -780,13 +1025,15 @@ class CloudWorkspace(Workspace):
             raise RuntimeError(msg)
         key = task.resolved_hash(workspace=self).b32()
         with self._scratch_dir_lock:
-            sync = self._scratch_dir_syncs.pop(key, None)
-        if sync is not None:
-            sync.stop(final_upload=False)
+            sync = self._scratch_dir_syncs.get(key)
+            if sync is not None:
+                sync.stop(final_upload=False)
+                del self._scratch_dir_syncs[key]
         self._delete_scratch_dir_remote(self._scratch_dir_remote_prefix(task))
         local_path = self._cache / "scratch" / key
-        if local_path.exists():
-            shutil.rmtree(local_path)
+        with _storage_errors(f"Could not remove local scratch directory {local_path}"):
+            if local_path.exists():
+                shutil.rmtree(local_path)
 
     def _task_log_paths(self, task: Task, job_id: str) -> tuple[Path, Path, str]:
         """Return ``(writer_path, cache_path, remote_key)`` for a task log.
@@ -810,8 +1057,9 @@ class CloudWorkspace(Workspace):
         key = task.resolved_hash(workspace=self).b32()
         writer_dir = self._cache / "task_logs" / key
         cache_dir = self._cache / "task_log_cache" / key
-        writer_dir.mkdir(parents=True, exist_ok=True)
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        with _storage_errors(f"Could not prepare task-log directories for {key}"):
+            writer_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir.mkdir(parents=True, exist_ok=True)
         return (
             writer_dir / f"{job_id}.log",
             cache_dir / f"{job_id}.log",
@@ -819,31 +1067,51 @@ class CloudWorkspace(Workspace):
         )
 
     def _start_live_upload(self, local_path: Path, remote_key: str) -> None:
-        with self._live_log_lock:
-            if local_path in self._live_log_uploaders:
-                return
+        with self._lifecycle_lock, self._live_log_lock:
+            if self._closed:
+                msg = "Cannot start a log uploader on a closed CloudWorkspace."
+                raise StorageError(msg)
+            existing = self._live_log_uploaders.get(local_path)
+            if existing is not None:
+                if existing.active:
+                    return
+                existing.stop(final_upload=True)
+                del self._live_log_uploaders[local_path]
             uploader = _LiveLogUploader(self._store, local_path, remote_key, self.log_flush_interval_s)
-            uploader.start()
+            with _cloud_errors(f"Could not start log uploader for {local_path}"):
+                uploader.start()
             self._live_log_uploaders[local_path] = uploader
 
-    def _stop_live_upload(self, local_path: Path) -> None:
-        with self._live_log_lock:
-            uploader = self._live_log_uploaders.pop(local_path, None)
-        if uploader is not None:
-            uploader.stop(final_upload=True)
+    def _stop_live_upload(self, local_path: Path, remote_key: str | None = None) -> None:
+        with self._lifecycle_lock, self._live_log_lock:
+            uploader = self._live_log_uploaders.get(local_path)
+            if uploader is not None:
+                uploader.stop(final_upload=True)
+                del self._live_log_uploaders[local_path]
+            else:
+                # The producer may outlive close; publish its now-final bytes.
+                _LiveLogUploader(
+                    self._store,
+                    local_path,
+                    remote_key or self._job_log_remote_key(local_path),
+                    self.log_flush_interval_s,
+                ).compact()
 
     def _ensure_local_copy(self, remote_key: str, local_path: Path) -> None:
         try:
-            data = bytes(obs.get(self._store, remote_key).bytes())
+            with _cloud_errors(f"Could not download log object {remote_key}", passthrough=(FileNotFoundError,)):
+                data = bytes(obs.get(self._store, remote_key).bytes())
         except FileNotFoundError as e:
             msg = f"Object not found: {remote_key}"
             raise FileNotFoundError(msg) from e
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_bytes(data)
+        with _storage_errors(f"Could not cache log object {remote_key} at {local_path}"):
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(data)
 
     def _remote_final_info(self, remote_key: str) -> tuple[int, float] | None:
         try:
-            meta = obs.head(self._store, remote_key)
+            with _cloud_errors(f"Could not inspect log object {remote_key}", passthrough=(FileNotFoundError,)):
+                meta = obs.head(self._store, remote_key)
         except FileNotFoundError:
             return None
         last_modified = meta["last_modified"]
@@ -851,7 +1119,8 @@ class CloudWorkspace(Workspace):
 
     def _remote_state_info(self, remote_key: str) -> tuple[int, float] | None:
         try:
-            resp = obs.get(self._store, f"{remote_key}{_STATE}")
+            with _cloud_errors(f"Could not inspect live-log state for {remote_key}", passthrough=(FileNotFoundError,)):
+                resp = obs.get(self._store, f"{remote_key}{_STATE}")
         except FileNotFoundError:
             return None
         try:
@@ -863,46 +1132,42 @@ class CloudWorkspace(Workspace):
         return offset, 0.0 if last_modified is None else last_modified.timestamp()
 
     def _download_log_chunks(self, remote_key: str, local_path: Path, expected_size: int | None) -> bool:
-        prefix = f"{remote_key}{_CHUNKS}/"
-        chunks: list[tuple[int, str]] = []
-        for batch in obs.list(self._store, prefix=prefix):
-            for entry in batch:
-                name = entry["path"][len(prefix) :]
-                if "/" in name or not name.endswith(".chunk"):
-                    continue
-                with contextlib.suppress(ValueError):
-                    chunks.append((int(name.removesuffix(".chunk")), entry["path"]))
-        if not chunks:
-            return False
+        with _cloud_errors(f"Could not download live-log chunks for {remote_key}"):
+            prefix = f"{remote_key}{_CHUNKS}/"
+            chunks: list[tuple[int, str]] = []
+            for batch in obs.list(self._store, prefix=prefix):
+                for entry in batch:
+                    name = entry["path"][len(prefix) :]
+                    if "/" not in name and name.endswith(".chunk"):
+                        with contextlib.suppress(ValueError):
+                            chunks.append((int(name.removesuffix(".chunk")), entry["path"]))
+            if not chunks:
+                return False
 
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=local_path.parent,
-                prefix=f".{local_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as tmp:
-                tmp_path = Path(tmp.name)
-                expected_offset = 0
-                for offset, path in sorted(chunks):
-                    if offset != expected_offset:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "wb", dir=local_path.parent, prefix=f".{local_path.name}.", suffix=".tmp", delete=False
+                ) as tmp:
+                    tmp_path = Path(tmp.name)
+                    expected_offset = 0
+                    for offset, path in sorted(chunks):
+                        if offset != expected_offset:
+                            return False
+                        try:
+                            data = bytes(obs.get(self._store, path).bytes())
+                        except FileNotFoundError:
+                            return False
+                        tmp.write(data)
+                        expected_offset += len(data)
+                    if expected_size is not None and expected_offset != expected_size:
                         return False
-                    try:
-                        data = bytes(obs.get(self._store, path).bytes())
-                    except FileNotFoundError:
-                        return False
-                    tmp.write(data)
-                    expected_offset += len(data)
-                if expected_size is not None and expected_offset != expected_size:
-                    return False
-            tmp_path.replace(local_path)
-        finally:
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink()
-        return True
+                tmp_path.replace(local_path)
+            finally:
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
+            return True
 
     def _ensure_log_local(self, remote_key: str, local_path: Path) -> None:
         final_info = self._remote_final_info(remote_key)
@@ -944,19 +1209,37 @@ class CloudWorkspace(Workspace):
             self._ensure_local_copy(remote_key, local_path)
 
     def _remote_logs(self, prefix: str) -> dict[str, float]:
-        logs: dict[str, float] = {}
-        for batch in obs.list(self._store, prefix=prefix):
-            for entry in batch:
-                path = entry["path"]
-                if path.endswith(".log"):
-                    remote_key = path
-                elif path.endswith(_STATE):
-                    remote_key = path[: -len(_STATE)]
-                else:
-                    continue
-                ts = 0.0 if entry["last_modified"] is None else entry["last_modified"].timestamp()
-                logs[remote_key] = max(logs.get(remote_key, 0.0), ts)
-        return logs
+        with _cloud_errors(f"Could not list remote logs under {prefix}"):
+            logs: dict[str, float] = {}
+            for batch in obs.list(self._store, prefix=prefix):
+                for entry in batch:
+                    path = entry["path"]
+                    if path.endswith(".log"):
+                        remote_key = path
+                    elif path.endswith(_STATE):
+                        remote_key = path[: -len(_STATE)]
+                    else:
+                        continue
+                    ts = 0.0 if entry["last_modified"] is None else entry["last_modified"].timestamp()
+                    logs[remote_key] = max(logs.get(remote_key, 0.0), ts)
+            return logs
+
+    def _collect_logs(self, remote_prefix: str, writer_dir: Path, cache_dir: Path) -> dict[str, Path]:
+        """Materialize remote logs without replacing fresher local writers."""
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        paths: dict[str, Path] = {}
+        for remote_key in self._remote_logs(remote_prefix):
+            filename = remote_key.rsplit("/", 1)[-1]
+            writer_path = writer_dir / filename
+            if writer_path.exists():
+                paths[filename] = writer_path
+                continue
+            cache_path = cache_dir / filename
+            self._refresh_log_local(remote_key, cache_path)
+            paths[filename] = cache_path
+        if writer_dir.exists():
+            paths.update((path.name, path) for path in writer_dir.iterdir() if path.is_file())
+        return paths
 
     def get_task_log(self, task: Task, job_id: str | None = None) -> Path:
         writer_path, _, remote_key = self._task_log_paths(task, job_id or "0")
@@ -964,30 +1247,46 @@ class CloudWorkspace(Workspace):
         return writer_path
 
     def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
-        writer_path, _, _ = self._task_log_paths(task, job_id or "0")
-        self._stop_live_upload(writer_path)
+        writer_path, _, remote_key = self._task_log_paths(task, job_id or "0")
+        self._stop_live_upload(writer_path, remote_key)
 
     def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
-        if job_id is not None:
-            return self._open_task_log_for_read(task, job_id)
+        with _cloud_errors(
+            f"Could not read a task log from cloud workspace {self.workspace_id}",
+            passthrough=(FileNotFoundError,),
+        ):
+            if job_id is not None:
+                return self._open_task_log_for_read(task, job_id)
 
+            key = task.resolved_hash(workspace=self).b32()
+            writer_dir = self._cache / "task_logs" / key
+            candidates = [(p.stat().st_mtime, p.stem) for p in writer_dir.glob("*.log")]
+            for remote_key, ts in self._remote_logs(self._under("task_logs", key) + "/").items():
+                filename = remote_key.rsplit("/", 1)[-1]
+                if filename.endswith(".log"):
+                    candidates.append((ts, filename.removesuffix(".log")))
+
+            if not candidates:
+                msg = f"No logs found for task {task} in workspace {self.backend}://{self.bucket!r}."
+                raise FileNotFoundError(msg)
+            return self._open_task_log_for_read(task, max(candidates, key=lambda item: item[0])[1])
+
+    def task_log_iter(self, task: Task) -> Iterator[tuple[str, Path]]:
+        with _cloud_errors(
+            f"Could not list task logs from cloud workspace {self.workspace_id}",
+            passthrough=(FileNotFoundError,),
+        ):
+            return iter(self._task_log_entries(task).items())
+
+    def _task_log_entries(self, task: Task) -> dict[str, Path]:
         key = task.resolved_hash(workspace=self).b32()
         writer_dir = self._cache / "task_logs" / key
-        remote_logs = self._remote_logs(self._under("task_logs", key) + "/")
-        candidates: list[tuple[float, str]] = []
-        if writer_dir.exists():
-            candidates.extend((p.stat().st_mtime, p.stem) for p in writer_dir.glob("*.log"))
-        for remote_key, ts in remote_logs.items():
-            filename = remote_key.rsplit("/", 1)[-1]
-            if filename.endswith(".log"):
-                candidates.append((ts, filename[: -len(".log")]))
-
-        if not candidates:
-            msg = f"No logs found for task {task} in workspace {self.backend}://{self.bucket!r}."
-            raise FileNotFoundError(msg)
-
-        _, latest_job_id = max(candidates, key=lambda item: item[0])
-        return self._open_task_log_for_read(task, latest_job_id)
+        paths = self._collect_logs(
+            self._under("task_logs", key) + "/",
+            writer_dir,
+            self._cache / "task_log_cache" / key,
+        )
+        return {filename.removesuffix(".log"): path for filename, path in paths.items() if filename.endswith(".log")}
 
     def _open_task_log_for_read(self, task: Task, job_id: str) -> TextIO:
         writer_path, cache_path, remote_key = self._task_log_paths(task, job_id)
@@ -1004,7 +1303,9 @@ class CloudWorkspace(Workspace):
         return self._under("job_logs", local_path.name)
 
     def finalize_job_log(self, local_path: Path) -> None:
-        if local_path.exists():
+        with _storage_errors(f"Could not inspect job log {local_path}"):
+            exists = local_path.exists()
+        if exists:
             _LiveLogUploader(
                 self._store,
                 local_path,
@@ -1015,33 +1316,23 @@ class CloudWorkspace(Workspace):
     @contextlib.contextmanager
     def streaming_job_log(self, local_path: Path) -> Iterator[None]:
         self._start_live_upload(local_path, self._job_log_remote_key(local_path))
-        try:
+        with _cleanup_on_exit(lambda: self._stop_live_upload(local_path), f"finalizing job log {local_path}"):
             yield
-        finally:
-            self._stop_live_upload(local_path)
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
+        with _cloud_errors(
+            f"Could not read job logs from cloud workspace {self.workspace_id}",
+            passthrough=(FileNotFoundError,),
+        ):
+            return self._job_log_iter(work_unit)
+
+    def _job_log_iter(self, work_unit: WorkUnit | None) -> Iterator[Path]:
         writer_dir = self._cache / "job_logs"
-        cache_dir = self._cache / "job_log_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Refresh remote logs into the read cache. The cache is distinct from
-        # the writer dir, so a refresh cannot clobber a writer that's still
-        # appending to ``writer_dir/<filename>``.
-        paths: dict[str, Path] = {}
-        for remote_key in self._remote_logs(self._under("job_logs") + "/"):
-            filename = remote_key.rsplit("/", 1)[-1]
-            cache_path = cache_dir / filename
-            self._refresh_log_local(remote_key, cache_path)
-            paths[filename] = cache_path
-
-        # Local writer files (this process or a same-FS sibling) override the
-        # cache for the same filename: they always have the freshest bytes,
-        # and read-only opens by callers don't disturb them.
-        if writer_dir.exists():
-            for p in writer_dir.iterdir():
-                if p.is_file():
-                    paths[p.name] = p
+        paths = self._collect_logs(
+            self._under("job_logs") + "/",
+            writer_dir,
+            self._cache / "job_log_cache",
+        )
 
         if work_unit is None:
             return iter(paths.values())
@@ -1049,15 +1340,32 @@ class CloudWorkspace(Workspace):
         return iter(p for filename, p in paths.items() if filename.startswith(prefix))
 
     def close(self) -> None:
-        with self._live_log_lock:
-            uploaders = list(self._live_log_uploaders.values())
-            self._live_log_uploaders.clear()
-        for uploader in uploaders:
-            uploader.stop(final_upload=True)
-        with self._scratch_dir_lock:
-            syncs = list(self._scratch_dir_syncs.values())
-            self._scratch_dir_syncs.clear()
-        for sync in syncs:
-            sync.stop(final_upload=True)
-        with contextlib.suppress(AttributeError):
-            del self._store
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+
+            errors: list[tuple[str, BaseException]] = []
+
+            def stop_all(resources: dict[Any, Any], label: str) -> None:
+                for key, resource in list(resources.items()):
+                    try:
+                        resource.stop(final_upload=True)
+                    except BaseException as exc:  # noqa: BLE001 -- stop every resource
+                        errors.append((f"{label} {key}", exc))
+                    else:
+                        del resources[key]
+
+            with self._live_log_lock:
+                stop_all(self._live_log_uploaders, "log uploader for")
+
+            with self._scratch_dir_lock:
+                stop_all(self._scratch_dir_syncs, "scratch sync")
+
+            if errors:
+                primary_label, primary_error = errors[0]
+                primary_error.add_note(f"CloudWorkspace.close failed while stopping {primary_label}.")
+                for label, error in errors[1:]:
+                    primary_error.add_note(f"Additionally, stopping {label} failed: {type(error).__name__}: {error}")
+                raise primary_error
+
+            self._closed = True

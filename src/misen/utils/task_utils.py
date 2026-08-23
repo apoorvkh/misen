@@ -14,12 +14,15 @@ from __future__ import annotations
 import itertools
 import logging
 import time
+import traceback
+from contextlib import contextmanager, suppress
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
-from misen.exceptions import HashError
+from misen.exceptions import ExecutionError, HashError, StorageError
 from misen.sentinels import SCRATCH_DIR, is_runtime_sentinel
 from misen.task_metadata import aggregate_resources
+from misen.utils.cli import system_exit_code
 from misen.utils.graph import DependencyGraph
 from misen.utils.hashing import ResultHash, TaskHash
 from misen.utils.log_capture import capture_all_output
@@ -27,10 +30,11 @@ from misen.utils.nested import iter_nested_leaves, map_nested_leaves
 from misen.utils.runtime_events import runtime_event, task_label
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
     from inspect import Signature
     from pathlib import Path
     from types import BuiltinFunctionType, FunctionType
+    from typing import TextIO
 
     from misen.task_metadata import TaskMetadata
     from misen.tasks import Task
@@ -261,32 +265,91 @@ def execute_task(
     log_identity = log_task or task
     log_path = workspace.get_task_log(task=log_identity, job_id=job_id)
     sync_scratch_dir = task.meta.cache and scratch_dir is not None
-    if sync_scratch_dir:
-        workspace.start_scratch_dir_sync(task=task)
+    primary_error: BaseException | None = None
     try:
-        with (
-            log_path.open("a", buffering=1, encoding="utf-8") as task_log,
-            capture_all_output(task_log, tee_to_stdout=True),
-        ):
-            try:
-                result = task.func(*resolved_args, **resolved_kwargs)
-            except Exception as exc:
-                from rich.console import Console as RichConsole
-
-                elapsed_s = time.perf_counter() - started_at
-                RichConsole(stderr=True).print_exception()
-                logger.exception("Task failed: %s after %.2fs.", debug_name, elapsed_s)
-                runtime_event(f"Task failed: {display} in {elapsed_s:.2f}s", style="bold red")
-                raise exc.with_traceback(None) from None
-    finally:
         if sync_scratch_dir:
-            workspace.finalize_scratch_dir(task=task)
-        workspace.finalize_task_log(task=log_identity, job_id=job_id)
+            workspace.start_scratch_dir_sync(task=task)
+        with _open_task_log(log_path) as task_log:
+            try:
+                with capture_all_output(task_log, tee_to_stdout=True):
+                    result = task.func(*resolved_args, **resolved_kwargs)
+            except BaseException as exc:
+                # Wait for the capture reader to drain before appending the
+                # traceback, so buffered stdout/stderr cannot appear after it.
+                try:
+                    traceback.print_exception(exc, file=task_log)
+                except Exception as log_error:  # noqa: BLE001 -- diagnostics are best-effort
+                    exc.add_note(f"Additionally, writing the task traceback failed: {log_error}")
+                raise
+    except BaseException as exc:
+        error: BaseException = exc
+        if isinstance(exc, SystemExit):
+            exit_code = system_exit_code(exc)
+            error = ExecutionError(
+                f"Task {debug_name} requested interpreter exit with code {exit_code} before completing."
+            )
+        primary_error = error
+        elapsed_s = time.perf_counter() - started_at
+        error.add_note(f"Misen task {debug_name} failed (job_id={job_id}, log={log_path}).")
+        logger.error("Task failed: %s after %.2fs.", debug_name, elapsed_s)  # noqa: TRY400 -- rendered upstream
+        with suppress(Exception, SystemExit):
+            runtime_event(f"Task failed: {display} in {elapsed_s:.2f}s", style="bold red")
+        if error is exc:
+            raise
+        raise error from exc
+    finally:
+        cleanups: list[tuple[str, Callable[[], None]]] = []
+        if sync_scratch_dir:
+            cleanups.append(("scratch-directory sync", lambda: workspace.finalize_scratch_dir(task=task)))
+        cleanups.append(("task-log sync", lambda: workspace.finalize_task_log(task=log_identity, job_id=job_id)))
+        _run_task_cleanups(primary_error, cleanups)
 
-    elapsed_s = time.perf_counter() - started_at
-    logger.info("Task finished: %s in %.2fs.", debug_name, elapsed_s)
-    runtime_event(f"Task finished: {display} in {elapsed_s:.2f}s", style="green")
+    logger.debug("Task function returned: %s.", debug_name)
     return cast("R", result)
+
+
+@contextmanager
+def _open_task_log(path: Path) -> Iterator[TextIO]:
+    """Open a Misen-owned task log without masking an active task failure."""
+    try:
+        task_log = path.open("a", buffering=1, encoding="utf-8")
+    except OSError as exc:
+        msg = f"Could not open task log {path}: {exc}"
+        raise StorageError(msg) from exc
+
+    primary_error: BaseException | None = None
+    try:
+        yield task_log
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            task_log.close()
+        except OSError as exc:
+            if primary_error is None:
+                msg = f"Could not close task log {path}: {exc}"
+                raise StorageError(msg) from exc
+            primary_error.add_note(f"Additionally, closing task log {path} failed: {type(exc).__name__}: {exc}")
+
+
+def _run_task_cleanups(
+    primary_error: BaseException | None,
+    cleanups: list[tuple[str, Callable[[], None]]],
+) -> None:
+    """Run every finalizer without replacing an active task failure."""
+    error = primary_error
+    for label, cleanup in cleanups:
+        try:
+            cleanup()
+        except BaseException as exc:
+            if error is None:
+                error = exc
+            else:
+                error.add_note(f"Additional error during {label}: {type(exc).__name__}: {exc}")
+                logger.exception("Additional error during %s; preserving the earlier failure.", label)
+    if primary_error is None and error is not None:
+        raise error
 
 
 def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -308,8 +371,14 @@ def _format_resolved_call(task: Task[Any], args: tuple[Any, ...], kwargs: dict[s
     return f"{task.func.__name__}({', '.join(parts)})" if parts else f"{task.func.__name__}()"
 
 
-def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None:
-    """Persist a task payload before its hash pointer, preserving crash safety."""
+def save_task_result(
+    task: Task[Any],
+    result: Any,
+    workspace: Workspace,
+    *,
+    check_ownership: Callable[[], None] | None = None,
+) -> None:
+    """Persist a task payload before its hash pointer, fencing both commits."""
     try:
         result_hash = ResultHash.from_object(result)
         index_mode = "result"
@@ -319,15 +388,11 @@ def save_task_result(task: Task[Any], result: Any, workspace: Workspace) -> None
 
     logger.debug("Persisting result hash for %s using index_mode=%s.", task, index_mode)
 
-    # Writing a cacheable payload before its pointer prevents a crash from
-    # leaving a pointer to missing data. Non-cacheable tasks only need the
-    # pointer. ``store`` takes the already
-    # computed ``result_hash`` because the pointer it would otherwise be read
-    # from does not exist yet.
+    # Write the payload before its pointer so crashes cannot publish missing data.
     if task.meta.cache:
-        workspace.results.store(task, result, result_hash)
+        workspace.results.store(task, result, result_hash, before_commit=check_ownership)
 
-    workspace.set_result_hash(task, result_hash)
+    workspace.set_result_hash(task, result_hash, before_commit=check_ownership)
 
 
 def _build_argument_resolver(
@@ -354,12 +419,12 @@ def _build_argument_resolver(
         if value is SCRATCH_DIR:
             if scratch_dir is None:
                 msg = "SCRATCH_DIR sentinel resolved but no scratch directory was provided to execute_task."
-                raise RuntimeError(msg)
+                raise ExecutionError(msg)
             return scratch_dir
         if is_runtime_sentinel(value):
             if runtime_values is None:
                 msg = f"{value!r} can only be resolved while executing a WorkUnit through an Executor."
-                raise RuntimeError(msg)
+                raise ExecutionError(msg)
             return runtime_values.resolve(value)
         return map_nested_leaves(
             value,

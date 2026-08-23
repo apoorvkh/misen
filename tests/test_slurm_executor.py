@@ -14,6 +14,8 @@ import pytest
 
 import misen.executors.slurm as slurm_module
 from misen import DASK_CLIENT, Task, meta
+from misen.exceptions import JobFailedError, StatusQueryError, StorageError, SubmissionError
+from misen.executor import raise_for_failed_jobs
 from misen.executors.slurm import SlurmExecutor, SlurmJob
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
@@ -158,6 +160,24 @@ def test_slurm_bulk_state_falls_back_to_sacct_for_jobs_squeue_doesnt_know(monkey
     assert states[jobs[2]] == "failed"
 
 
+def test_slurm_bulk_state_uses_sacct_when_squeue_query_fails(monkeypatch) -> None:
+    job = _make_slurm_job(slurm_id="42", x=0)
+    calls: list[str] = []
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        binary = command[0].rsplit("/", 1)[-1]
+        calls.append(binary)
+        if binary == "squeue":
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="controller unavailable")
+        return subprocess.CompletedProcess(command, 0, stdout="42 COMPLETED\n", stderr="")
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", run)
+
+    assert SlurmJob.bulk_state([job])[job] == "done"
+    assert calls == ["squeue", "sacct"]
+
+
 def test_slurm_bulk_state_finalizes_logs_for_terminal_jobs(monkeypatch, tmp_path) -> None:
     jobs = [_make_slurm_job(slurm_id=str(i), x=i) for i in range(2)]
     log0 = tmp_path / "j0.log"
@@ -179,7 +199,36 @@ def test_slurm_bulk_state_finalizes_logs_for_terminal_jobs(monkeypatch, tmp_path
     cast("MagicMock", jobs[1].workspace.finalize_job_log).assert_not_called()
 
 
-def test_slurm_bulk_state_returns_unknown_when_slurm_cli_missing(monkeypatch) -> None:
+def test_failed_slurm_job_preserves_failure_when_log_finalization_fails(monkeypatch, tmp_path) -> None:
+    job = _make_slurm_job(slurm_id="42", x=0)
+    job.log_path = tmp_path / "failed.log"
+    job.log_path.write_text("failure output")
+    cast("MagicMock", job.workspace.finalize_job_log).side_effect = StorageError("object store unavailable")
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(slurm_module.subprocess, "run", _RunRecorder({"squeue": "42 FAILED\n"}))
+
+    states = SlurmJob.bulk_state([job])
+
+    assert states[job] == "failed"
+    assert "SLURM reported state 'FAILED'" in cast("str", job.failure.reason)
+    assert "finalizing log" in cast("str", job.failure.reason)
+    with pytest.raises(JobFailedError):
+        raise_for_failed_jobs(states)
+
+
+def test_successful_slurm_job_surfaces_log_finalization_failure(monkeypatch, tmp_path) -> None:
+    job = _make_slurm_job(slurm_id="42", x=0)
+    job.log_path = tmp_path / "done.log"
+    job.log_path.write_text("output")
+    cast("MagicMock", job.workspace.finalize_job_log).side_effect = StorageError("object store unavailable")
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(slurm_module.subprocess, "run", _RunRecorder({"squeue": "42 COMPLETED\n"}))
+
+    with pytest.raises(StorageError, match="object store unavailable"):
+        SlurmJob.bulk_state([job])
+
+
+def test_slurm_bulk_state_raises_when_slurm_cli_missing(monkeypatch) -> None:
     jobs = [_make_slurm_job(slurm_id="42", x=0)]
 
     def missing_cmd(name: str) -> str:
@@ -188,12 +237,108 @@ def test_slurm_bulk_state_returns_unknown_when_slurm_cli_missing(monkeypatch) ->
 
     monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", missing_cmd)
 
-    states = SlurmJob.bulk_state(jobs)
-    assert states[jobs[0]] == "unknown"
+    with pytest.raises(StatusQueryError, match="squeue") as exc_info:
+        SlurmJob.bulk_state(jobs)
+
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+
+def test_slurm_bulk_state_preserves_unknown_when_query_may_recover(monkeypatch) -> None:
+    jobs = [_make_slurm_job(slurm_id="42", x=0)]
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        slurm_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="controller unavailable",
+        ),
+    )
+
+    assert SlurmJob.bulk_state(jobs) == {jobs[0]: "unknown"}
+
+
+def test_slurm_query_timeout_is_bounded(monkeypatch) -> None:
+    jobs = [_make_slurm_job(slurm_id="42", x=0)]
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired("squeue", slurm_module._SLURM_QUERY_TIMEOUT_S)  # noqa: SLF001
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", timeout)
+
+    assert SlurmJob.bulk_state(jobs) == {jobs[0]: "unknown"}
 
 
 def test_slurm_bulk_state_handles_empty_input() -> None:
     assert SlurmJob.bulk_state([]) == {}
+
+
+def test_slurm_dispatch_translates_sbatch_failure(monkeypatch, tmp_path) -> None:
+    work_unit = WorkUnit(root=Task(_slurm_test_task), dependencies=set())
+    workspace = cast("Workspace", MagicMock(spec=Workspace))
+    snapshot = MagicMock()
+    snapshot.prepare_job.return_value = ("job-local", ["python", "-m", "worker"], {}, tmp_path / "slurm.log")
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+
+    def fail_sbatch(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.CalledProcessError(1, ["sbatch"], stderr="scheduler rejected job")
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", fail_sbatch)
+
+    with pytest.raises(SubmissionError, match="scheduler rejected job") as exc_info:
+        SlurmExecutor()._dispatch(  # noqa: SLF001
+            work_unit=work_unit,
+            dependencies=set(),
+            workspace=workspace,
+            snapshot=snapshot,
+        )
+
+    assert isinstance(exc_info.value.__cause__, subprocess.CalledProcessError)
+
+
+def test_slurm_dispatch_timeout_is_bounded(monkeypatch, tmp_path) -> None:
+    work_unit = WorkUnit(root=Task(_slurm_test_task), dependencies=set())
+    workspace = cast("Workspace", MagicMock(spec=Workspace))
+    snapshot = MagicMock()
+    snapshot.prepare_job.return_value = ("job-local", ["python", "-m", "worker"], {}, tmp_path / "slurm.log")
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired("sbatch", slurm_module._SLURM_SUBMIT_TIMEOUT_S)  # noqa: SLF001
+
+    monkeypatch.setattr(slurm_module.subprocess, "run", timeout)
+
+    with pytest.raises(SubmissionError, match="timed out") as exc_info:
+        SlurmExecutor()._dispatch(  # noqa: SLF001
+            work_unit=work_unit,
+            dependencies=set(),
+            workspace=workspace,
+            snapshot=snapshot,
+        )
+
+    assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
+
+
+def test_slurm_dispatch_translates_missing_sbatch(monkeypatch) -> None:
+    work_unit = WorkUnit(root=Task(_slurm_test_task), dependencies=set())
+
+    def missing_sbatch(_name: str) -> str:
+        msg = "sbatch not on PATH"
+        raise FileNotFoundError(msg)
+
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", missing_sbatch)
+    with pytest.raises(SubmissionError, match="sbatch not on PATH") as exc_info:
+        SlurmExecutor()._dispatch(  # noqa: SLF001
+            work_unit=work_unit,
+            dependencies=set(),
+            workspace=cast("Workspace", MagicMock(spec=Workspace)),
+            snapshot=None,
+        )
+
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
 
 
 def test_slurm_dispatch_delegates_resource_isolation_to_slurm(monkeypatch, tmp_path) -> None:
@@ -306,10 +451,8 @@ def test_slurm_dask_dispatch_bootstraps_one_private_worker_per_node(monkeypatch,
     ],
 )
 def test_slurm_rejects_flags_controlled_by_the_executor(flag, monkeypatch, tmp_path) -> None:
-    executor = SlurmExecutor(default_flags={flag: "conflict"})
-
     with pytest.raises(ValueError, match="controlled by SlurmExecutor"):
-        _dispatch_task(Task(_slurm_multinode_test_task), executor, monkeypatch, tmp_path)
+        SlurmExecutor(default_flags={flag: "conflict"})
 
 
 @pytest.mark.parametrize("timeout", [True, 0, -1, 1.5])
@@ -351,7 +494,7 @@ def test_slurm_rejects_unmapped_gpu_constraints(tmp_path) -> None:
     snapshot = MagicMock()
     snapshot.prepare_job.return_value = ("job-local", ["python", "-m", "worker"], {}, tmp_path / "slurm.log")
 
-    with pytest.raises(ValueError, match="rules do not cover"):
+    with pytest.raises(SubmissionError, match="rules do not cover"):
         SlurmExecutor()._dispatch(  # noqa: SLF001
             work_unit=work_unit,
             dependencies=set(),
@@ -361,7 +504,7 @@ def test_slurm_rejects_unmapped_gpu_constraints(tmp_path) -> None:
 
 
 def test_slurm_rejects_tpus(monkeypatch, tmp_path) -> None:
-    with pytest.raises(ValueError, match="does not support 'tpu'"):
+    with pytest.raises(SubmissionError, match="does not support 'tpu'"):
         _dispatch_task(Task(_slurm_tpu_test_task), SlurmExecutor(), monkeypatch, tmp_path)
 
 
@@ -397,6 +540,28 @@ def test_normalize_slurm_state_strips_annotations(raw: str, expected: str) -> No
 )
 def test_normalize_slurm_state_preempted_depends_on_queue_membership(raw: str, in_queue: bool, expected: str) -> None:
     assert slurm_module._normalize_slurm_state(raw, in_queue=in_queue) == expected  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("REQUEUE_HOLD", "pending"),
+        ("REQUEUE_FED", "pending"),
+        ("RESV_DEL_HOLD", "pending"),
+        ("EXPEDITING", "pending"),
+        ("POWER_UP_NODE", "pending"),
+        ("REVOKED", "pending"),
+        ("SPECIAL_EXIT", "pending"),
+        ("SIGNALING", "running"),
+        ("STOPPED", "running"),
+        ("RESIZING", "running"),
+        ("UPDATE_DB", "running"),
+        ("LAUNCH_FAILED", "failed"),
+        ("RECONFIG_FAIL", "failed"),
+    ],
+)
+def test_normalize_slurm_queue_flags_are_nonterminal(raw: str, expected: str) -> None:
+    assert slurm_module._normalize_slurm_state(raw, in_queue=True) == expected  # noqa: SLF001
 
 
 def test_slurm_bulk_state_preempted_in_queue_is_pending_without_sacct(monkeypatch) -> None:

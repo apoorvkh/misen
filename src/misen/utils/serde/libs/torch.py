@@ -11,16 +11,18 @@
 """
 
 import importlib.util
+import pickle
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from misen.utils.serde.base import LeafSerializer, Serializer
+from misen.exceptions import SerializationError
+from misen.utils.serde.base import BaseSerializer, LeafSerializer, Serializer, translate_errors
 
 __all__ = ["torch_serializers", "torch_serializers_by_type"]
 
-torch_serializers: list[type[Serializer]] = []
-torch_serializers_by_type: dict[str, type[Serializer]] = {}
+torch_serializers: list[type[BaseSerializer]] = []
+torch_serializers_by_type: dict[str, type[BaseSerializer]] = {}
 
 if importlib.util.find_spec("torch") is not None:
 
@@ -53,17 +55,29 @@ if importlib.util.find_spec("torch") is not None:
             import torch
 
             bundle = {leaf_id: payload for leaf_id, payload, _ in entries}
-            torch.save(bundle, directory / "tensors.pt")
+            with translate_errors(
+                f"Could not encode torch tensor bundle in {directory}",
+                (OSError, RuntimeError, TypeError, pickle.PickleError),
+            ):
+                torch.save(bundle, directory / "tensors.pt")
             return {"torch_version": torch.__version__}
 
         @staticmethod
         def read_batch(directory: Path, kind_meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import torch
 
-            bundle = torch.load(directory / "tensors.pt", weights_only=True, map_location="cpu")
+            with translate_errors(
+                f"Could not decode torch tensor bundle in {directory}",
+                (OSError, EOFError, RuntimeError, TypeError, ValueError, pickle.PickleError),
+            ):
+                bundle = torch.load(directory / "tensors.pt", weights_only=True, map_location="cpu")
 
             def reader(leaf_id: str) -> Any:
-                return bundle[leaf_id]
+                try:
+                    return bundle[leaf_id]
+                except (KeyError, TypeError) as exc:
+                    msg = f"Torch tensor bundle in {directory} does not contain leaf {leaf_id!r}."
+                    raise SerializationError(msg) from exc
 
             return reader
 
@@ -86,14 +100,22 @@ if importlib.util.find_spec("torch") is not None:
         def write(obj: Any, directory: Path) -> Mapping[str, Any]:
             import torch
 
-            torch.save(obj, directory / "model.pt")
+            with translate_errors(
+                f"Could not encode torch module in {directory}",
+                (OSError, RuntimeError, TypeError, pickle.PickleError),
+            ):
+                torch.save(obj, directory / "model.pt")
             return {"torch_version": torch.__version__}
 
         @staticmethod
         def read(directory: Path, *, meta: Mapping[str, Any]) -> Any:  # noqa: ARG004
             import torch
 
-            return torch.load(directory / "model.pt", weights_only=False, map_location="cpu")
+            with translate_errors(
+                f"Could not decode torch module in {directory}",
+                (OSError, EOFError, RuntimeError, TypeError, ValueError, pickle.PickleError),
+            ):
+                return torch.load(directory / "model.pt", weights_only=False, map_location="cpu")
 
     # Tensor match must come before Module match? No — they're mutually
     # exclusive (Tensor isn't an nn.Module and vice versa).  Order within

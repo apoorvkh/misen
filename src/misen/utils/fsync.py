@@ -5,22 +5,45 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = ["atomic_write_bytes", "fsync_dir", "fsync_file"]
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Durably publish ``data`` via mkstemp, fsync, replace, and directory fsync."""
+def atomic_write_bytes(
+    path: Path,
+    data: bytes,
+    *,
+    before_commit: Callable[[], None] | None = None,
+    overwrite: bool = True,
+) -> bool:
+    """Durably publish bytes, optionally requiring an absent destination."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    published = False
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)  # noqa: PTH105  -- atomic overwrite; Path has no equivalent
+        if before_commit is not None:
+            before_commit()
+        if overwrite:
+            os.replace(tmp, path)  # noqa: PTH105  -- atomic overwrite; Path has no equivalent
+            published = True
+        else:
+            try:
+                os.link(tmp, path)
+                published = True
+            except FileExistsError:
+                pass
     finally:
         Path(tmp).unlink(missing_ok=True)
-    fsync_dir(path.parent)
+    if published:
+        fsync_dir(path.parent)
+    return published
 
 
 def fsync_dir(path: Path) -> None:

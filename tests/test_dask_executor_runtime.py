@@ -194,6 +194,19 @@ def test_no_dask_role_leaves_normal_worker_execution_unchanged(monkeypatch: pyte
     assert not run_role_from_env()
 
 
+def test_dask_role_preserves_unexpected_runtime_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fail_run(coroutine: object) -> None:
+        coroutine.close()  # type: ignore[attr-defined]
+        raise AssertionError("runtime bug")
+
+    monkeypatch.setenv(DASK_ROLE_ENV, "scheduler")
+    monkeypatch.setenv(DASK_SCHEDULER_FILE_ENV, str(tmp_path / "scheduler-address"))
+    monkeypatch.setattr(asyncio, "run", fail_run)
+
+    with pytest.raises(AssertionError, match="runtime bug"):
+        run_role_from_env()
+
+
 def test_managed_cluster_script_safely_embeds_commands() -> None:
     script = managed_cluster_script(
         ["bash", "-c", "printf '%s\\n' \"$VALUE\""],

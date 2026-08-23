@@ -19,6 +19,8 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+import msgspec
+
 from misen.exceptions import SerializationError
 from misen.utils.serde.base import (
     BaseSerializer,
@@ -29,6 +31,7 @@ from misen.utils.serde.base import (
     Leaf,
     Node,
     Ref,
+    translate_errors,
 )
 from misen.utils.type_registry import TypeDispatchRegistry, qualified_type_name
 
@@ -36,6 +39,7 @@ __all__ = ["MANIFEST_FILENAME", "Registry", "load", "save"]
 
 MANIFEST_FILENAME = "manifest.json"
 _MANIFEST_VERSION = 1
+_MISSING = object()
 
 
 class Registry:
@@ -63,6 +67,7 @@ class Registry:
         by_type_name: Mapping[str, type[BaseSerializer]] | None = None,
         volatile_types: Iterable[type] | None = None,
     ) -> None:
+        """Build a registry from ordered serializers and optional dispatch hints."""
         self._by_name: dict[str, type[BaseSerializer]] = {qualified_type_name(s): s for s in serializers}
         self._dispatch: TypeDispatchRegistry[type[BaseSerializer]] = TypeDispatchRegistry(
             by_type_name=by_type_name or {},
@@ -127,51 +132,76 @@ def _node_to_json(node: Node) -> dict[str, Any]:
     return out
 
 
-def _required_node_id(obj: Mapping[str, Any]) -> str:
+def _field(
+    obj: Mapping[str, Any],
+    name: str,
+    context: str,
+    expected: type | tuple[type, ...] | None = str,
+    default: Any = _MISSING,
+) -> Any:
     try:
-        node_id = obj["node_id"]
-    except KeyError:
-        msg = "Manifest node is missing required 'node_id'."
-        raise SerializationError(msg) from None
-    if not isinstance(node_id, str):
-        msg = f"Manifest node has invalid 'node_id' {node_id!r}."
+        value = obj[name] if default is _MISSING else obj.get(name, default)
+    except KeyError as exc:
+        msg = f"{context} is missing required {name!r}."
+        raise SerializationError(msg) from exc
+    if expected is not None and not isinstance(value, expected):
+        msg = f"{context} has invalid {name!r} {value!r}."
         raise SerializationError(msg)
-    return node_id
+    return value
 
 
-def _node_from_json(obj: dict[str, Any]) -> Node:
-    kind_tag = obj["_t"]
+def _node_from_json(obj: Any) -> Node:
+    if not isinstance(obj, Mapping):
+        msg = f"Manifest node must be an object, got {type(obj).__name__}."
+        raise SerializationError(msg)
+
+    kind_tag = _field(obj, "_t", "Manifest node")
+    if kind_tag == "ref":
+        return Ref(ref_id=_field(obj, "target", "Manifest reference node"))
+    if kind_tag not in {"leaf", "dir", "container"}:
+        msg = f"Unknown node tag {kind_tag!r} in manifest"
+        raise SerializationError(msg)
+
+    label = "directory" if kind_tag == "dir" else kind_tag
+    context = f"Manifest {label} node"
+    serializer = _field(obj, "serializer", context)
+    meta = _field(obj, "meta", context, Mapping, {})
+    node_id = _field(obj, "node_id", "Manifest node")
     if kind_tag == "leaf":
         return Leaf(
-            serializer=obj["serializer"],
-            kind=obj["kind"],
-            leaf_id=obj["id"],
-            meta=obj.get("meta", {}),
-            node_id=_required_node_id(obj),
+            serializer=serializer,
+            kind=_field(obj, "kind", context),
+            leaf_id=_field(obj, "id", context),
+            meta=meta,
+            node_id=node_id,
         )
     if kind_tag == "dir":
         return DirectoryLeaf(
-            serializer=obj["serializer"],
-            subdir=obj["subdir"],
-            meta=obj.get("meta", {}),
-            node_id=_required_node_id(obj),
+            serializer=serializer,
+            subdir=_field(obj, "subdir", context),
+            meta=meta,
+            node_id=node_id,
         )
-    if kind_tag == "container":
-        raw_children = obj["children"]
-        if isinstance(raw_children, Mapping):
-            children: Any = {k: _node_from_json(v) for k, v in raw_children.items()}
-        else:
-            children = [_node_from_json(v) for v in raw_children]
-        return Container(
-            serializer=obj["serializer"],
-            children=children,
-            meta=obj.get("meta", {}),
-            node_id=_required_node_id(obj),
-        )
-    if kind_tag == "ref":
-        return Ref(ref_id=obj["target"])
-    msg = f"Unknown node tag {kind_tag!r} in manifest"
-    raise ValueError(msg)
+    raw_children = _field(obj, "children", context, None)
+    if isinstance(raw_children, Mapping):
+        children: Any = {k: _node_from_json(v) for k, v in raw_children.items()}
+    elif isinstance(raw_children, list):
+        children = [_node_from_json(v) for v in raw_children]
+    else:
+        msg = "Manifest container node 'children' must be an object or an array."
+        raise SerializationError(msg)
+    return Container(serializer=serializer, children=children, meta=meta, node_id=node_id)
+
+
+def _validate_manifest_section(manifest: Mapping[str, Any], name: str) -> None:
+    section = _field(manifest, name, MANIFEST_FILENAME, Mapping)
+    for entry_name, entry in section.items():
+        if not isinstance(entry_name, str) or not isinstance(entry, Mapping):
+            msg = f"{MANIFEST_FILENAME} section {name!r} contains an invalid entry."
+            raise SerializationError(msg)
+        context = f"Manifest {name!r} entry {entry_name!r}"
+        _field(entry, "serializer", context)
+        _field(entry, "meta", context, Mapping, {})
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +229,10 @@ def save(
             — bypasses registry lookup for *obj*.  Children of *obj*
             still dispatch through the registry.  Matches the v1
             per-task ``@meta(serializer=...)`` override contract.
+
+    Raises:
+        SerializationError: If no serializer supports a value or persisted
+            data cannot be encoded or written.
     """
     if registry is None:
         from misen.utils.serde.libs import default_registry
@@ -206,39 +240,40 @@ def save(
         registry = default_registry()
 
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
+    with translate_errors(f"Could not serialize data into {directory}", (OSError, UnicodeError)):
+        directory.mkdir(parents=True, exist_ok=True)
 
-    ctx = EncodeCtx(registry)
-    root_node = ctx.encode(obj, ser_cls=ser_cls) if ser_cls is not None else ctx.encode(obj)
+        ctx = EncodeCtx(registry)
+        root_node = ctx.encode(obj, ser_cls=ser_cls) if ser_cls is not None else ctx.encode(obj)
 
-    # Commit batched leaves, one blob per kind.
-    leaves_section: dict[str, dict[str, Any]] = {}
-    if ctx.leaves_by_kind:
-        leaves_root = directory / "leaves"
-        leaves_root.mkdir(exist_ok=True)
-        for kind, entries in ctx.leaves_by_kind.items():
-            owner = ctx.leaf_owners[kind]
-            kind_dir = leaves_root / kind
-            kind_dir.mkdir(exist_ok=True)
-            kind_meta = owner.write_batch(list(entries), kind_dir) or {}
-            leaves_section[kind] = {
-                "serializer": qualified_type_name(owner),
-                "meta": dict(kind_meta),
-            }
+        # Commit batched leaves, one blob per kind.
+        leaves_section: dict[str, dict[str, Any]] = {}
+        if ctx.leaves_by_kind:
+            leaves_root = directory / "leaves"
+            leaves_root.mkdir(exist_ok=True)
+            for kind, entries in ctx.leaves_by_kind.items():
+                owner = ctx.leaf_owners[kind]
+                kind_dir = leaves_root / kind
+                kind_dir.mkdir(exist_ok=True)
+                kind_meta = owner.write_batch(list(entries), kind_dir) or {}
+                leaves_section[kind] = {
+                    "serializer": qualified_type_name(owner),
+                    "meta": dict(kind_meta),
+                }
 
-    # Commit directory-owning leaves, one subdir each.
-    dirs_section: dict[str, dict[str, Any]] = {}
-    if ctx.directory_leaves:
-        dirs_root = directory / "dirs"
-        dirs_root.mkdir(exist_ok=True)
-        for owner, subdir, payload in ctx.directory_leaves:
-            subdir_path = dirs_root / subdir
-            subdir_path.mkdir(exist_ok=True)
-            sub_meta = owner.write(payload, subdir_path) or {}
-            dirs_section[subdir] = {
-                "serializer": qualified_type_name(owner),
-                "meta": dict(sub_meta),
-            }
+        # Commit directory-owning leaves, one subdir each.
+        dirs_section: dict[str, dict[str, Any]] = {}
+        if ctx.directory_leaves:
+            dirs_root = directory / "dirs"
+            dirs_root.mkdir(exist_ok=True)
+            for owner, subdir, payload in ctx.directory_leaves:
+                subdir_path = dirs_root / subdir
+                subdir_path.mkdir(exist_ok=True)
+                sub_meta = owner.write(payload, subdir_path) or {}
+                dirs_section[subdir] = {
+                    "serializer": qualified_type_name(owner),
+                    "meta": dict(sub_meta),
+                }
 
     manifest = {
         "version": _MANIFEST_VERSION,
@@ -246,7 +281,10 @@ def save(
         "leaves": leaves_section,
         "dirs": dirs_section,
     }
-    (directory / MANIFEST_FILENAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    with translate_errors(f"Could not encode {MANIFEST_FILENAME} for {directory}", (TypeError, ValueError)):
+        manifest_json = json.dumps(manifest, indent=2)
+    with translate_errors(f"Could not write {MANIFEST_FILENAME} in {directory}", (OSError, UnicodeError)):
+        (directory / MANIFEST_FILENAME).write_text(manifest_json, encoding="utf-8")
 
 
 def load(
@@ -265,6 +303,10 @@ def load(
             the original class has been renamed but remains
             wire-compatible.  Children dispatch normally via the
             registry.
+
+    Raises:
+        SerializationError: If the manifest or serialized payload is missing,
+            corrupt, unsupported, or cannot be read.
     """
     if registry is None:
         from misen.utils.serde.libs import default_registry
@@ -272,11 +314,20 @@ def load(
         registry = default_registry()
 
     directory = Path(directory)
+    manifest_path = directory / MANIFEST_FILENAME
     try:
-        manifest: dict[str, Any] = json.loads((directory / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-    except FileNotFoundError:
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
         msg = f"No {MANIFEST_FILENAME} found in {directory}"
-        raise SerializationError(msg) from None
+        raise SerializationError(msg) from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        msg = f"Could not read {MANIFEST_FILENAME} in {directory}: {exc}"
+        raise SerializationError(msg) from exc
+
+    if not isinstance(manifest_data, Mapping):
+        msg = f"{MANIFEST_FILENAME} in {directory} must contain a JSON object."
+        raise SerializationError(msg)
+    manifest = dict(manifest_data)
 
     version = manifest.get("version")
     if version != _MANIFEST_VERSION:
@@ -286,8 +337,15 @@ def load(
         )
         raise SerializationError(msg)
 
+    _validate_manifest_section(manifest, "leaves")
+    _validate_manifest_section(manifest, "dirs")
+    root_data = _field(manifest, "root", MANIFEST_FILENAME, None)
+    root_node = _node_from_json(root_data)
     ctx = DecodeCtx(registry, directory, manifest)
-    root_node = _node_from_json(manifest["root"])
-    if ser_cls is not None:
-        return ser_cls.decode(root_node, ctx)
-    return ctx.decode(root_node)
+    with translate_errors(
+        f"Could not deserialize persisted data in {directory}",
+        (OSError, EOFError, UnicodeError, json.JSONDecodeError, msgspec.DecodeError),
+    ):
+        if ser_cls is not None:
+            return ser_cls.decode(root_node, ctx)
+        return ctx.decode(root_node)

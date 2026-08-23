@@ -26,7 +26,6 @@ import os
 import platform
 import secrets
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -35,17 +34,17 @@ import tomllib
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
-from misen.exceptions import LockUnavailableError
+from misen.exceptions import ConfigError, LockUnavailableError, MisenError, SnapshotError, StorageError
 from misen.utils.bootstrap_transport import worker_bootstrap_script
 from misen.utils.fsync import fsync_dir
 from misen.utils.hashing import Hash
 from misen.utils.hashing.base import hash_values
-from misen.utils.locks import NFSLock
+from misen.utils.locks import NFSLock, _cleanup_on_exit
 from misen.utils.runtime_events import runtime_event
 from misen.utils.uv_tool import find_or_install_uv
 
@@ -59,6 +58,17 @@ if TYPE_CHECKING:
 __all__ = ["ProjectSnapshot", "apply_env_files_temporarily", "prepare_live_job"]
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _translate_errors(error_type: type[MisenError], operation: str, *caught: type[Exception]) -> Iterator[None]:
+    """Translate expected failures at one snapshot boundary."""
+    try:
+        yield
+    except caught as exc:
+        msg = f"{operation}: {exc}"
+        raise error_type(msg) from exc
+
 
 # CLI flag the worker entrypoint accepts (matches ``execute.execute``'s
 # ``job_log_path`` parameter). Defined here rather than in
@@ -107,12 +117,22 @@ def prepare_live_job(
 
     Returns:
         Tuple ``(job_id, argv, env_overrides, log_path)``.
+
+    Raises:
+        StorageError: If the live payload cannot be written to workspace
+            temporary storage.
     """
     job_id = token_base32(6)
 
     payload_path = workspace.get_temp_dir() / "live_payloads" / f"{job_id}.pkl"
-    payload_path.parent.mkdir(parents=True, exist_ok=True)
-    payload_path.write_bytes(work_unit.as_payload(workspace=workspace, job_id=job_id))
+    with _translate_errors(
+        StorageError, f"Could not prepare the live job payload directory {payload_path.parent}", OSError
+    ):
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = work_unit.as_payload(workspace=workspace, job_id=job_id)
+    with _translate_errors(StorageError, f"Could not write the live job payload to {payload_path}", OSError):
+        payload_path.write_bytes(payload)
 
     log_path = workspace.get_job_log(job_id=job_id, work_unit=work_unit)
     argv = [
@@ -202,19 +222,21 @@ class ProjectSnapshot:
                 fail-fast environment errors at submission time.
 
         Raises:
-            RuntimeError: If staging fails (uv/pixi invocations, invalid
+            ConfigError: If workspace transport and prewarm settings are incompatible.
+            SnapshotError: If staging fails (uv/pixi invocations, invalid
                 pixi manifests) or a prewarm build fails.
+            StorageError: If workspace snapshot or job-file storage fails.
         """
         self.transport = workspace.bootstrap_transport()
         if self.transport is not None and (not isinstance(self.transport, str) or not self.transport.strip()):
             msg = "bootstrap_transport() must return non-empty Bash source or None for path transport."
-            raise ValueError(msg)
+            raise ConfigError(msg)
         if prewarm and self.transport is not None:
             msg = (
                 "prewarm_envs requires a workspace with worker-visible paths for snapshots and job files "
                 f"({type(workspace).__name__} declares a transport); set prewarm_envs=False."
             )
-            raise ValueError(msg)
+            raise ConfigError(msg)
 
         self.workspace = workspace
         self.env_store_dir = env_store_dir
@@ -222,23 +244,34 @@ class ProjectSnapshot:
         self.pixi_bin: str | None = None
 
         staged = workspace.get_temp_dir() / "snapshot_staging" / token_base32(6)
-        try:
-            self._stage(staged)
-            self.snapshot_key = _snapshot_key(staged)
-            workspace.publish_snapshot(self.snapshot_key, staged)
-        finally:
-            shutil.rmtree(staged, ignore_errors=True)
-        self.project_dir = workspace.fetch_snapshot(self.snapshot_key)
+        with _translate_errors(SnapshotError, "Could not create and publish the project snapshot", OSError):
+            try:
+                self._stage(staged)
+                self.snapshot_key = _snapshot_key(staged)
+                workspace.publish_snapshot(self.snapshot_key, staged)
+            finally:
+                shutil.rmtree(staged, ignore_errors=True)
+        with _translate_errors(
+            SnapshotError,
+            f"Could not materialize published snapshot {self.snapshot_key}",
+            OSError,
+        ):
+            self.project_dir = workspace.fetch_snapshot(self.snapshot_key)
         self.misen_requirement = _misen_bootstrap_requirement(
             self.project_dir,
             paths_visible=self.transport is None,
         )
 
-        self.env_file_refs: list[str] = [
-            workspace.put_job_file(self.submission_id, src.name, src.read_bytes())
-            for src in _env_file_paths()
-            if src.exists()
-        ]
+        with _translate_errors(
+            SnapshotError,
+            f"Could not stage environment files for snapshot {self.snapshot_key}",
+            OSError,
+        ):
+            self.env_file_refs: list[str] = [
+                workspace.put_job_file(self.submission_id, src.name, src.read_bytes())
+                for src in _env_file_paths()
+                if src.exists()
+            ]
 
         self.prewarmed: _MaterializedEnvs | None = None
         store_root = _resolve_store_root(env_store_dir)
@@ -276,7 +309,7 @@ class ProjectSnapshot:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
 
         Raises:
-            RuntimeError: If this dispatch mode is unusable with the
+            SnapshotError: If this dispatch mode is unusable with the
                 workspace (see messages).
         """
         job_id = token_base32(6)
@@ -303,7 +336,7 @@ class ProjectSnapshot:
                 "package index or Git commit in the project's uv.lock (a local misen checkout "
                 "works only when the workspace serves files as shared paths), or use prewarm_envs."
             )
-            raise RuntimeError(msg)
+            raise SnapshotError(msg)
         transport = self.transport
 
         project_dir, snapshot_key = (self.project_dir, None) if transport is None else (None, self.snapshot_key)
@@ -333,7 +366,7 @@ class ProjectSnapshot:
         """Stage code and dependency metadata for the workspace snapshot store.
 
         Raises:
-            RuntimeError: If any uv invocation fails, or the project's pixi
+            SnapshotError: If any uv invocation fails, or the project's pixi
                 manifests fail validation.
         """
         packages_dir = staged_dir / _PACKAGES_DIR_NAME
@@ -403,9 +436,9 @@ def token_base32(nbytes: int) -> str:
 
 
 # --------------------------------------------------------------------------
-# Env store: one immutable directory per content key, published with a
-# payload-before-pointer protocol (the fsync'd ``<key>.complete`` marker is
-# the commit point). See docs/design_shared_env_store.md.
+# Env store: immutable private generations selected by a stable symlink. Each
+# generation has its own fsync'd completion marker; ``<key>.complete`` is only
+# a compatibility breadcrumb. See docs/design_shared_env_store.md.
 # --------------------------------------------------------------------------
 
 _ENV_STORE_SCHEMA = 1  # bump when an entry format changes incompatibly
@@ -418,17 +451,23 @@ _SOURCE_DATE_EPOCH = "315532800"
 # mtime could break a live builder's lease.
 _BUILD_LOCK_LIFETIME_S = 120
 _BUILD_LOCK_REFRESH_S = 30
+_STORE_MARKER_PREFIX = "misen-store-v2:"
 
 
 def _run_tool(
     argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None, error_msg: str
 ) -> subprocess.CompletedProcess[str]:
-    """Run a CLI tool, wrapping failures in a ``RuntimeError`` with its output."""
+    """Run a CLI tool, translating expected process failures."""
     try:
         return subprocess.run(argv, check=True, capture_output=True, text=True, env=env, cwd=cwd)  # noqa: S603
-    except subprocess.CalledProcessError as e:
-        msg = f"{error_msg}: {(e.stderr or e.stdout or '').strip()}"
-        raise RuntimeError(msg) from None
+    except subprocess.CalledProcessError as exc:
+        output = (exc.stderr or exc.stdout or "").strip()
+        msg = f"{error_msg}: {output}" if output else error_msg
+        raise SnapshotError(msg) from exc
+    except OSError as exc:
+        tool = argv[0] if argv else "the requested tool"
+        msg = f"{error_msg}: could not execute {tool!r}: {exc}"
+        raise SnapshotError(msg) from exc
 
 
 def _prepend_path_var(head: str, existing: str | None) -> str:
@@ -448,8 +487,22 @@ def _snapshot_key(staged_dir: Path) -> str:
     Non-reproducible build backends only cost key stability (one snapshot
     entry per submission), never correctness.
     """
-    files = sorted(p for p in staged_dir.rglob("*") if p.is_file())
-    return _store_key((_ENV_STORE_SCHEMA, tuple((p.relative_to(staged_dir).as_posix(), p.read_bytes()) for p in files)))
+    with _translate_errors(SnapshotError, f"Could not read snapshot contents from {staged_dir}", OSError):
+        files = sorted(p for p in staged_dir.rglob("*") if p.is_file())
+        contents = tuple((p.relative_to(staged_dir).as_posix(), p.read_bytes()) for p in files)
+    return _store_key((_ENV_STORE_SCHEMA, contents))
+
+
+def _load_toml(path: Path, *, label: str) -> dict[str, Any]:
+    """Load snapshot metadata, translating expected file/parse failures."""
+    try:
+        return tomllib.loads(path.read_text())
+    except OSError as exc:
+        msg = f"Could not read {label} at {path}: {exc}"
+        raise SnapshotError(msg) from exc
+    except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+        msg = f"Invalid {label} at {path}: {exc}"
+        raise SnapshotError(msg) from exc
 
 
 def _is_pure_wheel(wheel_path: Path) -> bool:
@@ -470,7 +523,7 @@ def _stage_local_package(package_dir: Path, packages_dir: Path) -> None:
     fail-fast).
 
     Raises:
-        RuntimeError: If no distributable artifact can be produced.
+        SnapshotError: If no distributable artifact can be produced.
     """
     # Outside the staged tree so build residue can never leak into the
     # snapshot's content key.
@@ -483,12 +536,12 @@ def _stage_local_package(package_dir: Path, packages_dir: Path) -> None:
                 env=build_env,
                 error_msg=f"Build failed for local package {package_dir}",
             )
-        except RuntimeError as e:
+        except SnapshotError as exc:
             logger.warning(
                 "Wheel build failed for %s; staging its sdist only, which will build on the "
                 "execution hosts (use prewarm_envs to verify buildability at submission). %s",
                 package_dir,
-                e,
+                exc,
             )
             _run_tool(
                 [_uv_bin(), "build", "--sdist", "--out-dir", str(out_dir), str(package_dir)],
@@ -505,7 +558,7 @@ def _stage_local_package(package_dir: Path, packages_dir: Path) -> None:
                 logger.debug("Staging sdist for platform-specific package %s.", package_dir)
         else:
             msg = f"No distributable artifact produced for local package {package_dir}."
-            raise RuntimeError(msg)
+            raise SnapshotError(msg)
         shutil.copy(artifact, packages_dir / artifact.name)
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -521,7 +574,7 @@ def _misen_bootstrap_requirement(project_dir: Path, *, paths_visible: bool) -> s
     serves files as shared paths. Returns ``None`` when no usable form exists;
     prewarmed snapshots never need one.
     """
-    lock = tomllib.loads((project_dir / "uv.lock").read_text())
+    lock = _load_toml(project_dir / "uv.lock", label="uv lockfile")
     for package in lock.get("package", []):
         if package.get("name") != "misen":
             continue
@@ -659,26 +712,38 @@ def _ensure_store_entry(
 ) -> Path:
     """Return the store entry for ``key``, building it in place if necessary.
 
-    Entries are immutable once published and built at their final path
-    (venvs bake absolute paths into scripts, so build-then-rename is out).
-    The fsync'd marker beside the entry is the commit point: written only
-    after ``build`` succeeds and only while the lock lease is still held.
-    Failed builds are removed before releasing an owned lock; an entry without
-    a marker is therefore crashed-builder or lost-lease residue and is safe to
-    remove on the next attempt. ``sanity_path`` (entry-relative) must exist for
-    a marked entry to count as usable, healing a durable marker that outlived
-    its entry.
+    Entries are immutable once published. Each contender builds at a unique
+    physical path (so a lease thief and a resumed stale builder never write
+    the same tree), then atomically points the stable ``store/key`` symlink at
+    that complete tree. Virtual environments may safely bake the unique path
+    into scripts because the physical tree remains in place. Its immutable,
+    generation-specific marker is the commit point: written only after
+    ``build`` succeeds and only while the lock lease is still held.
+    The unmarked stable link is installed before the build begins, so the next
+    lock owner can identify and clean a hard-crashed build without scanning or
+    touching unrelated private trees. ``sanity_path`` (entry-relative) must
+    exist for a marked entry to count as usable, healing a durable marker that
+    outlived its entry.
 
     Raises:
-        RuntimeError: If the build fails or the build lock is lost mid-build.
+        SnapshotError: If a snapshot environment build fails or its lock is
+            lost mid-build. Exceptions from ``build`` otherwise propagate
+            unchanged.
     """
     entry_dir = store / key
+    build_root = store / f".{key}.builds"
+    build_dir = build_root / token_base32(8)
     marker = store / f"{key}.complete"
     store.mkdir(parents=True, exist_ok=True)
 
     def reuse_if_ready() -> Path | None:
-        if not (marker.exists() and (entry_dir / sanity_path).exists()):
+        if not _entry_is_committed(store, entry_dir, marker, key=key, sanity_path=sanity_path):
             return None
+        if entry_dir.is_symlink() and not marker.is_file():
+            target = _private_entry_target(entry_dir, key=key)
+            if target is not None:
+                with contextlib.suppress(OSError):
+                    _publish_entry_link(store, marker, _private_completion_marker(store, key, target))
         with contextlib.suppress(OSError):
             os.utime(marker)  # reuse breadcrumb for a future age-based prune
         logger.info("Reusing %s %s.", label, entry_dir)
@@ -696,7 +761,13 @@ def _ensure_store_entry(
         logger.info("%s %s is being built by %s; waiting.", label, key, held_by)
         runtime_event(f"Waiting for a {label} build in progress on {held_by}", style="yellow")
         lock.acquire(blocking=True, timeout=None)
-    try:
+
+    def require_lock() -> None:
+        if not lock.is_locked():
+            msg = f"Lost the build lock for {label} {key}; discarding this build."
+            raise SnapshotError(msg)
+
+    with _cleanup_on_exit(lock.release, "releasing the build lock"):
         # Acquiring the lock wrote claim files into ``store``, refreshing this
         # client's (possibly negative) dentry cache for the re-checks below.
         if (entry := reuse_if_ready()) is not None:
@@ -705,33 +776,56 @@ def _ensure_store_entry(
             logger.warning("%s marker %s exists without a usable entry; rebuilding.", label, marker)
             marker.unlink()
             fsync_dir(store)
-        if entry_dir.exists():
+        if entry_dir.is_symlink():
+            logger.warning("Removing incomplete %s link %s left by an interrupted build.", label, entry_dir)
+            orphaned_build = _private_entry_target(entry_dir, key=key)
+            entry_dir.unlink()
+            if orphaned_build is not None:
+                _remove_store_path(_private_completion_marker(store, key, orphaned_build))
+                _remove_private_build(orphaned_build)
+            fsync_dir(store)
+        elif entry_dir.exists():
             logger.warning("Removing incomplete %s %s left by an interrupted build.", label, entry_dir)
             _rmtree_with_retry(entry_dir)
-        logger.info("Building %s %s.", label, entry_dir)
-        try:
-            build(entry_dir)
-        except BaseException:
-            # A normal failed builder still owns the entry and should not
-            # strand a potentially huge partial environment. If the lease was
-            # stolen, a replacement may already be writing this path, so only
-            # that builder may clean it.
-            if lock.is_locked() and entry_dir.exists():
-                logger.warning("Removing failed %s build at %s.", label, entry_dir)
-                try:
-                    _rmtree_with_retry(entry_dir)
-                except OSError:
-                    logger.exception("Could not remove failed %s build at %s.", label, entry_dir)
-            raise
-        if not lock.is_locked():
-            # Lease stolen mid-build (extreme stall): a thief may already be
-            # rebuilding this entry, so our marker could bless a half-built one.
-            msg = f"Lost the build lock for {label} {key}; discarding this build."
-            raise RuntimeError(msg)
-        _publish_marker(store, marker)
+        build_root.mkdir(exist_ok=True)
+        logger.info("Building %s %s.", label, build_dir)
+        publication_attempted = False
+
+        def cleanup_unpublished() -> None:
+            if not publication_attempted:
+                _cleanup_uncommitted_entry(store, build_dir)
+
+        def require_publish_rights() -> None:
+            require_lock()
+            if not entry_dir.is_symlink() or _private_entry_target(entry_dir, key=key) != build_dir:
+                msg = f"Lost the build pointer for {label} {key}; discarding this build."
+                raise SnapshotError(msg)
+
+        def commit_marker() -> None:
+            nonlocal publication_attempted
+            require_publish_rights()
+            publication_attempted = True
+
+        with _cleanup_on_exit(
+            cleanup_unpublished,
+            f"cleaning the uncommitted snapshot build at {build_dir}",
+            on_error=True,
+        ):
+            with _translate_errors(SnapshotError, f"Could not publish {label} {key}", OSError):
+                require_lock()
+                _publish_entry_link(store, entry_dir, build_dir)
+            build(build_dir)
+            with _translate_errors(SnapshotError, f"Could not publish {label} {key}", OSError):
+                # ``syncfs`` can take long enough for a lease to expire. Fence once
+                # more immediately before the marker rename, which is the actual
+                # commit point readers trust.
+                generation_marker = _private_completion_marker(store, key, build_dir)
+                _publish_marker(store, generation_marker, target=build_dir, before_commit=commit_marker)
+                if not _entry_is_committed(store, entry_dir, marker, key=key, sanity_path=sanity_path):
+                    msg = f"Build pointer changed while publishing {label} {key}."
+                    raise SnapshotError(msg)
+                _publish_entry_link(store, marker, generation_marker)
         return entry_dir
-    finally:
-        lock.release()
 
 
 def _rmtree_with_retry(path: Path, attempts: int = 3) -> None:
@@ -739,6 +833,8 @@ def _rmtree_with_retry(path: Path, attempts: int = 3) -> None:
     for attempt in range(attempts):
         try:
             shutil.rmtree(path)
+        except FileNotFoundError:
+            return
         except OSError:
             if attempt == attempts - 1:
                 raise
@@ -747,7 +843,66 @@ def _rmtree_with_retry(path: Path, attempts: int = 3) -> None:
             return
 
 
-def _publish_marker(store: Path, marker: Path) -> None:
+def _private_entry_target(entry_dir: Path, *, key: str) -> Path | None:
+    """Return a stable link's private in-store build target, if it has one."""
+    target = entry_dir.readlink()
+    if target.is_absolute() or target.parent != Path(f".{key}.builds") or not target.name:
+        return None
+    return entry_dir.parent / target
+
+
+def _private_completion_marker(store: Path, key: str, target: Path) -> Path:
+    """Return the immutable completion marker paired with a private build."""
+    return store / f".{key}.complete.{target.name}"
+
+
+def _entry_is_committed(store: Path, entry_dir: Path, marker: Path, *, key: str, sanity_path: str) -> bool:
+    """Return whether marker and stable entry name one complete generation."""
+    if not entry_dir.is_symlink():  # legacy direct-directory entry
+        return marker.is_file() and (entry_dir / sanity_path).exists()
+    try:
+        target = _private_entry_target(entry_dir, key=key)
+        return (
+            target is not None
+            and (target / sanity_path).exists()
+            and _private_completion_marker(store, key, target).is_file()
+        )
+    except OSError:
+        return False
+
+
+def _remove_store_path(path: Path) -> None:
+    """Remove one explicitly selected private store path without following links."""
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        _rmtree_with_retry(path)
+
+
+def _remove_private_build(path: Path) -> None:
+    """Remove one private build and its per-key directory when empty."""
+    _remove_store_path(path)
+    with contextlib.suppress(OSError):
+        path.parent.rmdir()
+
+
+def _cleanup_uncommitted_entry(
+    store: Path,
+    build_dir: Path,
+) -> None:
+    """Remove only private state; the next lock owner heals shared pointers."""
+    if build_dir.exists() or build_dir.is_symlink():
+        _remove_private_build(build_dir)
+    fsync_dir(store)
+
+
+def _publish_marker(
+    store: Path,
+    marker: Path,
+    *,
+    target: Path,
+    before_commit: Callable[[], None] | None = None,
+) -> None:
     """Atomically publish a completion marker (payload-before-pointer commit).
 
     Entry file data already reached the NFS server via close-to-open when
@@ -757,27 +912,44 @@ def _publish_marker(store: Path, marker: Path) -> None:
     mkstemp → fsync → rename → fsync-dir sequence used for hash-index writes.
     """
     if hasattr(os, "syncfs"):  # Linux
-        with contextlib.suppress(OSError):
-            fd = os.open(store, os.O_RDONLY)
-            try:
-                os.syncfs(fd)
-            finally:
-                os.close(fd)
+        fd = os.open(store, os.O_RDONLY)
+        try:
+            os.syncfs(fd)
+        finally:
+            os.close(fd)
     fd, tmp = tempfile.mkstemp(dir=store, prefix=f".{marker.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
-            f.write(f"host={socket.gethostname()} pid={os.getpid()} time={time.time():.0f}\n")
+            f.write(_STORE_MARKER_PREFIX + target.relative_to(store).as_posix() + "\n")
             f.flush()
             os.fsync(f.fileno())
+        if before_commit is not None:
+            before_commit()
         os.replace(tmp, marker)  # noqa: PTH105  -- atomic overwrite; Path has no equivalent
     finally:
         Path(tmp).unlink(missing_ok=True)
     fsync_dir(store)
 
 
+def _publish_entry_link(store: Path, entry_dir: Path, build_dir: Path) -> None:
+    """Atomically point a stable store link at a private target."""
+    temporary = store / f".{entry_dir.name}.link-{token_base32(6)}"
+    try:
+        temporary.symlink_to(build_dir.relative_to(store), target_is_directory=not build_dir.is_file())
+        os.replace(temporary, entry_dir)  # noqa: PTH105 -- atomic symlink publication
+    finally:
+        temporary.unlink(missing_ok=True)
+    fsync_dir(store)
+
+
 def _venv_site_dir(venv_dir: Path) -> Path:
     """Return the single ``site-packages`` directory of a venv."""
-    return next((venv_dir / "lib").glob("python*")) / "site-packages"
+    try:
+        python_lib = next((venv_dir / "lib").glob("python*"))
+    except StopIteration as exc:
+        msg = f"Virtual environment {venv_dir} has no Python library directory."
+        raise SnapshotError(msg) from exc
+    return python_lib / "site-packages"
 
 
 def _build_overlay_venv(
@@ -791,7 +963,7 @@ def _build_overlay_venv(
     toolchain. Returns the overlay's site-packages directory.
 
     Raises:
-        RuntimeError: If any uv invocation fails.
+        SnapshotError: If any uv invocation fails.
     """
     _run_tool(
         # ``--python <deps env python>`` resolves to its *base* interpreter.
@@ -919,7 +1091,7 @@ def _resolve_pixi_bin(preferred: str | None) -> str:
     execution hosts too) and falls back to a PATH lookup.
 
     Raises:
-        RuntimeError: If no usable ``pixi`` CLI is found.
+        SnapshotError: If no usable ``pixi`` CLI is found.
     """
     if preferred is not None and os.access(preferred, os.X_OK):
         return preferred
@@ -929,7 +1101,7 @@ def _resolve_pixi_bin(preferred: str | None) -> str:
             "This snapshot has a conda env, but no usable `pixi` CLI was found on this "
             "host. Install it from https://pixi.sh or make it visible on PATH."
         )
-        raise RuntimeError(msg)
+        raise SnapshotError(msg)
     return pixi_bin
 
 
@@ -940,29 +1112,37 @@ def _materialize_envs(project_dir: Path, store_root: Path, *, pixi_bin: str | No
     activation, so the overlay build needs the conda entry available.
 
     Raises:
-        RuntimeError: If any build fails or a build lock is lost.
+        SnapshotError: If expected filesystem/tool/build operations fail or a
+            build lock is lost.
     """
-    conda_manifest_path: Path | None = None
-    resolved_pixi: str | None = None
-    pixi_lock = project_dir / "pixi.lock"
-    if pixi_lock.exists():
-        resolved_pixi = _resolve_pixi_bin(pixi_bin)
-        conda_manifest_path = _ensure_conda_env_entry(
-            manifest_path=project_dir / "pixi.toml",
-            lock_path=pixi_lock,
-            pixi_bin=resolved_pixi,
-            store_root=store_root,
-        )
+    with _translate_errors(SnapshotError, f"Could not materialize environments for snapshot {project_dir}", OSError):
+        conda_manifest_path: Path | None = None
+        resolved_pixi: str | None = None
+        pixi_lock = project_dir / "pixi.lock"
+        if pixi_lock.exists():
+            resolved_pixi = _resolve_pixi_bin(pixi_bin)
+            conda_manifest_path = _ensure_conda_env_entry(
+                manifest_path=project_dir / "pixi.toml",
+                lock_path=pixi_lock,
+                pixi_bin=resolved_pixi,
+                store_root=store_root,
+            )
 
-    package_install_prefix = (
-        _pixi_run_prefix(resolved_pixi, conda_manifest_path)
-        if resolved_pixi is not None and conda_manifest_path is not None
-        else None
-    )
-    deps_env_dir, overlay_venv_dir, overlay_site_dir = _ensure_python_env(
-        project_dir, store_root, package_install_prefix=package_install_prefix
-    )
-    return _MaterializedEnvs(deps_env_dir, overlay_venv_dir, overlay_site_dir, conda_manifest_path, resolved_pixi)
+        package_install_prefix = (
+            _pixi_run_prefix(resolved_pixi, conda_manifest_path)
+            if resolved_pixi is not None and conda_manifest_path is not None
+            else None
+        )
+        deps_env_dir, overlay_venv_dir, overlay_site_dir = _ensure_python_env(
+            project_dir, store_root, package_install_prefix=package_install_prefix
+        )
+        return _MaterializedEnvs(
+            deps_env_dir,
+            overlay_venv_dir,
+            overlay_site_dir,
+            conda_manifest_path,
+            resolved_pixi,
+        )
 
 
 def _python_env_key(project_dir: Path) -> str:
@@ -1002,7 +1182,7 @@ def _ensure_python_env(
         Tuple ``(deps_env_dir, overlay_venv_dir, overlay_site_dir)``.
 
     Raises:
-        RuntimeError: If any uv invocation fails or a build lock is lost.
+        SnapshotError: If any uv invocation fails or a build lock is lost.
     """
     deps_key = _python_env_key(project_dir)
 
@@ -1066,13 +1246,14 @@ def _local_package_paths(lock_path: Path) -> list[Path]:
     code into a store entry.
 
     Raises:
-        RuntimeError: On an unsupported lockfile version or source kind.
+        SnapshotError: On an unreadable/invalid lockfile, unsupported lockfile
+            version, or source kind.
     """
-    lock = tomllib.loads(lock_path.read_text())
+    lock = _load_toml(lock_path, label="uv lockfile")
     lock_version = lock.get("version")
     if lock_version != 1:
         msg = f"Unsupported uv.lock version {lock_version!r} in {lock_path}; expected 1."
-        raise RuntimeError(msg)
+        raise SnapshotError(msg)
     paths: dict[Path, None] = {}
     for package in lock.get("package", []):
         source = package.get("source", {})
@@ -1085,7 +1266,7 @@ def _local_package_paths(lock_path: Path) -> list[Path]:
                 f"Unrecognized source {source!r} for package {package.get('name')!r} in "
                 f"{lock_path}; cannot classify it as local or remote."
             )
-            raise RuntimeError(msg)
+            raise SnapshotError(msg)
     return list(paths)
 
 
@@ -1096,15 +1277,18 @@ def _check_pixi_lock_for_pypi(lock_path: Path) -> None:
     pixi lock that lists PyPI dependencies would double-install or conflict.
 
     Raises:
-        RuntimeError: If any ``- pypi:`` entry is present in ``lock_path``.
+        SnapshotError: If the lockfile is unreadable or contains a
+            ``- pypi:`` entry.
     """
-    if any(line.lstrip().startswith("- pypi:") for line in lock_path.read_text().splitlines()):
+    with _translate_errors(SnapshotError, f"Could not read pixi lockfile at {lock_path}", OSError, UnicodeError):
+        has_pypi = any(line.lstrip().startswith("- pypi:") for line in lock_path.read_text().splitlines())
+    if has_pypi:
         msg = (
             f"{lock_path} contains pypi dependencies. "
             "misen owns PyPI packages through pyproject.toml / uv.lock; "
             "remove them from the pixi manifest."
         )
-        raise RuntimeError(msg)
+        raise SnapshotError(msg)
 
 
 def _resolve_project_pixi() -> tuple[Path, Path, str] | None:
@@ -1115,7 +1299,7 @@ def _resolve_project_pixi() -> tuple[Path, Path, str] | None:
         ``pixi.lock`` is in CWD.
 
     Raises:
-        RuntimeError: If ``pixi.lock`` has no adjacent ``pixi.toml``, the
+        SnapshotError: If ``pixi.lock`` has no adjacent ``pixi.toml``, the
             lockfile references PyPI packages, or the ``pixi`` CLI is
             missing.
     """
@@ -1126,7 +1310,7 @@ def _resolve_project_pixi() -> tuple[Path, Path, str] | None:
     manifest_path = lock_path.parent / "pixi.toml"
     if not manifest_path.exists():
         msg = f"Found {lock_path.name} but no pixi.toml next to it."
-        raise RuntimeError(msg)
+        raise SnapshotError(msg)
 
     _check_pixi_lock_for_pypi(lock_path)
 
@@ -1136,7 +1320,7 @@ def _resolve_project_pixi() -> tuple[Path, Path, str] | None:
             "A pixi.lock was detected but the `pixi` CLI is not on PATH. "
             "Install it from https://pixi.sh to use conda dependencies with misen."
         )
-        raise RuntimeError(msg)
+        raise SnapshotError(msg)
     return manifest_path, lock_path, pixi_bin
 
 
@@ -1154,7 +1338,7 @@ def _ensure_conda_env_entry(*, manifest_path: Path, lock_path: Path, pixi_bin: s
         consumes this).
 
     Raises:
-        RuntimeError: If ``pixi install`` fails or the build lock is lost.
+        SnapshotError: If ``pixi install`` fails or the build lock is lost.
     """
     key = _store_key(
         (_ENV_STORE_SCHEMA, manifest_path.read_bytes(), lock_path.read_bytes(), sys.platform, platform.machine())
@@ -1192,7 +1376,8 @@ def _ensure_conda_env_entry(*, manifest_path: Path, lock_path: Path, pixi_bin: s
 @cache
 def _uv_bin() -> str:
     """Return the uv CLI path (cached — constant across the process)."""
-    return find_or_install_uv()
+    with _translate_errors(SnapshotError, "Could not resolve a usable uv executable", OSError, RuntimeError):
+        return find_or_install_uv()
 
 
 def _execute_argv(
@@ -1270,7 +1455,7 @@ def _detect_pixi_wrap() -> list[str]:
         argv prefix ending in ``--``, or ``[]`` when pixi isn't applicable.
 
     Raises:
-        RuntimeError: If ``pixi.lock`` contains PyPI dependencies.
+        SnapshotError: If ``pixi.lock`` contains PyPI dependencies.
     """
     manifest_path = Path.cwd() / "pixi.toml"
     if not manifest_path.exists():

@@ -7,7 +7,7 @@ import cloudpickle
 import pytest
 
 import misen.executors.local as local_module
-from misen import Resources, Task, meta
+from misen import Resources, SubmissionError, Task, meta
 from misen.executors.local import LocalExecutor, LocalJob
 from misen.utils.work_unit import WorkUnit
 
@@ -47,7 +47,7 @@ def test_local_executor_rejects_multiple_mps_devices() -> None:
 
 def test_local_executor_rejects_unverifiable_memory_requirement() -> None:
     executor = LocalExecutor(accelerators=1)
-    with pytest.raises(ValueError, match="cannot verify"):
+    with pytest.raises(SubmissionError, match="cannot verify"):
         executor._dispatch(  # noqa: SLF001
             work_unit=WorkUnit(
                 root=Task(_local_resource_test).with_resources(accelerators=1, accelerator_memory=40),
@@ -63,7 +63,7 @@ def test_local_executor_rejects_multiple_nodes() -> None:
     executor = LocalExecutor()
     resources = _resources(nodes=2)
 
-    with pytest.raises(ValueError, match="only single-node"):
+    with pytest.raises(SubmissionError, match="only single-node"):
         executor._dispatch(  # noqa: SLF001
             work_unit=WorkUnit(
                 root=Task(_local_resource_test).with_resources(**resources),

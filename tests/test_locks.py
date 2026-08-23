@@ -142,13 +142,14 @@ def test_refresh_loop_warns_and_stops_on_lost_lease(tmp_path: Path, caplog: pyte
 
     lock = NFSLock(tmp_path / "stolen.lock", lifetime=30, refresh_interval=1)
     with patch.object(lock._lock, "refresh", side_effect=flufl.NotLockedError("stolen")):
-        with caplog.at_level("WARNING", logger="misen.utils.locks"), lock.context():
-            deadline = time.monotonic() + 10
-            while lock._thread is not None and lock._thread.is_alive() and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert lock._thread is not None
-            assert not lock._thread.is_alive()
-    assert any("Lost lease" in r.message for r in caplog.records)
+        with caplog.at_level("WARNING", logger="misen.utils.locks"):
+            with pytest.raises(LockUnavailableError, match="Lost the lease"), lock.context():
+                deadline = time.monotonic() + 10
+                while lock._thread is not None and lock._thread.is_alive() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                assert lock._thread is not None
+                assert not lock._thread.is_alive()
+    assert any("Lost the lease" in r.message for r in caplog.records)
 
 
 def test_nfs_lock_non_blocking_breaks_stale_lock(tmp_path: Path) -> None:

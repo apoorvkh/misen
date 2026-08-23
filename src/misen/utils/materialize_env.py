@@ -8,6 +8,7 @@ from pathlib import Path
 
 import tyro
 
+from misen.exceptions import SnapshotError
 from misen.task_metadata import AcceleratorType
 from misen.utils.bootstrap_transport import PIXI_BIN_ENV
 from misen.utils.snapshot import (
@@ -39,6 +40,12 @@ def main(
     ``snapshot_key`` is supplied for shell-transported snapshots. The first
     consumer verifies the fetched tree before publishing a completion marker;
     later jobs reuse the verified tree without rehashing it.
+
+    Raises:
+        ValueError: If a transported snapshot is materialized at the wrong
+            path for its content key.
+        SnapshotError: If snapshot verification or environment materialization
+            fails.
     """
     project_dir = project_dir.absolute()
     store_root = _resolve_store_root(env_store_root)
@@ -49,15 +56,19 @@ def main(
             raise ValueError(msg)
         marker = project_dir.parent / f"{snapshot_key}.complete"
         if not marker.is_file():
-            actual_key = _snapshot_key(project_dir)
-            if actual_key != snapshot_key:
-                if project_dir.is_symlink():
-                    project_dir.unlink()
-                else:
-                    shutil.rmtree(project_dir)
-                msg = f"Transported snapshot has content key {actual_key}, expected {snapshot_key}."
-                raise RuntimeError(msg)
-            _publish_marker(project_dir.parent, marker)
+            try:
+                actual_key = _snapshot_key(project_dir)
+                if actual_key != snapshot_key:
+                    if project_dir.is_symlink():
+                        project_dir.unlink()
+                    else:
+                        shutil.rmtree(project_dir)
+                    msg = f"Transported snapshot has content key {actual_key}, expected {snapshot_key}."
+                    raise SnapshotError(msg)
+                _publish_marker(project_dir.parent, marker, target=project_dir)
+            except OSError as exc:
+                msg = f"Could not verify transported snapshot {snapshot_key}: {exc}"
+                raise SnapshotError(msg) from exc
 
     envs = _materialize_envs(project_dir, store_root, pixi_bin=pixi_bin)
     command = _worker_command(

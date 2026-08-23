@@ -8,6 +8,8 @@ import signal
 from pathlib import Path
 from textwrap import dedent
 
+from misen.exceptions import ExecutionError
+
 DASK_ROLE_ENV = "MISEN_DASK_ROLE"
 DASK_SCHEDULER_ADDRESS_ENV = "MISEN_DASK_SCHEDULER_ADDRESS"
 DASK_SCHEDULER_FILE_ENV = "MISEN_DASK_SCHEDULER_FILE"
@@ -171,8 +173,12 @@ def run_role_from_env() -> bool:
         )
     else:
         msg = f"Unsupported {DASK_ROLE_ENV} value: {role!r}."
-        raise RuntimeError(msg)
-    asyncio.run(run)
+        raise ExecutionError(msg)
+    try:
+        asyncio.run(run)
+    except OSError as exc:
+        msg = f"The executor-owned Dask {role} runtime failed: {exc}"
+        raise ExecutionError(msg) from exc
     return True
 
 
@@ -263,7 +269,7 @@ def _required_env(name: str) -> str:
     """Return one required nonempty environment value."""
     if not (value := os.environ.get(name)):
         msg = f"{name} is required for this Dask runtime role."
-        raise RuntimeError(msg)
+        raise ExecutionError(msg)
     return value
 
 
@@ -278,7 +284,7 @@ def positive_int_env(name: str, *, default: int | None = None) -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise RuntimeError(msg) from exc
+        raise ExecutionError(msg) from exc
     if value < 1:
-        raise RuntimeError(msg)
+        raise ExecutionError(msg)
     return value

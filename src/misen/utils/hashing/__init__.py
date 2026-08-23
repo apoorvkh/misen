@@ -34,7 +34,12 @@ __all__ = [
 
 
 def stable_hash(obj: Any, *, _active_ids: set[int] | None = None) -> int:
-    """Return a stable 64-bit hash for an arbitrary Python object."""
+    """Return a stable 64-bit hash for an arbitrary Python object.
+
+    Raises:
+        HashError: If no stable handler exists for a value or a handler cannot
+            produce a stable digest.
+    """
     if _active_ids is None:
         _active_ids = set()
 

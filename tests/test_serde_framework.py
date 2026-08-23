@@ -140,9 +140,7 @@ def test_shared_tensor_is_written_once_and_decodes_as_same_object(
     leaf_id_a = root["children"]["a"]["id"]
     leaf_id_b = root["children"]["b"]["id"]
     leaf_id_nested = root["children"]["c"]["children"]["nested"]["id"]
-    assert leaf_id_a == leaf_id_b == leaf_id_nested, (
-        "Shared tensor should have one leaf id in the manifest"
-    )
+    assert leaf_id_a == leaf_id_b == leaf_id_nested, "Shared tensor should have one leaf id in the manifest"
 
     loaded = serde.load(tmp_path)
     assert loaded["a"] is loaded["b"]

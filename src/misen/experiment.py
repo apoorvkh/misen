@@ -184,7 +184,13 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
         from the instance's bound field values while still allowing command-line
         overrides. (``self`` here is the class on class access, the instance on
         instance access — see :class:`_ClassOrInstanceMethod`.)
+
+        Raises:
+            SystemExit: If an expected Misen failure or keyboard interrupt is
+                rendered as a nonzero command-line exit.
         """
+        from misen.utils.cli.errors import run_cli
         from misen.utils.cli.experiment import experiment_cli
 
-        experiment_cli(self)
+        if exit_code := run_cli(lambda: experiment_cli(self)):
+            raise SystemExit(exit_code)

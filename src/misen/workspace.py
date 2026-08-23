@@ -15,21 +15,20 @@ consistent cache/locking contract.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import shutil
 from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar
 
-from misen.exceptions import CacheError
+from misen.exceptions import CacheError, LockUnavailableError, SerializationError, StorageError
 from misen.tasks import Task
 from misen.utils import serde
 from misen.utils.settings import Configurable
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable
     from pathlib import Path
 
     from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
@@ -42,6 +41,30 @@ __all__ = ["Workspace"]
 WorkspaceType: TypeAlias = Literal["disk", "cloud", "memory"]
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _storage_errors(
+    operation: str,
+    *errors: type[BaseException],
+    passthrough: tuple[type[BaseException], ...] = (),
+) -> Iterator[None]:
+    """Translate backend I/O failures at one storage boundary."""
+    caught = errors or (OSError,)
+    try:
+        yield
+    except caught as exc:
+        if isinstance(exc, passthrough):
+            raise
+        msg = f"{operation}: {exc}"
+        raise StorageError(msg) from exc
+
+
+def _require_result_lock(lock: LockLike, task: Task[Any]) -> None:
+    """Fail immediately before publish when a result lock was lost."""
+    if not lock.is_locked():
+        msg = f"Lost the result lock for task {task} before its payload could be committed."
+        raise LockUnavailableError(msg)
 
 
 class Workspace(Configurable):
@@ -89,6 +112,9 @@ class Workspace(Configurable):
 
         Returns:
             Resolved hash if present, otherwise ``None``.
+
+        Raises:
+            StorageError: If the persistent hash index cannot be read.
         """
         task_hash = task.task_hash()
         # Fast path: in-memory session cache.
@@ -97,7 +123,8 @@ class Workspace(Configurable):
             logger.log(TRACE_LEVEL, "Resolved-hash memory cache hit for task %s.", task)
             return resolved_hash
         # Slow path: persistent workspace cache.
-        resolved_hash = self._resolved_hash_cache.get(task_hash)
+        with _storage_errors(f"Could not read the resolved hash for task {task}"):
+            resolved_hash = self._resolved_hash_cache.get(task_hash)
         # Promote to session cache after a persistent hit.
         if resolved_hash is not None:
             self._resolved_hashes[task_hash] = resolved_hash
@@ -112,10 +139,14 @@ class Workspace(Configurable):
         Args:
             task: Task to update.
             resolved_hash: Resolved task hash value.
+
+        Raises:
+            StorageError: If the persistent hash index cannot be written.
         """
         task_hash = task.task_hash()
+        with _storage_errors(f"Could not persist the resolved hash for task {task}"):
+            self._resolved_hash_cache[task_hash] = resolved_hash
         self._resolved_hashes[task_hash] = resolved_hash
-        self._resolved_hash_cache[task_hash] = resolved_hash
         logger.debug("Stored resolved hash for task %s.", task)
 
     def get_result_hash(self, task: Task) -> ResultHash:
@@ -123,6 +154,7 @@ class Workspace(Configurable):
 
         Raises:
             CacheError: If the task has not been computed yet.
+            StorageError: If the persistent hash index cannot be read.
         """
         # Fast path: in-memory session cache.
         task_hash = task.task_hash()
@@ -132,7 +164,8 @@ class Workspace(Configurable):
             return result_hash
         # Slow path: persistent workspace cache by resolved task identity.
         resolved_hash = task.resolved_hash(workspace=self)
-        result_hash = self._result_hash_cache.get(resolved_hash)
+        with _storage_errors(f"Could not read the result hash for task {task}"):
+            result_hash = self._result_hash_cache.get(resolved_hash)
         if result_hash is None:
             logger.log(TRACE_LEVEL, "Result-hash cache miss for task %s.", task)
             msg = f"Task {task} must be computed first."
@@ -142,16 +175,34 @@ class Workspace(Configurable):
         logger.log(TRACE_LEVEL, "Result-hash persistent cache hit for task %s.", task)
         return result_hash
 
-    def set_result_hash(self, task: Task, result_hash: ResultHash) -> None:
+    def set_result_hash(
+        self,
+        task: Task,
+        result_hash: ResultHash,
+        *,
+        before_commit: Callable[[], None] | None = None,
+    ) -> None:
         """Persist result hash for a task.
 
         Args:
             task: Task to update.
             result_hash: Result hash value.
+            before_commit: Optional ownership check run at the durable pointer
+                commit point.
+
+        Raises:
+            StorageError: If the persistent hash index cannot be written.
         """
-        self._result_hashes[task.task_hash()] = result_hash
         resolved_hash = task.resolved_hash(workspace=self)
-        self._result_hash_cache[resolved_hash] = result_hash
+        with _storage_errors(f"Could not persist the result hash for task {task}"):
+            if before_commit is None:
+                self._result_hash_cache[resolved_hash] = result_hash
+            elif commit := getattr(self._result_hash_cache, "commit", None):
+                commit(resolved_hash, result_hash, before_commit=before_commit)
+            else:
+                before_commit()
+                self._result_hash_cache[resolved_hash] = result_hash
+        self._result_hashes[task.task_hash()] = result_hash
         logger.debug("Stored result hash for task %s.", task)
 
     def clear_result_hash(self, task: Task) -> None:
@@ -159,10 +210,19 @@ class Workspace(Configurable):
 
         Args:
             task: Task whose mapping should be removed.
+
+        Raises:
+            StorageError: If the persistent hash index cannot be updated.
         """
-        del self._result_hashes[task.task_hash()]
         resolved_hash = task.resolved_hash(workspace=self)
-        del self._result_hash_cache[resolved_hash]
+        try:
+            del self._result_hash_cache[resolved_hash]
+        except KeyError:
+            pass
+        except OSError as exc:
+            msg = f"Could not clear the result hash for task {task}: {exc}"
+            raise StorageError(msg) from exc
+        self._result_hashes.pop(task.task_hash(), None)
         logger.debug("Cleared result hash for task %s.", task)
 
     @property
@@ -273,16 +333,17 @@ class Workspace(Configurable):
 
         Raises:
             RuntimeError: If the task is non-cacheable.
+            StorageError: If the workspace cannot prepare the scratch directory.
         """
         if not task.meta.cache:
             msg = f"{task} cannot use workspace scratch_dir unless Task.meta.cache == True."
             raise RuntimeError(msg)
-        return self._get_scratch_dir(task)
+        with _storage_errors(f"Could not prepare a scratch directory for task {task}"):
+            return self._get_scratch_dir(task)
 
     @abstractmethod
     def _get_scratch_dir(self, task: Task) -> Path: ...
 
-    @abstractmethod
     def start_scratch_dir_sync(self, task: Task) -> None:
         """Begin syncing a cacheable task's scratch_dir with durable storage.
 
@@ -303,9 +364,7 @@ class Workspace(Configurable):
         consistent state if it runs, but if it does not run the next
         invocation must still produce correct behavior.
         """
-        raise NotImplementedError
 
-    @abstractmethod
     def finalize_scratch_dir(self, task: Task) -> None:
         """Stop the background sync and perform a final upload sweep.
 
@@ -315,7 +374,6 @@ class Workspace(Configurable):
         resumption can start from the latest checkpoint. Path-backed
         workspaces may implement this as a no-op.
         """
-        raise NotImplementedError
 
     def remove_scratch_dir(self, task: Task) -> None:
         """Remove durable + local copies of a cacheable task's scratch_dir.
@@ -335,8 +393,9 @@ class Workspace(Configurable):
             msg = f"{task} cannot use workspace scratch_dir unless Task.meta.cache == True."
             raise RuntimeError(msg)
         path = self._get_scratch_dir(task)
-        if path.exists():
-            shutil.rmtree(path)
+        with _storage_errors(f"Could not remove scratch directory {path}"):
+            if path.exists():
+                shutil.rmtree(path)
 
     def _task_log_dir(self, task: Task) -> tuple[Path, str]:
         """Return the (created) log directory and per-task key for ``task``.
@@ -361,11 +420,15 @@ class Workspace(Configurable):
         :class:`misen.workspaces.cloud.CloudWorkspace`) override to start
         streaming the local file on this call; the matching
         :meth:`finalize_task_log` call stops it.
+
+        Raises:
+            CacheError: If the task's dependencies have not been resolved.
+            StorageError: If the log path cannot be prepared.
         """
-        log_dir, key_str = self._task_log_dir(task)
+        with _storage_errors(f"Could not prepare a task log for {task}"):
+            log_dir, key_str = self._task_log_dir(task)
         return log_dir / f"{key_str}_{job_id or '0'}.log"
 
-    @abstractmethod
     def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
         """Hook called when a task log is no longer being written.
 
@@ -374,7 +437,6 @@ class Workspace(Configurable):
         must be idempotent and tolerant of a missing local file.
         Path-backed workspaces may implement this as a no-op.
         """
-        raise NotImplementedError
 
     def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
         """Open a previously-written task log for reading.
@@ -385,18 +447,39 @@ class Workspace(Configurable):
         upload timestamp).
 
         Raises:
+            CacheError: If the task's dependencies have not been resolved.
             FileNotFoundError: If no matching log exists.
+            StorageError: If the log path cannot be listed or opened.
         """
-        log_dir, key_str = self._task_log_dir(task)
-        if job_id is None:
-            matches = sorted(log_dir.glob(f"{key_str}_*.log"), key=lambda p: p.stat().st_mtime)
-            if not matches:
-                msg = f"No logs found for {key_str} in {log_dir}"
-                raise FileNotFoundError(msg)
-            log_path = matches[-1]
-        else:
-            log_path = log_dir / f"{key_str}_{job_id}.log"
-        return log_path.open("r", buffering=1)
+        with _storage_errors(f"Could not read a task log for {task}", passthrough=(FileNotFoundError,)):
+            log_dir, key_str = self._task_log_dir(task)
+            if job_id is None:
+                matches = sorted(log_dir.glob(f"{key_str}_*.log"), key=lambda p: p.stat().st_mtime)
+                log_path = matches[-1] if matches else None
+            else:
+                log_path = log_dir / f"{key_str}_{job_id}.log"
+            if log_path is not None:
+                return log_path.open("r", buffering=1)
+        msg = f"No logs found for {key_str} in {log_dir}"
+        raise FileNotFoundError(msg)
+
+    def task_log_iter(self, task: Task) -> Iterator[tuple[str, Path]]:
+        """Return ``(job_id, path)`` pairs for every available task log.
+
+        Raises:
+            CacheError: If the task's dependencies have not been resolved.
+            StorageError: If the logs cannot be listed.
+        """
+        with _storage_errors(f"Could not locate task logs for {task}"):
+            log_dir, key_str = self._task_log_dir(task)
+
+        def iter_paths() -> Iterator[tuple[str, Path]]:
+            with _storage_errors(f"Could not list task logs in {log_dir}"):
+                prefix = f"{key_str}_"
+                for path in log_dir.glob(f"{prefix}*.log"):
+                    yield path.stem.removeprefix(prefix), path
+
+        return iter_paths()
 
     def _job_logs_dir(self) -> Path:
         """Return the local directory where job-log files live.
@@ -416,15 +499,18 @@ class Workspace(Configurable):
 
         Returns:
             Path where the backend should write combined job logs.
+
+        Raises:
+            StorageError: If the job-log directory cannot be created.
         """
         log_dir = self._job_logs_dir()
-        log_dir.mkdir(parents=True, exist_ok=True)
+        with _storage_errors(f"Could not prepare job-log directory {log_dir}"):
+            log_dir.mkdir(parents=True, exist_ok=True)
         work_unit_prefix = work_unit.root.task_hash().b32()
         path = log_dir / f"{work_unit_prefix}_{job_id}.log"
         logger.debug("Resolved job log path for work unit %s: %s.", work_unit, path)
         return path
 
-    @abstractmethod
     def streaming_job_log(self, local_path: Path) -> AbstractContextManager[None]:
         """Return a context manager that publishes ``local_path`` while it is open.
 
@@ -440,9 +526,9 @@ class Workspace(Configurable):
         being killed mid-execution): the context's ``__exit__`` should
         still leave the bucket in a consistent state if it runs.
         """
-        raise NotImplementedError
+        del local_path
+        return nullcontext()
 
-    @abstractmethod
     def finalize_job_log(self, local_path: Path) -> None:
         """One-shot publish of ``local_path``'s current contents.
 
@@ -456,7 +542,6 @@ class Workspace(Configurable):
         local file. Workspaces where ``local_path`` is already on durable
         shared storage may implement this as a no-op.
         """
-        raise NotImplementedError
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
         """Return iterator over job-log files.
@@ -466,15 +551,24 @@ class Workspace(Configurable):
 
         Returns:
             Iterator of log-file paths.
+
+        Raises:
+            StorageError: If the job-log directory cannot be listed.
         """
         log_dir = self._job_logs_dir()
         if work_unit is None:
             logger.debug("Iterating all job logs in %s.", log_dir)
-            return log_dir.iterdir()
+            paths = log_dir.iterdir()
+        else:
+            work_unit_prefix = work_unit.root.task_hash().b32()
+            logger.debug("Iterating job logs in %s for work unit %s.", log_dir, work_unit)
+            paths = log_dir.glob(f"{work_unit_prefix}_*.log")
 
-        work_unit_prefix = work_unit.root.task_hash().b32()
-        logger.debug("Iterating job logs in %s for work unit %s.", log_dir, work_unit)
-        return log_dir.glob(f"{work_unit_prefix}_*.log")
+        def iter_paths() -> Iterator[Path]:
+            with _storage_errors(f"Could not list job logs in {log_dir}"):
+                yield from paths
+
+        return iter_paths()
 
 
 R = TypeVar("R")
@@ -499,20 +593,38 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         self.result_store = result_store
         self.workspace = workspace
 
+    def _result_hash(self, task: Task[Any]) -> ResultHash:
+        try:
+            return task.result_hash(workspace=self.workspace)
+        except CacheError as exc:
+            msg = f"Result for task {task} not found in cache."
+            raise KeyError(msg) from exc
+        except OSError as exc:
+            msg = f"Could not resolve the cached result for task {task}: {exc}"
+            raise StorageError(msg) from exc
+
     def __getitem__(self, key: Task[R], /) -> R:
         """Return the cached result for a task.
 
         Raises:
             KeyError: If the result is not present in the cache.
         """
+        result_hash = self._result_hash(key)
+
         try:
-            result_hash = key.result_hash(workspace=self.workspace)
             directory = self.result_store[result_hash]
-        except Exception as e:
+        except KeyError as e:
             msg = f"Result for task {key} not found in cache."
             raise KeyError(msg) from e
+        except OSError as e:
+            msg = f"Could not read the cached result for task {key}: {e}"
+            raise StorageError(msg) from e
         logger.debug("Loading cached result for task %s from %s.", key, directory)
-        return serde.load(directory, ser_cls=key.meta.serializer)
+        try:
+            return serde.load(directory, ser_cls=key.meta.serializer)
+        except KeyError as exc:
+            msg = f"Could not deserialize the cached result for task {key}: {exc}"
+            raise SerializationError(msg) from exc
 
     def __setitem__(self, key: Task[R], value: R, /) -> None:
         """Persist result for the given task.
@@ -527,7 +639,14 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         """
         self.store(key, value, key.result_hash(workspace=self.workspace))
 
-    def store(self, task: Task[R], value: R, result_hash: ResultHash) -> None:
+    def store(
+        self,
+        task: Task[R],
+        value: R,
+        result_hash: ResultHash,
+        *,
+        before_commit: Callable[[], None] | None = None,
+    ) -> None:
         """Persist ``value`` at the content-addressed location for ``result_hash``.
 
         ``result_hash`` is supplied explicitly rather than read back from the
@@ -540,26 +659,37 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             task: Task whose serializer materializes the payload.
             value: Computed result value.
             result_hash: Content-addressed identity the payload is stored under.
+            before_commit: Optional ownership check run at the payload's
+                durable commit point.
         """
-        with self.workspace.lock(namespace="result", key=result_hash.b32()).context(blocking=True, timeout=None):
-            if result_hash in self.result_store:
-                logger.debug("Result store already has payload for task %s.", task)
-                return
-            tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                serde.save(value, tmp_dir, ser_cls=task.meta.serializer)
-                # ``result_store[...] = tmp_dir`` moves the directory into the
-                # store; tmp_dir is consumed on success.
-                self.result_store[result_hash] = tmp_dir
-                logger.debug("Stored cached result for task %s at %s.", task, tmp_dir)
-            finally:
-                # Always sweep the temp dir. Normally it has already been moved
-                # into the store (``FileNotFoundError`` -- suppressed below),
-                # but on a failed serde.save it still contains partial output
-                # we want to remove to avoid accumulating orphans.
-                with contextlib.suppress(FileNotFoundError):
-                    shutil.rmtree(tmp_dir)
+        with _storage_errors(f"Could not persist the cached result for task {task}"):
+            result_lock = self.workspace.lock(namespace="result", key=result_hash.b32())
+            with result_lock.context(blocking=True, timeout=None):
+                if result_hash in self.result_store:
+                    logger.debug("Result store already has payload for task %s.", task)
+                    return
+                tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    serde.save(value, tmp_dir, ser_cls=task.meta.serializer)
+
+                    def require_ownership() -> None:
+                        _require_result_lock(result_lock, task)
+                        if before_commit is not None:
+                            before_commit()
+
+                    # ``result_store[...] = tmp_dir`` moves the directory into the
+                    # store; tmp_dir is consumed on success.
+                    if commit := getattr(self.result_store, "commit", None):
+                        commit(result_hash, tmp_dir, before_commit=require_ownership)
+                    else:
+                        require_ownership()
+                        self.result_store[result_hash] = tmp_dir
+                    logger.debug("Stored cached result for task %s at %s.", task, tmp_dir)
+                finally:
+                    # Cleanup is best-effort and must not replace the primary
+                    # serialization/storage failure.
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def __delitem__(self, key: Task[R], /) -> None:
         """Remove a cached result for a task.
@@ -567,13 +697,17 @@ class ResultMap(MutableMapping[Task[Any], Any]):
         Raises:
             KeyError: If the result is not present in the cache.
         """
+        result_hash = self._result_hash(key)
+
         try:
-            result_hash = key.result_hash(workspace=self.workspace)
             del self.result_store[result_hash]
             logger.debug("Deleted cached result payload for task %s.", key)
-        except Exception as e:
+        except KeyError as e:
             msg = f"Result for task {key} not found in cache."
             raise KeyError(msg) from e
+        except OSError as e:
+            msg = f"Could not delete the cached result for task {key}: {e}"
+            raise StorageError(msg) from e
 
     def __iter__(self) -> Iterator[Task]:
         """Iterate over task keys.

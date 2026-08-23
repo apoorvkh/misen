@@ -11,11 +11,12 @@ Config resolution order (lowest to highest priority):
    override that **replaces** the entire chain.
 """
 
+import inspect
 import os
 import tomllib
 import weakref
 from abc import ABCMeta
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import cached_property
 from importlib import import_module
 from pathlib import Path
@@ -62,19 +63,38 @@ class Settings(Struct, dict=True):
             return (Path(os.environ["MISEN_CONFIG"]),)
 
         xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        try:
+            project_config = Path.cwd() / ".misen.toml"
+        except OSError as exc:
+            msg = f"Could not resolve Misen settings from the current working directory: {exc}"
+            raise ConfigError(msg) from exc
 
         return (
             xdg_config_home / "misen.toml",
-            Path.cwd() / ".misen.toml",
+            project_config,
         )
 
     @cached_property
     def toml_data(self) -> dict[str, Any]:
-        """Return parsed and merged TOML settings data."""
+        """Return parsed and merged TOML settings data.
+
+        Raises:
+            ConfigError: If a settings file cannot be read or parsed.
+        """
         merged: dict[str, Any] = {}
         for path in self._config_files:
-            if path.exists():
-                merged |= tomllib.loads(path.read_bytes().decode())
+            try:
+                raw_toml = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            except (OSError, UnicodeError) as exc:
+                msg = f"Could not read Misen settings from {path}: {exc}"
+                raise ConfigError(msg) from exc
+            try:
+                merged |= tomllib.loads(raw_toml)
+            except tomllib.TOMLDecodeError as exc:
+                msg = f"Invalid TOML in Misen settings file {path}: {exc}"
+                raise ConfigError(msg) from exc
         return merged
 
     def __hash__(self) -> int:
@@ -118,6 +138,7 @@ class Configurable(msgspec.Struct, dict=True, weakref=True, metaclass=Configurab
     _config_key: ClassVar[str]
     _config_default_type: ClassVar[str]
     _config_aliases: ClassVar[dict[str, str]]
+    _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = ()
 
     @classmethod
     def resolve_type(cls, type_name: str) -> type[Self]:
@@ -125,10 +146,34 @@ class Configurable(msgspec.Struct, dict=True, weakref=True, metaclass=Configurab
 
         Checks ``_config_aliases`` first, then falls back to importing a
         ``"module:Class"`` string directly.
+
+        Raises:
+            ConfigError: If the reference is invalid, cannot be imported, or
+                does not identify a subclass of this configurable type.
         """
         target = cls._config_aliases.get(type_name, type_name)
-        module, class_name = target.split(":", maxsplit=1)
-        return getattr(import_module(module), class_name)
+        module_name, separator, class_name = target.partition(":")
+        if not separator or not module_name or not class_name:
+            exc = ValueError(target)
+            msg = f"Invalid {cls._config_key} type {target!r}; expected 'module:Class'."
+            raise ConfigError(msg) from exc
+        try:
+            module = import_module(module_name)
+        except ModuleNotFoundError as exc:
+            missing_name = exc.name or ""
+            if missing_name != module_name and not module_name.startswith(f"{missing_name}."):
+                raise
+            msg = f"Could not resolve {cls._config_key} type {target!r}: {exc}"
+            raise ConfigError(msg) from exc
+        try:
+            resolved = getattr(module, class_name)
+        except AttributeError as exc:
+            msg = f"Could not resolve {cls._config_key} type {target!r}: {exc}"
+            raise ConfigError(msg) from exc
+        if not isinstance(resolved, type) or not issubclass(resolved, cls):
+            msg = f"Configured {cls._config_key} type {target!r} is not a {cls.__name__} subclass."
+            raise ConfigError(msg)
+        return resolved
 
     @classmethod
     def auto(cls, settings: Settings | None = None) -> Self:
@@ -139,16 +184,45 @@ class Configurable(msgspec.Struct, dict=True, weakref=True, metaclass=Configurab
 
         Returns:
             The resolved instance.
+
+        Raises:
+            ConfigError: If configuration cannot be parsed, converted,
+                validated, or used to construct the configured component.
         """
         settings = Settings() if settings is None else settings
-        section = dict(settings.toml_data.get(cls._config_key, {}))
-        type_name = section.pop("type", None)
-        if type_name is None:
-            type_name = cls._config_default_type
+        raw_section = settings.toml_data.get(cls._config_key, {})
+        if not isinstance(raw_section, Mapping):
+            msg = f"Invalid [{cls._config_key}] settings: expected a TOML table."
+            raise ConfigError(msg)
+        section = dict(raw_section)
+        type_name = section.pop("type", cls._config_default_type)
         if not isinstance(type_name, str):
             msg = f"Invalid type for [{cls._config_key}] in settings: expected string."
             raise ConfigError(msg)
-        return cls.resolve_type(type_name)(**section)
+        resolved_type = cls.resolve_type(type_name)
+        constructor_signature = inspect.signature(resolved_type)
+        try:
+            constructor_signature.bind(**section)
+            converted_section = {
+                name: (
+                    value
+                    if (annotation := constructor_signature.parameters[name].annotation) is inspect.Parameter.empty
+                    else msgspec.convert(value, type=annotation, strict=True)
+                )
+                for name, value in section.items()
+            }
+        except (TypeError, msgspec.ValidationError) as exc:
+            msg = f"Invalid [{cls._config_key}] settings for {resolved_type.__name__}: {exc}"
+            raise ConfigError(msg) from exc
+
+        validation_errors = (msgspec.ValidationError, *getattr(resolved_type, "_config_validation_errors", ()))
+        try:
+            return resolved_type(**converted_section)
+        except ConfigError:
+            raise
+        except validation_errors as exc:
+            msg = f"Invalid [{cls._config_key}] settings for {resolved_type.__name__}: {exc}"
+            raise ConfigError(msg) from exc
 
     @classmethod
     def resolve_auto(cls, /, obj: Self | Literal["auto"] = "auto") -> Self:

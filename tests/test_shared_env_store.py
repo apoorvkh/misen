@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from misen.exceptions import SnapshotError
 from misen.utils import snapshot as snapshot_mod
 from misen.utils.locks import NFSLock
 from misen.utils.snapshot import (
@@ -131,6 +132,11 @@ def _synthetic_build(calls: list[int], delay: float = 0.0) -> Callable[[Path], N
     return build
 
 
+def _private_builds(store: Path, key: str = "KEY") -> list[Path]:
+    root = store / f".{key}.builds"
+    return list(root.iterdir()) if root.is_dir() else []
+
+
 def test_ensure_store_entry_builds_then_reuses(tmp_path: Path) -> None:
     store = tmp_path / "store"
     calls: list[int] = []
@@ -175,6 +181,43 @@ def test_marker_without_entry_heals(tmp_path: Path) -> None:
     assert (store / "KEY.complete").is_file()
 
 
+def test_unmarked_link_healing_removes_private_build(tmp_path: Path) -> None:
+    store = tmp_path / "store"
+    orphaned_build = store / ".KEY.builds" / "ORPHAN"
+    orphaned_build.mkdir(parents=True)
+    (orphaned_build / "sane").touch()
+    (store / "KEY").symlink_to(orphaned_build.relative_to(store), target_is_directory=True)
+
+    calls: list[int] = []
+    entry = _ensure_store_entry(
+        store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
+    )
+
+    assert calls == [1]
+    assert not orphaned_build.exists()
+    assert (entry / "sane").is_file()
+    assert (store / "KEY.complete").is_file()
+
+
+def test_next_publisher_cleans_hard_crashed_private_build(tmp_path: Path) -> None:
+    store = tmp_path / "store"
+    orphaned_build = store / ".KEY.builds" / "CRASHED"
+    orphaned_build.mkdir(parents=True)
+    (orphaned_build / "partial").touch()
+    (store / "KEY").symlink_to(orphaned_build.relative_to(store), target_is_directory=True)
+
+    entry = _ensure_store_entry(
+        store=store,
+        key="KEY",
+        build=_synthetic_build([]),
+        sanity_path="sane",
+        label="test env",
+    )
+
+    assert not orphaned_build.exists()
+    assert _private_builds(store) == [entry.resolve()]
+
+
 def test_concurrent_same_key_single_build(tmp_path: Path) -> None:
     store = tmp_path / "store"
     calls: list[int] = []
@@ -203,6 +246,7 @@ def test_concurrent_same_key_single_build(tmp_path: Path) -> None:
 def test_lost_lease_blocks_marker(tmp_path: Path) -> None:
     store = tmp_path / "store"
     lockfile = store / "KEY.lock"
+    replacement = store / ".KEY.builds" / "NEWOWNER"
 
     def build(entry_dir: Path) -> None:
         entry_dir.mkdir(parents=True)
@@ -214,11 +258,211 @@ def test_lost_lease_blocks_marker(tmp_path: Path) -> None:
         thief = NFSLock(lockfile, lifetime=1)
         thief.acquire(blocking=False)
         thief.release()
+        replacement.mkdir()
+        (replacement / "active").touch()
 
-    with pytest.raises(RuntimeError, match="Lost the build lock"):
+    with pytest.raises(SnapshotError, match="Lost the build lock"):
         _ensure_store_entry(store=store, key="KEY", build=build, sanity_path="sane", label="test env")
     assert not (store / "KEY.complete").exists()
-    assert (store / "KEY").is_dir()  # replacement ownership is ambiguous; do not delete
+    assert not (store / "KEY").exists()
+    assert (replacement / "active").is_file()
+
+
+def test_lost_lease_after_link_publication_blocks_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = tmp_path / "store"
+    lockfile = store / "KEY.lock"
+    real_publish_entry_link = snapshot_mod._publish_entry_link
+    stole_once = False
+
+    def publish_then_steal(store_dir: Path, entry_dir: Path, build_dir: Path) -> None:
+        nonlocal stole_once
+        real_publish_entry_link(store_dir, entry_dir, build_dir)
+        if not stole_once:
+            stole_once = True
+            stale = time.time() - 3600
+            os.utime(lockfile, (stale, stale))
+            thief = NFSLock(lockfile, lifetime=1)
+            thief.acquire(blocking=False)
+            thief.release()
+
+    monkeypatch.setattr(snapshot_mod, "_publish_entry_link", publish_then_steal)
+
+    with pytest.raises(SnapshotError, match="Lost the build lock"):
+        _ensure_store_entry(
+            store=store,
+            key="KEY",
+            build=_synthetic_build([]),
+            sanity_path="sane",
+            label="test env",
+        )
+
+    assert not (store / "KEY.complete").exists()
+    assert (store / "KEY").is_symlink()  # stale owner must not mutate the shared pointer
+    assert not _private_builds(store)
+
+    calls: list[int] = []
+    entry = _ensure_store_entry(
+        store=store, key="KEY", build=_synthetic_build(calls), sanity_path="sane", label="test env"
+    )
+    assert calls == [1]
+    assert (entry / "sane").is_file()
+    assert (store / "KEY.complete").is_file()
+
+
+def test_marker_generation_rejects_pointer_swapped_during_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = tmp_path / "store"
+    marker = store / "KEY.complete"
+    lockfile = store / "KEY.lock"
+    replacement = store / ".KEY.builds" / "NEWOWNER"
+    real_replace = snapshot_mod.os.replace
+    stole_once = False
+
+    def replace_after_theft(src: str | Path, dst: str | Path) -> None:
+        nonlocal stole_once
+        if Path(dst).parent == store and Path(dst).name.startswith(".KEY.complete.") and not stole_once:
+            stole_once = True
+            stale = time.time() - 3600
+            os.utime(lockfile, (stale, stale))
+            thief = NFSLock(lockfile, lifetime=1)
+            thief.acquire(blocking=False)
+            replacement.mkdir()
+            (replacement / "sane").touch()  # partial trees can contain the sanity path early
+            replacement_link = store / ".KEY.replacement"
+            replacement_link.symlink_to(replacement.relative_to(store), target_is_directory=True)
+            real_replace(replacement_link, store / "KEY")
+            thief.release()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(snapshot_mod.os, "replace", replace_after_theft)
+
+    with pytest.raises(SnapshotError, match="Build pointer changed"):
+        _ensure_store_entry(
+            store=store,
+            key="KEY",
+            build=_synthetic_build([]),
+            sanity_path="sane",
+            label="test env",
+        )
+
+    assert (store / "KEY").resolve() == replacement
+    assert not marker.exists()  # the stale generation cannot bless NEWOWNER
+    calls: list[int] = []
+    entry = _ensure_store_entry(
+        store=store,
+        key="KEY",
+        build=_synthetic_build(calls),
+        sanity_path="sane",
+        label="test env",
+    )
+    assert calls == [1]
+    assert (entry / "sane").is_file()
+
+
+def test_stale_shared_marker_cannot_invalidate_committed_generation(tmp_path: Path) -> None:
+    store = tmp_path / "store"
+    first = store / ".KEY.builds" / "FIRST"
+    winner = store / ".KEY.builds" / "WINNER"
+    for target in (first, winner):
+        target.mkdir(parents=True)
+        (target / "sane").touch()
+        snapshot_mod._private_completion_marker(store, "KEY", target).write_text("complete\n")
+    (store / "KEY").symlink_to(winner.relative_to(store), target_is_directory=True)
+    (store / "KEY.complete").symlink_to(snapshot_mod._private_completion_marker(store, "KEY", first).relative_to(store))
+
+    calls: list[int] = []
+    entry = _ensure_store_entry(
+        store=store,
+        key="KEY",
+        build=_synthetic_build(calls),
+        sanity_path="sane",
+        label="test env",
+    )
+
+    assert calls == []
+    assert entry.resolve() == winner
+    assert winner.is_dir()
+
+
+def test_marker_publication_failure_cleans_link_and_private_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = tmp_path / "store"
+    real_publish_marker = snapshot_mod._publish_marker
+
+    def publish_then_fail(
+        store_dir: Path,
+        marker: Path,
+        *,
+        target: Path,
+        before_commit: Callable[[], None] | None = None,
+    ) -> None:
+        real_publish_marker(store_dir, marker, target=target, before_commit=before_commit)
+        msg = "marker publication failed"
+        raise OSError(msg)
+
+    monkeypatch.setattr(snapshot_mod, "_publish_marker", publish_then_fail)
+
+    with pytest.raises(SnapshotError, match="Could not publish test env KEY") as raised:
+        _ensure_store_entry(
+            store=store,
+            key="KEY",
+            build=_synthetic_build([]),
+            sanity_path="sane",
+            label="test env",
+        )
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert str(raised.value.__cause__) == "marker publication failed"
+    assert not (store / "KEY.complete").exists()
+    assert (store / "KEY").is_symlink()
+    assert len(_private_builds(store)) == 1
+
+    calls: list[int] = []
+    entry = _ensure_store_entry(
+        store=store,
+        key="KEY",
+        build=_synthetic_build(calls),
+        sanity_path="sane",
+        label="test env",
+    )
+    assert calls == []
+    assert (entry / "sane").is_file()
+    assert (store / "KEY.complete").is_file()
+
+
+def test_syncfs_failure_blocks_and_cleans_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = tmp_path / "store"
+
+    def fail_syncfs(_fd: int) -> None:
+        msg = "syncfs failed"
+        raise OSError(msg)
+
+    monkeypatch.setattr(snapshot_mod.os, "syncfs", fail_syncfs, raising=False)
+
+    with pytest.raises(SnapshotError, match="Could not publish test env KEY") as raised:
+        _ensure_store_entry(
+            store=store,
+            key="KEY",
+            build=_synthetic_build([]),
+            sanity_path="sane",
+            label="test env",
+        )
+
+    assert isinstance(raised.value.__cause__, OSError)
+    assert str(raised.value.__cause__) == "syncfs failed"
+    assert not (store / "KEY.complete").exists()
+    assert (store / "KEY").is_symlink()
+    assert not _private_builds(store)
 
 
 def test_failed_build_removes_entry_and_leaves_no_marker(tmp_path: Path) -> None:
@@ -263,14 +507,14 @@ def test_local_package_paths_rejects_unknown_source(tmp_path: Path) -> None:
         "[package.source]\n"
         'teleport = "elsewhere"\n'
     )
-    with pytest.raises(RuntimeError, match="Unrecognized source"):
+    with pytest.raises(SnapshotError, match="Unrecognized source"):
         _local_package_paths(lock)
 
 
 def test_local_package_paths_rejects_unknown_lock_version(tmp_path: Path) -> None:
     lock = tmp_path / "uv.lock"
     lock.write_text("version = 2\n")
-    with pytest.raises(RuntimeError, match="Unsupported uv.lock version"):
+    with pytest.raises(SnapshotError, match=r"Unsupported uv\.lock version"):
         _local_package_paths(lock)
 
 

@@ -29,11 +29,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Self
 
-from misen.exceptions import LockUnavailableError
+from misen.exceptions import LockUnavailableError, StorageError
 from misen.utils.hashing import ResultHash
-from misen.workspace import Workspace
+from misen.workspace import Workspace, _storage_errors
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from misen.tasks import Task
     from misen.utils.locks import LockLike
 
@@ -106,10 +108,15 @@ class _MemoryResultStore(MutableMapping[ResultHash, Path]):
         return self._paths[key]
 
     def __setitem__(self, key: ResultHash, value: Path) -> None:
+        self.commit(key, value, before_commit=lambda: None)
+
+    def commit(self, key: ResultHash, value: Path, *, before_commit: Callable[[], None]) -> None:
+        """Move a result into place after a caller-supplied ownership check."""
         if key in self._paths:
             return
         target = self._payload_path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
+        before_commit()
         shutil.move(value, target)
         self._paths[key] = target
 
@@ -127,8 +134,8 @@ class _MemoryResultStore(MutableMapping[ResultHash, Path]):
 
 def _cleanup_directory(path: Path) -> None:
     """Remove ``path`` recursively; quiet on missing or partially-removed trees."""
-    if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        shutil.rmtree(path)
 
 
 class InMemoryWorkspace(Workspace):
@@ -145,21 +152,29 @@ class InMemoryWorkspace(Workspace):
 
     def __post_init__(self) -> None:
         """Create directory layout and initialize in-memory caches."""
-        if self.directory is None:
-            self._directory = Path(tempfile.mkdtemp(prefix="misen-mem-"))
-            self._owns_directory = True
-        else:
-            self._directory = Path(self.directory)
-            self._directory.mkdir(parents=True, exist_ok=True)
-            self._owns_directory = False
+        self._owns_directory = False
+        try:
+            if self.directory is None:
+                self._directory = Path(tempfile.mkdtemp(prefix="misen-mem-"))
+                self._owns_directory = True
+            else:
+                self._directory = Path(self.directory)
+                self._directory.mkdir(parents=True, exist_ok=True)
+                self._owns_directory = False
+
+            self.get_temp_dir().mkdir(parents=True, exist_ok=True)
+            (self._directory / "scratch").mkdir(parents=True, exist_ok=True)
+            (self._directory / "task_logs").mkdir(parents=True, exist_ok=True)
+            (self._directory / "job_logs").mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            if self._owns_directory:
+                _cleanup_directory(self._directory)
+            location = self.directory or "an automatic temporary directory"
+            msg = f"Could not initialize in-memory workspace at {location}: {exc}"
+            raise StorageError(msg) from exc
 
         self._locks: dict[tuple[str, str], _ThreadLock] = {}
         self._locks_table_lock = threading.Lock()
-
-        self.get_temp_dir().mkdir(parents=True, exist_ok=True)
-        (self._directory / "scratch").mkdir(parents=True, exist_ok=True)
-        (self._directory / "task_logs").mkdir(parents=True, exist_ok=True)
-        (self._directory / "job_logs").mkdir(parents=True, exist_ok=True)
 
         super()._post_init(
             resolved_hash_cache={},
@@ -180,8 +195,15 @@ class InMemoryWorkspace(Workspace):
         ``directory`` argument; the caller owns that directory.
         """
         if self._owns_directory:
+            try:
+                shutil.rmtree(self._directory)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                msg = f"Could not close in-memory workspace at {self._directory}: {exc}"
+                raise StorageError(msg) from exc
             self._finalizer.detach()
-            _cleanup_directory(self._directory)
+            self._owns_directory = False
 
     def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
         """Return per-(namespace, key) in-process lock."""
@@ -195,18 +217,21 @@ class InMemoryWorkspace(Workspace):
     def publish_snapshot(self, key: str, staged_dir: Path) -> None:
         """Publish a snapshot into the workspace's temporary directory."""
         final = self._directory / "snapshots" / key
-        if not final.exists():
-            final.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                staged_dir.rename(final)
-            except OSError:
-                if not final.is_dir():
-                    raise
+        with _storage_errors(f"Could not publish snapshot {key!r} to {self._directory}"):
+            if not final.exists():
+                final.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    staged_dir.rename(final)
+                except OSError:
+                    if not final.is_dir():
+                        raise
 
     def fetch_snapshot(self, key: str) -> Path:
         """Return a locally published snapshot directory."""
         path = self._directory / "snapshots" / key
-        if not path.is_dir():
+        with _storage_errors(f"Could not inspect snapshot {key!r} in {path.parent}"):
+            available = path.is_dir()
+        if not available:
             msg = f"No snapshot published under key {key!r} in {path.parent}."
             raise FileNotFoundError(msg)
         return path
@@ -217,20 +242,14 @@ class InMemoryWorkspace(Workspace):
             msg = f"Invalid job-file name: {name!r}"
             raise ValueError(msg)
         path = self._directory / "job_files" / submission_id / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        with contextlib.suppress(OSError):
+        with _storage_errors(f"Could not persist job file {name!r} for submission {submission_id!r}"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
             path.chmod(0o600)
         return str(path)
 
     def bootstrap_transport(self) -> None:
         """Use directly visible paths for this process-local workspace."""
-
-    def start_scratch_dir_sync(self, task: Task) -> None:
-        """No-op because the scratch directory needs no remote sync."""
-
-    def finalize_scratch_dir(self, task: Task) -> None:
-        """No-op because the scratch directory needs no final upload."""
 
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task."""
@@ -245,14 +264,3 @@ class InMemoryWorkspace(Workspace):
         log_dir = self._directory / "task_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str
-
-    def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
-        """No-op because task logs stay in this workspace's local directory."""
-
-    def streaming_job_log(self, local_path: Path) -> contextlib.AbstractContextManager[None]:
-        """Return a no-op context for process-local job logs."""
-        del local_path
-        return contextlib.nullcontext()
-
-    def finalize_job_log(self, local_path: Path) -> None:
-        """No-op because process-local job logs require no upload."""

@@ -14,7 +14,6 @@ and lock-based safety for concurrent producers.
 from __future__ import annotations
 
 import binascii
-import contextlib
 import logging
 import os
 import shutil
@@ -23,14 +22,17 @@ from collections.abc import Iterator, MutableMapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Generic, Literal, Self, TypeVar, cast
 
+from misen.exceptions import LockUnavailableError, StorageError
 from misen.utils.fsync import atomic_write_bytes as _atomic_write_bytes
 from misen.utils.fsync import fsync_dir as _fsync_dir
 from misen.utils.fsync import fsync_file as _fsync_file
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, NFSLock
-from misen.workspace import Workspace
+from misen.workspace import Workspace, _storage_errors
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from misen.tasks import Task
 
 KT = TypeVar("KT", bound=Hash)
@@ -142,6 +144,12 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             return self._value_type.decode(self._key_path(key).read_bytes())
         except FileNotFoundError as e:
             raise KeyError(key) from e
+        except ValueError as exc:
+            msg = f"Stored value for {key!r} is corrupt or incompatible."
+            raise StorageError(msg) from exc
+        except OSError as exc:
+            msg = f"Could not read stored value for {key!r}: {exc}"
+            raise StorageError(msg) from exc
 
     def __setitem__(self, key: KT, value: VT) -> None:
         """Atomically write the value for ``key``, overwriting any prior value.
@@ -156,8 +164,21 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             value: Hash value.
         """
         path = self._key_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(path, value.encode())
+        with _storage_errors(f"Could not persist stored value for {key!r}"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(path, value.encode())
+
+    def commit(self, key: KT, value: VT, *, before_commit: Callable[[], None]) -> None:
+        """Create a fenced, write-once index entry without stale overwrites."""
+        path = self._key_path(key)
+        encoded = value.encode()
+        with _storage_errors(f"Could not persist stored value for {key!r}"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if _atomic_write_bytes(path, encoded, before_commit=before_commit, overwrite=False):
+                return
+            if path.read_bytes() != encoded:
+                msg = f"Another writer committed a different value for {key!r}."
+                raise LockUnavailableError(msg)
 
     def __delitem__(self, key: KT) -> None:
         """Remove the value stored for ``key``.
@@ -170,7 +191,11 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             path.unlink()
         except FileNotFoundError as e:
             raise KeyError(key) from e
-        _fsync_dir(path.parent)
+        except OSError as exc:
+            msg = f"Could not delete stored value for {key!r}: {exc}"
+            raise StorageError(msg) from exc
+        with _storage_errors(f"Could not durably delete stored value for {key!r}"):
+            _fsync_dir(path.parent)
 
     def __contains__(self, key: object) -> bool:
         """Return whether ``key`` has a stored value.
@@ -183,7 +208,8 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         """
         if not isinstance(key, self._key_type):
             return False
-        return self._key_path(key).is_file()
+        with _storage_errors(f"Could not inspect stored value for {key!r}"):
+            return self._key_path(key).is_file()
 
     def __iter__(self) -> Iterator[KT]:
         """Iterate over the typed keys currently stored.
@@ -192,13 +218,14 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
         ``.tmp`` files an in-flight :meth:`__setitem__` may leave behind, plus
         any foreign file.
         """
-        for p in self._directory.glob(_B32_SHARD_GLOB):
-            if not p.is_file() or p.name[:2] != p.parent.name:
-                continue
-            try:
-                yield self._key_type.from_b32(p.name)
-            except (binascii.Error, ValueError):
-                continue
+        with _storage_errors(f"Could not list stored values in {self._directory}"):
+            for p in self._directory.glob(_B32_SHARD_GLOB):
+                if not p.is_file() or p.name[:2] != p.parent.name:
+                    continue
+                try:
+                    yield self._key_type.from_b32(p.name)
+                except (binascii.Error, ValueError):
+                    continue
 
     def __len__(self) -> int:
         """Return the number of stored keys."""
@@ -227,7 +254,10 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
 
     def __contains__(self, key: object) -> bool:
         """Return whether result payload exists on disk."""
-        return isinstance(key, ResultHash) and self._result_dir_path(key).exists()
+        if not isinstance(key, ResultHash):
+            return False
+        with _storage_errors(f"Could not inspect stored result {key.b32()}"):
+            return self._result_dir_path(key).exists()
 
     def __getitem__(self, key: ResultHash) -> Path:
         """Return the directory for a result hash.
@@ -236,11 +266,17 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
             KeyError: If the result directory is missing.
         """
         result_dir_path = self._result_dir_path(key)
-        if not result_dir_path.exists():
+        with _storage_errors(f"Could not inspect stored result {key.b32()}"):
+            exists = result_dir_path.exists()
+        if not exists:
             raise KeyError(key)
         return result_dir_path
 
     def __setitem__(self, key: ResultHash, value: Path) -> None:
+        """Publish a serialized payload directory."""
+        self.commit(key, value, before_commit=lambda: None)
+
+    def commit(self, key: ResultHash, value: Path, *, before_commit: Callable[[], None]) -> None:
         """Atomically publish a serialized payload directory.
 
         The payload tree is fsync'd in full (:func:`_fsync_tree`) and then moved
@@ -263,13 +299,16 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         Args:
             key: Result hash.
             value: Temporary directory containing the serialized payload.
+            before_commit: Ownership check run beside the atomic rename.
         """
         result_dir_path = self._result_dir_path(key)
-        if not result_dir_path.exists():
-            result_dir_path.parent.mkdir(parents=True, exist_ok=True)
-            _fsync_tree(value)  # flush payload contents+entries before the publish rename
-            os.rename(value, result_dir_path)  # noqa: PTH104  -- explicit atomic rename, no copy fallback
-            _fsync_dir(result_dir_path.parent)
+        with _storage_errors(f"Could not persist stored result {key.b32()}"):
+            if not result_dir_path.exists():
+                result_dir_path.parent.mkdir(parents=True, exist_ok=True)
+                _fsync_tree(value)  # flush payload contents+entries before the publish rename
+                before_commit()
+                os.rename(value, result_dir_path)  # noqa: PTH104  -- explicit atomic rename, no copy fallback
+                _fsync_dir(result_dir_path.parent)
 
     def __delitem__(self, key: ResultHash) -> None:
         """Delete a result directory.
@@ -280,14 +319,20 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         result_dir_path = self._result_dir_path(key)
         if not result_dir_path.exists():
             raise KeyError(key)
-        # atomic deletion
-        trash_dir = Path(
-            tempfile.mkdtemp(dir=result_dir_path.parent, prefix=f"{result_dir_path.name}.", suffix=".trash")
-        )
-        shutil.move(result_dir_path, trash_dir)
-        _fsync_dir(result_dir_path.parent)
-        shutil.rmtree(trash_dir)
-        _fsync_dir(trash_dir.parent)
+        try:
+            # atomic deletion
+            trash_dir = Path(
+                tempfile.mkdtemp(dir=result_dir_path.parent, prefix=f"{result_dir_path.name}.", suffix=".trash")
+            )
+            shutil.move(result_dir_path, trash_dir)
+            _fsync_dir(result_dir_path.parent)
+            shutil.rmtree(trash_dir)
+            _fsync_dir(trash_dir.parent)
+        except KeyError:
+            raise
+        except OSError as exc:
+            msg = f"Could not delete stored result {key.b32()}: {exc}"
+            raise StorageError(msg) from exc
 
     def __iter__(self) -> Iterator[ResultHash]:
         """Iterate over stored result hashes.
@@ -297,13 +342,14 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         dir a concurrent :meth:`__delitem__` may leave behind, plus any foreign
         entry.
         """
-        for p in self.directory.glob(_B32_SHARD_GLOB):
-            if not p.is_dir() or p.name[:2] != p.parent.name:
-                continue
-            try:
-                yield ResultHash.from_b32(p.name)
-            except (binascii.Error, ValueError):
-                continue
+        with _storage_errors(f"Could not list stored results in {self.directory}"):
+            for p in self.directory.glob(_B32_SHARD_GLOB):
+                if not p.is_dir() or p.name[:2] != p.parent.name:
+                    continue
+                try:
+                    yield ResultHash.from_b32(p.name)
+                except (binascii.Error, ValueError):
+                    continue
 
     def __len__(self) -> int:
         """Return number of stored results."""
@@ -323,13 +369,14 @@ class DiskWorkspace(Workspace):
         # directory would resolve to a different tree on the worker.
         self.directory = str(Path(self.directory).absolute())
         self._directory_path = Path(self.directory)
-        self._directory_path.mkdir(exist_ok=True)
-        self.get_temp_dir().mkdir(parents=True, exist_ok=True)
-        (self._directory_path / "scratch").mkdir(parents=True, exist_ok=True)
-        (self._directory_path / "task_logs").mkdir(parents=True, exist_ok=True)
-        (self._directory_path / "job_logs").mkdir(parents=True, exist_ok=True)
-        (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
-        (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
+        with _storage_errors(f"Could not initialize disk workspace at {self._directory_path}"):
+            self._directory_path.mkdir(exist_ok=True)
+            self.get_temp_dir().mkdir(parents=True, exist_ok=True)
+            (self._directory_path / "scratch").mkdir(parents=True, exist_ok=True)
+            (self._directory_path / "task_logs").mkdir(parents=True, exist_ok=True)
+            (self._directory_path / "job_logs").mkdir(parents=True, exist_ok=True)
+            (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
+            (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
 
         super()._post_init(
             resolved_hash_cache=FileKVMapping[TaskHash, ResolvedTaskHash](self._directory_path / "resolved_hash_cache"),
@@ -384,25 +431,28 @@ class DiskWorkspace(Workspace):
         atomic — that residue is a *complete* tree, so a later publisher
         may simply re-commit the marker.
         """
-        snapshots_dir = self._directory_path / "snapshots"
-        if (snapshots_dir / f"{key}.complete").is_file() and (snapshots_dir / key).is_dir():
-            return
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
-        _fsync_tree(staged_dir)
-        final = snapshots_dir / key
-        try:
-            staged_dir.rename(final)
-        except OSError:
-            if not final.is_dir():
-                raise
-        _fsync_dir(snapshots_dir)
-        _atomic_write_bytes(snapshots_dir / f"{key}.complete", b"complete\n")
+        with _storage_errors(f"Could not publish snapshot {key!r} to {self._directory_path}"):
+            snapshots_dir = self._directory_path / "snapshots"
+            if (snapshots_dir / f"{key}.complete").is_file() and (snapshots_dir / key).is_dir():
+                return
+            snapshots_dir.mkdir(parents=True, exist_ok=True)
+            _fsync_tree(staged_dir)
+            final = snapshots_dir / key
+            try:
+                staged_dir.rename(final)
+            except OSError:
+                if not final.is_dir():
+                    raise
+            _fsync_dir(snapshots_dir)
+            _atomic_write_bytes(snapshots_dir / f"{key}.complete", b"complete\n")
 
     def fetch_snapshot(self, key: str) -> Path:
         """Return a marker-committed snapshot directory."""
         snapshots_dir = self._directory_path / "snapshots"
         path = snapshots_dir / key
-        if not (snapshots_dir / f"{key}.complete").is_file() or not path.is_dir():
+        with _storage_errors(f"Could not inspect snapshot {key!r} in {snapshots_dir}"):
+            available = (snapshots_dir / f"{key}.complete").is_file() and path.is_dir()
+        if not available:
             msg = f"No snapshot published under key {key!r} in {snapshots_dir}."
             raise FileNotFoundError(msg)
         return path
@@ -413,20 +463,14 @@ class DiskWorkspace(Workspace):
             msg = f"Invalid job-file name: {name!r}"
             raise ValueError(msg)
         path = self._directory_path / "job_files" / submission_id / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        with contextlib.suppress(OSError):
+        with _storage_errors(f"Could not persist job file {name!r} for submission {submission_id!r}"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
             path.chmod(0o600)
         return str(path)
 
     def bootstrap_transport(self) -> None:
         """Use directly worker-visible snapshot and job-file paths."""
-
-    def start_scratch_dir_sync(self, task: Task) -> None:
-        """No-op because the scratch directory is already durable."""
-
-    def finalize_scratch_dir(self, task: Task) -> None:
-        """No-op because the scratch directory requires no upload."""
 
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task.
@@ -449,14 +493,3 @@ class DiskWorkspace(Workspace):
         log_dir = self._directory_path / "task_logs" / key_str[:2]
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir, key_str
-
-    def finalize_task_log(self, task: Task, job_id: str | None = None) -> None:
-        """No-op because task logs are written directly to durable storage."""
-
-    def streaming_job_log(self, local_path: Path) -> contextlib.AbstractContextManager[None]:
-        """Return a no-op context because job logs are already durable."""
-        del local_path
-        return contextlib.nullcontext()
-
-    def finalize_job_log(self, local_path: Path) -> None:
-        """No-op because job logs require no final upload."""

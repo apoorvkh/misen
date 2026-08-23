@@ -14,8 +14,8 @@ from rich.console import Console
 from rich.text import Text
 from rich.tree import Tree as RichTree
 
-from misen.exceptions import CacheError
-from misen.executor import CompletedJob, JobState, bulk_job_states
+from misen.exceptions import CacheError, ConfigError, StorageError
+from misen.executor import CompletedJob, JobState, bulk_job_states, raise_for_failed_jobs
 from misen.utils.cli.display import format_task_line_markup, format_task_line_text, iter_task_arg_children
 from misen.utils.runtime_events import task_label
 
@@ -61,15 +61,19 @@ _JOB_EMPHASIS_STYLE = "on grey35"
 
 
 def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> None:
-    """Submit experiment tasks and monitor resulting jobs via the TUI."""
+    """Submit experiment tasks and monitor resulting jobs via the TUI.
+
+    Raises:
+        ConfigError: If the Textual dependency is unavailable.
+        JobFailedError: If one or more monitored jobs fail.
+    """
     named_tasks = experiment.normalized_tasks()
-    tasks = set(named_tasks.values())
     with _runtime_job_board_suppressed():
-        job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
+        job_graph = executor.submit(tasks=set(named_tasks.values()), workspace=workspace, blocking=False)
         with _runtime_events_suppressed():
-            watch_tasks(named_tasks=named_tasks, job_graph=job_graph, workspace=workspace)
-    final_states = bulk_job_states(list(job_graph.nodes()))
+            final_states = watch_tasks(named_tasks=named_tasks, job_graph=job_graph, workspace=workspace)
     _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, states=final_states)
+    raise_for_failed_jobs(final_states)
 
 
 def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
@@ -78,25 +82,24 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
     When stderr is a terminal the tree re-renders in place while jobs run. When
     stderr is piped (CI/logs), one line is emitted per job state transition and
     a final tree is printed at the end so the output still has structure.
+
+    Raises:
+        JobFailedError: If one or more monitored jobs fail.
     """
     named_tasks = experiment.normalized_tasks()
-    tasks = set(named_tasks.values())
     console = Console(stderr=True, soft_wrap=True)
-    final_states: dict[Job, JobState]
     with _runtime_job_board_suppressed():
-        job_graph = executor.submit(tasks=tasks, workspace=workspace, blocking=False)
+        job_graph = executor.submit(tasks=set(named_tasks.values()), workspace=workspace, blocking=False)
         if not job_graph.nodes():
             console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
             return
-        try:
-            if console.is_terminal:
-                _watch_live_tree(named_tasks=named_tasks, job_graph=job_graph, console=console)
-            else:
-                _watch_line_events(job_graph=job_graph, console=console)
-        finally:
-            final_states = bulk_job_states(list(job_graph.nodes()))
+        if console.is_terminal:
+            final_states = _watch_live_tree(named_tasks=named_tasks, job_graph=job_graph, console=console)
+        else:
+            final_states = _watch_line_events(job_graph=job_graph, console=console)
     if not console.is_terminal:
         _print_final_tree(named_tasks=named_tasks, job_graph=job_graph, console=console, states=final_states)
+    raise_for_failed_jobs(final_states)
 
 
 def watch_tasks(
@@ -106,7 +109,7 @@ def watch_tasks(
     workspace: Workspace,
     poll_interval_s: float = 0.2,
     state_poll_interval_s: float = 2.0,
-) -> None:
+) -> dict[Job, JobState]:
     """Render the task dependency tree and stream logs until users exit.
 
     Args:
@@ -119,12 +122,15 @@ def watch_tasks(
             queries can be expensive on busy SLURM controllers, so they
             run on a slower cadence than log streaming and execute on a
             background thread to avoid blocking the UI.
+
+    Raises:
+        ConfigError: If the Textual dependency is unavailable.
     """
     console = Console(stderr=True, soft_wrap=True)
     if not job_graph.nodes():
         console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
-        return
-    _run_textual_task_monitor(
+        return {}
+    return _run_textual_task_monitor(
         named_tasks=named_tasks,
         job_graph=job_graph,
         workspace=workspace,
@@ -304,18 +310,20 @@ def _run_textual_task_monitor(
     workspace: Workspace,
     poll_interval_s: float,
     state_poll_interval_s: float,
-) -> None:
+) -> dict[Job, JobState]:
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
         from textual.containers import Horizontal, Vertical
         from textual.widgets import Footer, Header, RichLog, Static, Tree
-    except ModuleNotFoundError as e:
+    except ModuleNotFoundError as exc:
+        if exc.name != "textual":
+            raise
         msg = (
             "Textual is required for the run TUI but is not installed. "
             "Install dependencies (for example: `uv sync`) and retry."
         )
-        raise RuntimeError(msg) from e
+        raise ConfigError(msg) from exc
 
     index = _JobStateIndex.build(job_graph)
     all_jobs: list[Job] = list(job_graph.nodes())
@@ -628,6 +636,8 @@ def _run_textual_task_monitor(
             self._user_interrupted: bool = False
             """Set by :meth:`action_interrupt` so the runner can re-raise
             ``KeyboardInterrupt`` once the TUI has shut down cleanly."""
+            self._monitor_error: Exception | None = None
+            """Fatal state-query error to re-raise after Textual tears down."""
             self._job_states: dict[Job, JobState] = dict.fromkeys(all_jobs, "unknown")
             """Single source of truth for per-job state. Refreshed by the
             slow state tick; every UI consumer reads from this cache so a
@@ -670,7 +680,13 @@ def _run_textual_task_monitor(
             # Initial state poll runs synchronously so the first paint shows
             # accurate states; subsequent polls go through the background
             # path so the UI never blocks on SLURM CLI latency.
-            self._apply_states(bulk_job_states(all_jobs))
+            try:
+                states = bulk_job_states(all_jobs)
+            except Exception as exc:  # noqa: BLE001 -- Textual otherwise hides callback failures
+                self._monitor_error = exc
+                self.exit()
+                return
+            self._apply_states(states)
             self._repaint_tree()
             self._render_summary_widget()
             self._update_log_title()
@@ -821,7 +837,12 @@ def _run_textual_task_monitor(
                 return
             self._state_poll_pending = True
             try:
-                states = await asyncio.to_thread(bulk_job_states, all_jobs)
+                try:
+                    states = await asyncio.to_thread(bulk_job_states, all_jobs)
+                except Exception as exc:  # noqa: BLE001 -- Textual otherwise hides callback failures
+                    self._monitor_error = exc
+                    self.exit()
+                    return
             finally:
                 self._state_poll_pending = False
             if not self.is_mounted:
@@ -948,7 +969,12 @@ def _run_textual_task_monitor(
                 return
             log_viewer = self.query_one("#log-viewer", _LogPane)
 
-            key, opener, placeholder = self._resolve_log_source(entry)
+            try:
+                key, opener, placeholder = self._resolve_log_source(entry)
+            except StorageError as exc:
+                key = ("log-error", type(exc).__name__, str(exc))
+                opener = None
+                placeholder = f"(log unavailable: {type(exc).__name__})"
             is_new_source = key != self._log_key
             if is_new_source:
                 self._log_key = key
@@ -1047,11 +1073,14 @@ def _run_textual_task_monitor(
 
     app = _TaskMonitorApp()
     app.run()
+    if app._monitor_error is not None:  # noqa: SLF001
+        raise app._monitor_error  # noqa: SLF001
     # Propagate Ctrl+C as a real KeyboardInterrupt — Textual swallows the
     # signal and turns it into a key event, so we re-raise here once the TUI
     # has finished tearing itself down.
     if app._user_interrupted:  # noqa: SLF001
         raise KeyboardInterrupt
+    return dict(app._job_states)  # noqa: SLF001
 
 
 @contextlib.contextmanager
@@ -1150,7 +1179,7 @@ def _watch_live_tree(
     job_graph: DependencyGraph[Job],
     console: Console,
     poll_interval_s: float = 0.25,
-) -> None:
+) -> dict[Job, JobState]:
     """Re-render the dependency tree in place via Rich ``Live`` until all jobs terminate."""
     from rich.live import Live
 
@@ -1166,6 +1195,7 @@ def _watch_live_tree(
             time.sleep(poll_interval_s)
             states = bulk_job_states(jobs)
             live.update(_build_session_rich_tree(named_tasks, job_graph, states))
+    return states
 
 
 def _watch_line_events(
@@ -1173,7 +1203,7 @@ def _watch_line_events(
     job_graph: DependencyGraph[Job],
     console: Console,
     poll_interval_s: float = 0.5,
-) -> None:
+) -> dict[Job, JobState]:
     """Poll job states and emit one line per transition for non-TTY consumers."""
     jobs = list(job_graph.nodes())
     last: dict[int, JobState] = {}
@@ -1190,5 +1220,5 @@ def _watch_line_events(
                 display = "complete" if state == "done" else state
                 console.print(f"{display:<8} {label}")
         if all_terminal:
-            return
+            return states
         time.sleep(poll_interval_s)

@@ -13,6 +13,7 @@ from typing import Annotated, Any, cast
 import tyro
 
 from misen.utils.cli import system_exit_code
+from misen.utils.cli.errors import run_cli
 
 __all__ = []
 
@@ -60,8 +61,8 @@ TopLevelCommand = (
 )
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Execute the ``misen`` CLI."""
+def _main(argv: list[str] | None = None) -> int:
+    """Dispatch the ``misen`` CLI after applying its outer error boundary."""
     args_list = list(sys.argv[1:] if argv is None else argv)
     if not args_list or args_list[0] in {"-h", "--help"}:
         try:
@@ -89,6 +90,11 @@ def main(argv: list[str] | None = None) -> int:
         return int(tyro.cli(fill, args=unknown_args))
 
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Execute the ``misen`` CLI with consistent user-facing errors."""
+    return run_cli(lambda: _main(argv))
 
 
 if __name__ == "__main__":

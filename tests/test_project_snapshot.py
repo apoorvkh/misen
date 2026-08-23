@@ -22,6 +22,7 @@ import obstore.store as obstore_store
 import pytest
 import tyro
 
+from misen.exceptions import ConfigError, SnapshotError
 from misen.utils import materialize_env
 from misen.utils import snapshot as snapshot_mod
 from misen.utils.bootstrap_transport import render_python_transport, worker_bootstrap_script
@@ -148,7 +149,7 @@ def test_staging_contents_and_key_stability(tmp_path: Path, counted_run: list[li
 
     # No misen in the lock: bootstrap dispatch must fail with a clear error.
     assert snapshot.misen_requirement is None
-    with pytest.raises(RuntimeError, match="installable misen"):
+    with pytest.raises(SnapshotError, match="installable misen"):
         snapshot.prepare_job(
             _StubWorkUnit(),  # type: ignore[arg-type]
             workspace,
@@ -412,7 +413,7 @@ def test_bootstrap_transports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         config={"secret_access_key": "do-not-embed"},
         cache_dir=str(tmp_path / "configured-cache"),
     )
-    with pytest.raises(ValueError, match="ambient worker environment"):
+    with pytest.raises(ConfigError, match="ambient worker environment"):
         configured.bootstrap_transport()
 
     class _NoTransportWorkspace:
@@ -568,7 +569,7 @@ def test_materializer_removes_corrupt_transported_snapshot(tmp_path: Path) -> No
     (corrupt / "wrong.txt").write_text("wrong")
     payload = workspace.put_job_file(snapshot.submission_id, "JOB.pkl", b"payload")
 
-    with pytest.raises(RuntimeError, match="expected"):
+    with pytest.raises(SnapshotError, match="expected"):
         tyro.cli(
             materialize_env.main,
             args=[
@@ -654,7 +655,7 @@ def test_executor_validation(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="env_store_dir"):
         SlurmExecutor(prewarm_envs=True)
     # Prewarm needs path-addressable job files.
-    with pytest.raises(ValueError, match="worker-visible paths"):
+    with pytest.raises(ConfigError, match="worker-visible paths"):
         ProjectSnapshot(workspace=cloud, env_store_dir=str(tmp_path / "s"), prewarm=True)
 
     # snapshot=False is valid without a shared env-store path.

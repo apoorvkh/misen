@@ -21,7 +21,7 @@ from rich.pretty import Pretty
 from rich.text import Text
 from rich.tree import Tree
 
-from misen.exceptions import CacheError
+from misen.exceptions import CacheError, CliUsageError, ExperimentReferenceError, StorageError
 from misen.executor import ExecutorType  # noqa: TC001
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
@@ -222,7 +222,7 @@ def _parse_experiment_reference(reference: str) -> tuple[str, str]:
     module_name, separator, class_name = reference.rpartition(":")
     if not separator or not module_name or not class_name:
         msg = "Invalid experiment reference. Expected '<module-or-file>:<ExperimentClass>'."
-        raise ValueError(msg)
+        raise ExperimentReferenceError(msg)
     return module_name, class_name
 
 
@@ -263,13 +263,10 @@ def _is_python_file_reference(reference: str) -> bool:
 
 def _resolve_reference_path(reference: str) -> Path:
     """Resolve a file reference into an absolute Python file path."""
-    path = Path(reference).expanduser()
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    path = path.resolve()
+    path = Path(reference).expanduser().resolve()
     if not path.is_file() or path.suffix != ".py":
         msg = f"Experiment module file {reference!r} does not exist or is not a .py file."
-        raise ValueError(msg)
+        raise ExperimentReferenceError(msg)
     return path
 
 
@@ -295,7 +292,7 @@ def _import_module_from_file(file_path: Path) -> ModuleType:
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
         msg = f"Unable to load module from {str(file_path)!r}."
-        raise ImportError(msg)
+        raise ExperimentReferenceError(msg)
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -310,15 +307,25 @@ def _import_module_from_file(file_path: Path) -> ModuleType:
 def _resolve_experiment_module(module_reference: str) -> ModuleType:
     """Resolve module by module path or explicit Python file reference."""
     if not _is_python_file_reference(module_reference):
-        with _prefer_local_src_path():
-            return importlib.import_module(module_reference)
+        return _import_experiment_module(module_reference)
 
     file_path = _resolve_reference_path(module_reference)
     local_module_name = _module_name_from_local_src(file_path)
     if local_module_name is not None:
-        with _prefer_local_src_path():
-            return importlib.import_module(local_module_name)
+        return _import_experiment_module(local_module_name)
     return _import_module_from_file(file_path)
+
+
+def _import_experiment_module(module_name: str) -> ModuleType:
+    """Import a requested module while preserving errors raised by its code."""
+    try:
+        with _prefer_local_src_path():
+            return importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != module_name and not module_name.startswith(f"{exc.name}."):
+            raise
+        msg = f"Experiment module {module_name!r} could not be imported."
+        raise ExperimentReferenceError(msg) from exc
 
 
 def resolve_experiment_reference(reference: str) -> type[Experiment] | Experiment:
@@ -332,22 +339,23 @@ def resolve_experiment_reference(reference: str) -> type[Experiment] | Experimen
     module = _resolve_experiment_module(module_reference)
     _register_module_pickle_by_value(module)
 
-    if not hasattr(module, attr_name):
+    try:
+        target = getattr(module, attr_name)
+    except AttributeError as exc:
         msg = f"Module {module_reference!r} has no attribute {attr_name!r}."
-        raise ValueError(msg)
+        raise ExperimentReferenceError(msg) from exc
 
     from misen import Experiment
 
-    target = getattr(module, attr_name)
     if isinstance(target, type):
         if not issubclass(target, Experiment):
             msg = f"Referenced class {reference!r} is not a misen.Experiment subclass."
-            raise TypeError(msg)
+            raise ExperimentReferenceError(msg)
         return target
     if isinstance(target, Experiment):
         return target
     msg = f"Referenced symbol {reference!r} is not a misen.Experiment class or instance."
-    raise TypeError(msg)
+    raise ExperimentReferenceError(msg)
 
 
 def resolve_experiment_class(reference: str) -> type[Experiment]:
@@ -355,7 +363,7 @@ def resolve_experiment_class(reference: str) -> type[Experiment]:
     target = resolve_experiment_reference(reference)
     if not isinstance(target, type):
         msg = f"Referenced symbol {reference!r} is not a class."
-        raise TypeError(msg)
+        raise ExperimentReferenceError(msg)
     return cast("type[Experiment]", target)
 
 
@@ -378,9 +386,10 @@ def experiment(argv: list[str] | tuple[str, ...] | None = None) -> int:
 
     try:
         experiment_ref = resolve_experiment_reference(parsed.reference)
-    except (ImportError, TypeError, ValueError) as exc:
-        sys.stderr.write(f"{exc}\n")
-        return 2
+    except ExperimentReferenceError as exc:
+        from misen.utils.cli.errors import render_cli_error
+
+        return render_cli_error(exc)
 
     experiment_cli(experiment_ref, argv=unknown_args)
     return 0
@@ -424,7 +433,7 @@ def _build_task_tree(
     """Build a rich tree for experiment tasks and dependencies."""
     if max_depth is not None and max_depth < 0:
         msg = "Tree max depth must be >= 0."
-        raise ValueError(msg)
+        raise CliUsageError(msg)
 
     tree = Tree(_styled_title(title))
     rendered: set[Task[Any]] = set()
@@ -583,10 +592,20 @@ def _coerce_command(args: Any) -> Any:
     cls = _COMMAND_TYPES.get(cast("ExperimentCommand", command))
     if cls is None:
         msg = f"Unknown command {command!r}. Expected one of: {sorted(_COMMAND_TYPES)}."
-        raise ValueError(msg)
+        raise CliUsageError(msg)
     prefix = "tree" if command == "incomplete" else command
     kwargs = {f.name: getattr(args, f"{prefix}_{f.name}") for f in fields(cls) if hasattr(args, f"{prefix}_{f.name}")}
     return cls(**kwargs)
+
+
+def _resolve_named_task(experiment: Any, name: str) -> Task[Any]:
+    """Resolve one exact experiment task name as a CLI usage boundary."""
+    named_tasks = experiment.normalized_tasks()
+    try:
+        return cast("Task[Any]", named_tasks[name])
+    except KeyError as exc:
+        msg = f"Experiment has no task named {name!r}."
+        raise CliUsageError(msg) from exc
 
 
 def _resolve_task_or_hash(experiment: Any, query: str) -> Task[Any]:
@@ -600,7 +619,7 @@ def _resolve_task_or_hash(experiment: Any, query: str) -> Task[Any]:
         Matching task.
 
     Raises:
-        ValueError: If zero or multiple tasks match.
+        CliUsageError: If zero or multiple tasks match.
     """
     # Try exact name match first.
     named_tasks = experiment.normalized_tasks()
@@ -616,10 +635,10 @@ def _resolve_task_or_hash(experiment: Any, query: str) -> Task[Any]:
         return matches[0]
     if not matches:
         msg = f"No task matching {query!r}."
-        raise ValueError(msg)
+        raise CliUsageError(msg)
     labels = ", ".join(task_label(t) for t in matches)
     msg = f"Ambiguous query {query!r}: matches {labels}."
-    raise ValueError(msg)
+    raise CliUsageError(msg)
 
 
 def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
@@ -649,48 +668,50 @@ def _find_work_unit_for_task(experiment: Any, task: Task[Any]) -> Any:
 def _list_task_logs(task: Task[Any], workspace: Any, console: Console) -> None:
     """List available task log entries with metadata."""
     try:
-        log_key = task.resolved_hash(workspace=workspace).b32()
+        log_entries = sorted(workspace.task_log_iter(task), key=lambda entry: entry[1].stat().st_mtime)
+        if not log_entries:
+            console.print("  [dim]No logs found.[/dim]")
+            return
+        for job_id, log_path in log_entries:
+            stat = log_path.stat()
+            time_str = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(timespec="seconds")
+            console.print(
+                f"  job_id=[cyan]{escape(job_id)}[/cyan]  modified=[dim]{time_str}[/dim]  "
+                f"size=[dim]{stat.st_size}B[/dim]"
+            )
     except CacheError:
         console.print("  [dim]No logs found.[/dim]")
-        return
-    task_log_dir = Path(workspace.directory) / "task_logs" / log_key[:2]
-    if not task_log_dir.exists():
-        console.print("  [dim]No logs found.[/dim]")
-        return
-
-    log_files = sorted(task_log_dir.glob(f"{log_key}_*.log"), key=lambda p: p.stat().st_mtime)
-    if not log_files:
-        console.print("  [dim]No logs found.[/dim]")
-        return
-
-    for log_path in log_files:
-        _, job_id = log_path.stem.rsplit("_", 1)
-        stat = log_path.stat()
-        time_str = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(timespec="seconds")
-        console.print(
-            f"  job_id=[cyan]{escape(job_id)}[/cyan]  modified=[dim]{time_str}[/dim]  size=[dim]{stat.st_size}B[/dim]"
-        )
+    except OSError as exc:
+        msg = f"Could not inspect task logs for {task}: {exc}"
+        raise StorageError(msg) from exc
 
 
 def _list_job_logs(log_paths: list[Path], console: Console) -> None:
     """List available job log entries with metadata."""
-    for log_path in log_paths:
-        stat = log_path.stat()
-        size = stat.st_size
-        mtime = stat.st_mtime
-        time_str = datetime.fromtimestamp(mtime, tz=UTC).isoformat(timespec="seconds")
-        console.print(
-            f"  [bright_white]{escape(log_path.name)}[/bright_white]"
-            f"  modified=[dim]{time_str}[/dim]"
-            f"  size=[dim]{size}B[/dim]"
-        )
+    try:
+        for log_path in log_paths:
+            stat = log_path.stat()
+            time_str = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(timespec="seconds")
+            console.print(
+                f"  [bright_white]{escape(log_path.name)}[/bright_white]"
+                f"  modified=[dim]{time_str}[/dim]"
+                f"  size=[dim]{stat.st_size}B[/dim]"
+            )
+    except OSError as exc:
+        msg = f"Could not inspect job log {log_path}: {exc}"
+        raise StorageError(msg) from exc
 
 
 def _print_log_content(log_path: Path, console: Console, *, rule_title: str | None = None) -> None:
     """Print log file content with optional rule header."""
     if rule_title is not None:
         console.rule(rule_title)
-    console.print(Text.from_ansi(log_path.read_text(encoding="utf-8", errors="replace")))
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        msg = f"Could not read job log {log_path}: {exc}"
+        raise StorageError(msg) from exc
+    console.print(Text.from_ansi(content))
 
 
 def _execute_command(*, args: Any, console: Console) -> None:
@@ -723,7 +744,7 @@ def _cmd_run(command: RunCommandArgs, args: Any) -> None:
         else:
             tui.run_without_tui(experiment=args.experiment, executor=executor, workspace=workspace)
         return
-    args.experiment[command.task].submit(executor=executor, workspace=workspace, blocking=True)
+    _resolve_named_task(args.experiment, command.task).submit(executor=executor, workspace=workspace, blocking=True)
 
 
 def _cmd_count(args: Any, console: Console) -> None:
@@ -741,7 +762,7 @@ def _cmd_tree(command: TreeCommandArgs | IncompleteCommandArgs, args: Any, conso
     if tree_task is not None:
         if tree_task not in all_named:
             msg = f"Experiment has no task named {tree_task!r}. Known tasks: {sorted(all_named)}"
-            raise ValueError(msg)
+            raise CliUsageError(msg)
         named_tasks: Mapping[str, Task[Any]] = {tree_task: all_named[tree_task]}
     else:
         named_tasks = all_named
@@ -792,8 +813,10 @@ def _cmd_result(command: ResultCommandArgs, args: Any, console: Console) -> None
     workspace = _resolve_workspace(args)
     if command.task is None:
         msg = "'result' command requires a task name."
-        raise ValueError(msg)
-    console.print(Pretty(args.experiment.result(command.task, workspace=workspace)))
+        raise CliUsageError(msg)
+    task = _resolve_named_task(args.experiment, command.task)
+    result = task.result(workspace=workspace)
+    console.print(Pretty(result))
 
 
 def _cmd_logs(command: LogsCommandArgs, args: Any, console: Console) -> None:
@@ -846,6 +869,9 @@ def _show_task_log(
             return False
         console.print("[dim]No logs found.[/dim]")
         return False
+    except OSError as exc:
+        msg = f"Could not read a task log for {task}: {exc}"
+        raise StorageError(msg) from exc
     console.rule(header)
     console.print(Text.from_ansi(log_content))
     return True
@@ -855,9 +881,14 @@ def _cmd_logs_job_mode(command: LogsCommandArgs, args: Any, workspace: Any, cons
     if command.task is not None:
         task = _resolve_task_or_hash(args.experiment, command.task)
         work_unit = _find_work_unit_for_task(args.experiment, task)
-        log_paths = sorted(workspace.job_log_iter(work_unit), key=lambda p: p.stat().st_mtime)
+        paths = workspace.job_log_iter(work_unit)
     else:
-        log_paths = sorted(workspace.job_log_iter(), key=lambda p: p.stat().st_mtime)
+        paths = workspace.job_log_iter()
+    try:
+        log_paths = sorted(paths, key=lambda path: path.stat().st_mtime)
+    except OSError as exc:
+        msg = f"Could not inspect job logs: {exc}"
+        raise StorageError(msg) from exc
 
     if command.job_id is not None:
         log_paths = [p for p in log_paths if f"_{command.job_id}.log" in p.name]
@@ -883,7 +914,7 @@ def _resolve_command(*, command_token: str | None, unknown_args: list[str]) -> E
 
     if command_token not in {None, "[]"}:
         msg = f"Unknown command {command_token!r}. Expected one of: {sorted(available_commands)}."
-        raise ValueError(msg)
+        raise CliUsageError(msg)
 
     for token in unknown_args:
         if token in available_commands:

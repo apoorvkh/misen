@@ -167,6 +167,8 @@ def _fill_file_paths(
         try:
             original_source = file_path.read_text(encoding="utf-8")
             updated_source, replacements = fill_task_ids_in_source(original_source, uuid_factory=uuid_factory)
+            if replacements:
+                file_path.write_text(updated_source, encoding="utf-8")
         except (OSError, UnicodeError, cst.ParserSyntaxError) as exc:
             failed_files.append((file_path, str(exc)))
             continue
@@ -174,7 +176,6 @@ def _fill_file_paths(
         if replacements == 0:
             continue
 
-        file_path.write_text(updated_source, encoding="utf-8")
         changed_files += 1
         updated_decorators += replacements
 
