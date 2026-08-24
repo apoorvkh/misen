@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import importlib.util
+import subprocess
+import sys
+import textwrap
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -782,6 +786,50 @@ def test_malformed_queue_response_is_immediately_nonretryable(monkeypatch) -> No
     assert exc_info.value.retryable is False
 
 
+def test_installed_skypilot_sdk_contract() -> None:
+    if importlib.util.find_spec("sky") is None:
+        pytest.skip("SkyPilot is not installed")
+
+    probe = textwrap.dedent(
+        """
+        import sky
+
+        resource = sky.Resources(
+            infra="aws/us-east-1",
+            cpus="2+",
+            memory="4+",
+            use_spot=True,
+            max_hourly_cost=1.0,
+            job_recovery="FAILOVER",
+        )
+        resource.validate()
+        task = sky.Task(
+            name="misen-contract-probe",
+            run="true",
+            num_nodes=2,
+            resources=[resource],
+            api_server_access=False,
+        )
+
+        assert task.num_nodes == 2
+        assert task.api_server_access is False
+        assert len(task.resources) == 1
+        assert callable(sky.jobs.launch)
+        assert callable(sky.jobs.queue_v2)
+        assert callable(sky.get)
+        assert callable(sky.server.common.is_api_server_local)
+        """
+    )
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_missing_skypilot_sdk_has_actionable_lazy_import_error(monkeypatch) -> None:
     def missing_sky(module_name: str) -> object:
         assert module_name == "sky"
@@ -790,16 +838,29 @@ def test_missing_skypilot_sdk_has_actionable_lazy_import_error(monkeypatch) -> N
 
     monkeypatch.setattr(skypilot_module.importlib, "import_module", missing_sky)
 
-    with pytest.raises(ConfigError, match=r"SkyPilotExecutor requires SkyPilot 0\.13") as exc_info:
+    with pytest.raises(ConfigError, match=r"SkyPilotExecutor requires SkyPilot >=0\.12\.1") as exc_info:
         skypilot_module._load_skypilot()
 
     assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
     assert "misen[skypilot]" in str(exc_info.value)
 
 
-def test_incompatible_skypilot_sdk_version_fails_before_feature_use(monkeypatch) -> None:
-    incompatible = SimpleNamespace(__version__="0.12.3")
-    monkeypatch.setattr(skypilot_module.importlib, "import_module", lambda _name: incompatible)
+def test_skypilot_transitive_import_error_is_not_hidden(monkeypatch) -> None:
+    error = ModuleNotFoundError("No module named 'sky_dependency'", name="sky_dependency")
 
-    with pytest.raises(ConfigError, match=r"supports SkyPilot >=0\.13,<0\.14; found 0\.12\.3"):
+    def broken_sky_import(_module_name: str) -> object:
+        raise error
+
+    monkeypatch.setattr(skypilot_module.importlib, "import_module", broken_sky_import)
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
         skypilot_module._load_skypilot()
+
+    assert exc_info.value is error
+
+
+def test_skypilot_sdk_version_is_not_rejected_at_runtime(monkeypatch) -> None:
+    future_sdk = SimpleNamespace(__version__="99.0.0")
+    monkeypatch.setattr(skypilot_module.importlib, "import_module", lambda _name: future_sdk)
+
+    assert skypilot_module._load_skypilot() is future_sdk

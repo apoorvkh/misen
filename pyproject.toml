@@ -30,14 +30,11 @@ dependencies = [
 misen = "misen.cli:main"
 
 [project.optional-dependencies]
-skypilot = ["skypilot>=0.13,<0.14"]
+skypilot = ["skypilot>=0.12.1"]
 
 [dependency-groups]
-dev = ["numpy==2.1.3", "pytest==9.0.3", "ruff==0.15.10", "ty==0.0.31"]
-docs = [
-    "mkdocstrings-python==2.0.1",
-    "zensical==0.0.43",
-]
+dev = ["numpy==2.1.3", "pytest==9.0.3", "ruff==0.16.4", "ty==0.0.74"]
+docs = ["mkdocstrings-python==2.0.1", "zensical==0.0.43"]
 
 [build-system]
 requires = ["uv_build>=0.11.32,<0.13"]
@@ -50,8 +47,7 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-  "FIX",  # tmp
-  "TD",  # tmp
+  "CPY001",  # project-level LICENSE; no per-file copyright headers
   "COM812",  # conflicts with formatter
   "PLC0415",  # allow function-level imports
   "ANN401",  # allow Any type
@@ -71,3 +67,9 @@ include = ["src/misen/utils/hashing/libs/**", "src/misen/utils/serde/libs/**"]
 
 [tool.ty.overrides.rules]
 unresolved-import = "ignore"
+
+[[tool.ty.overrides]]
+include = ["src/misen/utils/hashing/libs/stdlib.py"]
+
+[tool.ty.overrides.rules]
+invalid-method-override = "ignore"

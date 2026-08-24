@@ -47,6 +47,7 @@ A **task** is a Python function annotated with `@meta`:
 ```python
 from misen import Task, meta
 
+
 @meta(cache=True)
 def add(a: int, b: int) -> int:
     return a + b
@@ -58,8 +59,8 @@ You should run `misen fill` to tag functions with unique ids: e.g. `@meta(id="3X
 
 ```python
 train_task = Task(train, lr=0.001, dim=256)
-eval_task  = Task(evaluate, trained_model=train_task.T)
-plot_task  = Task(plot, metrics=eval_task.T)
+eval_task = Task(evaluate, trained_model=train_task.T)
+plot_task = Task(plot, metrics=eval_task.T)
 ```
 
 `plot_task: Task` now represents the full workflow. `.T` is optional — it just preserves the return type for type-checkers.
@@ -83,15 +84,17 @@ An `Experiment` binds declarative parameters to a named task workflow:
 ```python
 from misen import Experiment, Task
 
+
 class TrainingExperiment(Experiment):
     lr: float = 0.001
     dim: int = 256
 
     def tasks(self) -> dict[str, Task]:
         train_task = Task(train, lr=self.lr, dim=self.dim)
-        eval_task  = Task(evaluate, trained_model=train_task.T)
-        plot_task  = Task(plot, metrics=eval_task.T)
+        eval_task = Task(evaluate, trained_model=train_task.T)
+        plot_task = Task(plot, metrics=eval_task.T)
         return {"metrics": eval_task, "plot": plot_task}
+
 
 if __name__ == "__main__":
     TrainingExperiment.cli()
@@ -164,15 +167,13 @@ Experiments are just Python objects, so sweeping is a comprehension:
 ```python
 def plot_sweep(metrics: dict[tuple[float, int], Metrics]) -> Plot: ...
 
+
 class TrainingSweep(Experiment):
-    lrs:  list[float] = [0.001, 0.01]
-    dims: list[int]   = [256, 512]
+    lrs: list[float] = [0.001, 0.01]
+    dims: list[int] = [256, 512]
 
     def tasks(self) -> dict[str, Task]:
-        metrics = {
-            (lr, dim): TrainingExperiment(lr=lr, dim=dim)["metrics"].T
-            for lr in self.lrs for dim in self.dims
-        }
+        metrics = {(lr, dim): TrainingExperiment(lr=lr, dim=dim)["metrics"].T for lr in self.lrs for dim in self.dims}
         return {"plot": Task(plot_sweep, metrics=metrics)}
 ```
 
@@ -182,6 +183,7 @@ Declare what a task needs:
 
 ```python
 from misen import Task, meta
+
 
 @meta(
     cache=True,
@@ -227,21 +229,26 @@ To flow files written into the scratch directory (model checkpoints, generated i
 ```python
 from misen import FileMap, SCRATCH_DIR, Task, meta
 
+
 @meta(cache=True, resources={"accelerators": 1})
 def train(scratch_dir: Path) -> FileMap:
     # training loop writes ckpt_<step>.pt and tb_logs/ into scratch_dir
-    return (FileMap()
-            .include_glob(scratch_dir, "ckpt_*.pt", key=lambda p: int(p.stem.split("_")[1]))
-            .include_tree(scratch_dir / "tb_logs")
-            .exclude_glob("*.tmp"))
+    return (
+        FileMap()
+        .include_glob(scratch_dir, "ckpt_*.pt", key=lambda p: int(p.stem.split("_")[1]))
+        .include_tree(scratch_dir / "tb_logs")
+        .exclude_glob("*.tmp")
+    )
+
 
 @meta(cache=True)
 def analyze_at(files: FileMap, step: int) -> dict[str, float]:
     state = torch.load(files[step], weights_only=True)  # one file loaded on demand
     ...
 
+
 train_task = Task(train, scratch_dir=SCRATCH_DIR)
-analysis   = Task(analyze_at, files=train_task.T, step=1000)
+analysis = Task(analyze_at, files=train_task.T, step=1000)
 ```
 
 Keys may be `str`, `int`, `float`, `bool`, or `None`. Exclusions apply eagerly (each `exclude_*` filters what's been included so far). `FileMap.from_glob(...)` / `FileMap.from_tree(...)` are one-liner shortcuts for the single-source case. After a `FileMap` is fetched from a result, `.root` gives the single directory holding every file — hand it to a directory-consuming tool, e.g. `tensorboard --logdir <files.root>`. A `FileMap` loaded from a workspace is read-only.
@@ -273,31 +280,33 @@ installs the provider-neutral SkyPilot SDK; compose it with only the upstream
 provider extras needed by the SkyPilot environment that actually provisions
 compute. With SkyPilot's default local API server, that is Misen's environment;
 a logged-in remote API server owns its own provider packages and configuration,
-so the Misen client can use the base extra alone. Misen tests this integration
-with SkyPilot 0.13 on Python 3.11–3.14; individual provider extras may impose
+so the Misen client can use the base extra alone. The integration declares
+`skypilot>=0.12.1` without an upper bound; compatibility CI tests both that
+minimum and the newest stable release on Python 3.14. Misen supports Python
+3.11–3.14; individual SkyPilot releases and provider extras may impose
 additional constraints:
 
 ```bash
 # AWS and GCP
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
 
 # One or more other backends, selected independently
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
 
 # Azure currently needs SkyPilot's documented uv prerequisite
 uv pip install --prerelease allow "azure-cli<2.87.0"
-uv pip install "misen[skypilot]" "skypilot[azure]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[azure]>=0.12.1"
 
 sky check
 
 # Developing this repository
 uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[runpod]>=0.13,<0.14" sky check runpod
+uv run --extra skypilot --with "skypilot[runpod]>=0.12.1" sky check runpod
 ```
 
 Provider selection is passed through unchanged in `executor.infra`:
 
-| Compute target | SkyPilot extra | Example `infra` | Multi-node in 0.13 |
+| Compute target | SkyPilot extra | Example `infra` | Multi-node in SkyPilot 0.13 |
 |---|---|---|---|
 | AWS | `aws` | `aws/us-east-1` | Yes |
 | Google Cloud | `gcp` | `gcp/us-central1` | Yes, with TPU-node caveats |
@@ -577,6 +586,7 @@ pip install "git+https://github.com/ORG/REPO.git"
 
 ```python
 from my_project.experiments.training_sweep import TrainingSweep
+
 plot = TrainingSweep()["plot"].result()
 ```
 

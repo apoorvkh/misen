@@ -1,9 +1,9 @@
 # Design: remote executors
 
 Status: SkyPilot is the first optional remote adapter and can target the cloud,
-Kubernetes, SSH, and Slurm compute infrastructures registered by SkyPilot
-0.13. Direct native SSH, remote Slurm, Kubernetes, Modal, and provider Batch
-adapters remain planned.
+Kubernetes, SSH, and Slurm compute infrastructures registered by the installed
+SkyPilot SDK. Direct native SSH, remote Slurm, Kubernetes, Modal, and provider
+Batch adapters remain planned.
 
 ## Decision
 
@@ -21,34 +21,37 @@ It therefore remains optional.
 
 ## Installation and backend selection
 
-Misen pins the compatible, provider-neutral SDK; install only the upstream
-provider extras needed by the SkyPilot environment that provisions compute.
+Misen declares the oldest compatible provider-neutral SDK without an upper
+bound. Compatibility CI tests both that minimum and the newest stable release
+on Python 3.14. Install only the upstream provider extras needed by the
+SkyPilot environment that provisions compute.
 For the default local API server this is the environment running Misen; a
 logged-in remote SkyPilot API server owns its provider packages and
 configuration, and its Misen clients need only `misen[skypilot]`:
 
 ```bash
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
 # Or select a different set:
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13,<0.14"
-uv pip install "misen[skypilot]" "skypilot[oci,lambda,runpod]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[oci,lambda,runpod]>=0.12.1"
 
 # Azure currently needs SkyPilot's documented uv prerequisite:
 uv pip install --prerelease allow "azure-cli<2.87.0"
-uv pip install "misen[skypilot]" "skypilot[azure]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[azure]>=0.12.1"
 
 sky check
 
 # From a Misen source checkout:
 uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[runpod]>=0.13,<0.14" sky check runpod
+uv run --extra skypilot --with "skypilot[runpod]>=0.12.1" sky check runpod
 ```
 
 The SDK must be installed in the same environment that runs Misen, not only
 as an isolated `uv tool`, because the executor loads `sky` in-process.
-Misen tests its SkyPilot 0.13 integration on Python 3.11–3.14; individual
-provider extras may impose additional constraints. `misen[skypilot]` includes
-the tested SkyPilot range, but no provider clients.
+The integration requires SkyPilot 0.12.1 or newer. Misen supports Python
+3.11–3.14; individual SkyPilot releases and provider extras may impose
+additional constraints. `misen[skypilot]` includes the provider-neutral SDK,
+but no provider clients.
 Keeping those clients explicit avoids installing large and unrelated stacks
 such as Azure CLI, Kubernetes clients, or Ray for every user. It also avoids
 claiming that `skypilot[all]` has identical dependency support on every Python
@@ -58,7 +61,7 @@ version. Azure currently needs the extra uv prerequisite step in SkyPilot's
 `SkyPilotExecutor.infra` is passed to `sky.Resources` and may be a single
 infrastructure string or an ordered list of alternatives. Common mappings are:
 
-| Target | Upstream extra | Example `infra` | Multi-node in 0.13 |
+| Target | Upstream extra | Example `infra` | Multi-node in SkyPilot 0.13 |
 |---|---|---|---|
 | AWS / Google Cloud | `aws` / `gcp` | `aws/us-east-1`, `gcp/us-central1` | Yes (GCP TPU caveats) |
 | Azure / OCI | `azure` / `oci` | `azure/eastus`, `oci` | Yes |
@@ -125,7 +128,8 @@ reattachment, and command/log wrapping are likely candidates.
 
 ## SkyPilot MVP contract
 
-The current `SkyPilotExecutor` uses the SkyPilot 0.13 Python SDK:
+The current `SkyPilotExecutor` uses SkyPilot Python SDK interfaces available
+since version 0.12.1:
 
 - Each pending Misen work unit becomes its own SkyPilot managed job. Misen
   submits them eagerly, without waiting for parent jobs to finish, so arbitrary

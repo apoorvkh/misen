@@ -3,10 +3,9 @@
 The executor treats SkyPilot as a control plane only. Misen's workspace is
 still the data plane: a remote-capable workspace transports the immutable
 project snapshot, job payloads, results, locks, and logs, while SkyPilot
-provisions compute and owns each durable job lifecycle. SkyPilot 0.13 has no
-arbitrary managed-job DAG primitive, so Misen submits one managed job per work
-unit and enforces dependencies through durable workspace markers. Independent
-jobs provision and execute concurrently.
+provisions compute and owns each durable job lifecycle. Misen submits one
+managed job per work unit and enforces dependencies through durable workspace
+markers. Independent jobs provision and execute concurrently.
 """
 
 from __future__ import annotations
@@ -49,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 _SKYPILOT_INSTALL = 'uv pip install "misen[skypilot]"'
 _SKYPILOT_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-_SKYPILOT_VERSION = re.compile(r"^(\d+)\.(\d+)(?:\.|$)")
 _QUEUE_FIELDS = ("job_id", "task_id", "status", "failure_reason")
 _SKYPILOT_NODE_RANK_ENV = "SKYPILOT_NODE_RANK"
 _SKYPILOT_NODE_IPS_ENV = "SKYPILOT_NODE_IPS"
@@ -74,21 +72,14 @@ _SKYPILOT_STATE_MAP: dict[str, JobState] = {
 
 
 def _load_skypilot() -> Any:
-    """Load and validate the optional SkyPilot 0.13 SDK on first use."""
+    """Load the optional SkyPilot SDK on first use."""
     try:
-        sky = importlib.import_module("sky")
+        return importlib.import_module("sky")
     except ModuleNotFoundError as exc:
         if exc.name != "sky":
             raise
-        msg = f"SkyPilotExecutor requires SkyPilot 0.13; install it with `{_SKYPILOT_INSTALL}`."
+        msg = f"SkyPilotExecutor requires SkyPilot >=0.12.1; install it with `{_SKYPILOT_INSTALL}`."
         raise ConfigError(msg) from exc
-
-    version = str(getattr(sky, "__version__", "unknown"))
-    match = _SKYPILOT_VERSION.match(version)
-    if match is None or tuple(map(int, match.groups())) != (0, 13):
-        msg = f"SkyPilotExecutor supports SkyPilot >=0.13,<0.14; found {version}."
-        raise ConfigError(msg)
-    return sky
 
 
 def _field(record: object, name: str, default: Any = None) -> Any:
@@ -115,7 +106,7 @@ def _normalize_skypilot_state(value: object) -> JobState:
 
 
 def _queue_records(result: object) -> list[object]:
-    """Extract queue records from SkyPilot 0.13's queue_v2 response."""
+    """Extract queue records from SkyPilot's queue_v2 response."""
     records = result[0] if isinstance(result, tuple) and result else None
     if not isinstance(records, (list, tuple)):
         msg = f"SkyPilot queue_v2 returned an unexpected response: {result!r}"
@@ -401,7 +392,7 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
                 msg = f"Invalid SkyPilot resources for {work_unit_label(work_unit)}: {exc}"
                 raise SubmissionError(msg) from exc
 
-    def _accelerator_models(self, work_unit: WorkUnit) -> list[str | None]:
+    def _accelerator_models(self, work_unit: WorkUnit) -> Sequence[str | None]:
         """Resolve a generic accelerator request to concrete SkyPilot models."""
         requested = work_unit.resources
         if not requested["accelerators"]:

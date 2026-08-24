@@ -38,7 +38,7 @@ class _RuntimeSentinel:
     def __new__(cls, name: str) -> Self:
         if name in cls._instances:
             return cast("Self", cls._instances[name])
-        self = cast("Self", super().__new__(cls))
+        self = super().__new__(cls)
         self._name = name
         cls._instances[name] = self
         return self

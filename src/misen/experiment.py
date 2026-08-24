@@ -95,10 +95,10 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Cache :meth:`tasks` to avoid recomputing for the same (frozen) instance."""
         super().__init_subclass__(**kwargs)
-        _tasks_fn = cls.tasks
+        _tasks_fn = cast("Callable[[Experiment[Any]], _ExperimentTasks]", cls.tasks)
 
         @wraps(_tasks_fn)
-        def cached_tasks_fn(self: Experiment) -> _ExperimentTasks:
+        def cached_tasks_fn(self: Experiment[Any]) -> _ExperimentTasks:
             obj_id = id(self)
             hash_key = _HASH_BY_ID.get(obj_id)
             if hash_key is None:

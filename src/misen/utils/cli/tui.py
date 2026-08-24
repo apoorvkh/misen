@@ -391,7 +391,7 @@ def _run_textual_task_monitor(
            click-drag highlights and Ctrl+C / Cmd+C copy work on logs.
         """
 
-        def write(  # type: ignore[override]
+        def write(  # type: ignore[override]  # noqa: PLR0917
             self,
             content: Any,
             width: int | None = None,

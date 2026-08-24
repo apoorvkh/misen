@@ -382,7 +382,7 @@ class Job(ABC):
 
     def _normalize_state(self, state: object, *, queried_at: float) -> JobState:
         """Normalize one backend state and bound consecutive unknown results."""
-        resolved = cast("JobState", state) if isinstance(state, str) and state in _VALID_JOB_STATES else "unknown"
+        resolved = state if isinstance(state, str) and state in _VALID_JOB_STATES else "unknown"
         if resolved != "unknown":
             self._unknown_since = None
             return resolved

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 __all__ = ["FileMap"]
 
-K = TypeVar("K")
+K = TypeVar("K", bound=Hashable)
 
 # Key types that round-trip cleanly through ``json.dumps``/``json.loads``
 # *and* are hashable.  Tuples are intentionally excluded for v1 — JSON

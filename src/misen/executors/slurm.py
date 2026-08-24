@@ -380,7 +380,7 @@ _ResourceKey: TypeAlias = Literal[
     "accelerator_memory",
 ]
 _OperatorName: TypeAlias = Literal["eq", "ne", "lt", "le", "gt", "ge", "contains", "is_", "is_not"]
-_SetValue: TypeAlias = str | int | float | bool | None | list[str]
+_SetValue: TypeAlias = str | int | float | bool | list[str] | None
 _EXECUTOR_OWNED_SBATCH_FLAGS = frozenset(
     """
     cpus-per-gpu cpus-per-task cpus-per-tres dependency export gpus gpus-per-node
@@ -398,7 +398,7 @@ class _ResourcePredicate(msgspec.Struct, forbid_unknown_fields=True, omit_defaul
     value: int | str | list[int | str] | None = None
 
 
-_ResourceCondition: TypeAlias = int | str | None | _ResourcePredicate | list[_ResourcePredicate]
+_ResourceCondition: TypeAlias = int | str | _ResourcePredicate | list[_ResourcePredicate] | None
 
 
 class _SlurmRule(msgspec.Struct, forbid_unknown_fields=True, omit_defaults=True):

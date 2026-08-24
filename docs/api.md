@@ -111,23 +111,25 @@ generic `config` mapping cannot be embedded in worker bootstrap commands.
 
 # SkyPilotExecutor
 
-`SkyPilotExecutor` is an optional remote adapter for SkyPilot 0.13 managed
-jobs. Install Misen's provider-neutral extra into the environment that runs
+`SkyPilotExecutor` is an optional remote adapter for SkyPilot managed jobs.
+Install Misen's provider-neutral extra into the environment that runs
 Misen (rather than only as an isolated `uv tool`), compose it with the
 upstream extras for the compute backends used by a local SkyPilot API server,
 then verify provider access. A configured remote SkyPilot API server owns its
-provider dependencies, so its Misen clients need only the base extra.
-Misen tests this integration with SkyPilot 0.13 on Python 3.11–3.14; individual
-provider extras may impose additional constraints.
+provider dependencies, so its Misen clients need only the base extra. The
+integration declares `skypilot>=0.12.1` without an upper bound; compatibility
+CI tests both that minimum and the newest stable release on Python 3.14. Misen
+supports Python 3.11–3.14; individual SkyPilot releases and provider extras may
+impose additional constraints.
 
 ```bash
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
 # For example, instead target existing Kubernetes, SSH, and Slurm clusters:
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13,<0.14"
+uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
 sky check
 # From a Misen source checkout:
 uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[kubernetes,ssh,slurm]>=0.13,<0.14" sky check
+uv run --extra skypilot --with "skypilot[kubernetes,ssh,slurm]>=0.12.1" sky check
 ```
 
 `infra` accepts any compute infrastructure registered by the installed
