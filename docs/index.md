@@ -14,8 +14,9 @@ The intended public API is:
 - `@meta`, `TaskMetadata`, `Resources`, `AcceleratorType`
 - `Task`
 - `SCRATCH_DIR`, `DASK_CLIENT`
-- `Workspace` (`DiskWorkspace` by default)
-- `Executor` (`LocalExecutor`, `InProcessExecutor`, `SlurmExecutor`)
+- `Workspace` (`DiskWorkspace` by default; `CloudWorkspace` for remote data)
+- `Executor` (`LocalExecutor`, `InProcessExecutor`, `SlurmExecutor`,
+  and optional `SkyPilotExecutor`)
 - `Experiment`
 
 Most user code should only import from `misen.__init__`.
@@ -59,8 +60,10 @@ Backends remain simple because they do not implement custom cache-lock logic.
 - `Executor`: graph submission, job lifecycle, backend dispatch.
 - `Workspace`: hash/result persistence, locking, task/job logs.
 
-This split allows changing execution backend (local, in-process, SLURM) without
-changing cache format or lock semantics.
+This split allows changing the compute control plane (local, in-process,
+SLURM, or a SkyPilot-supported cloud or cluster) without changing cache format
+or lock semantics. Remote executors use a remotely fetchable workspace
+transport; SkyPilot does not replace the workspace as Misen's data plane.
 
 ## Runtime Argument Injection
 
@@ -81,10 +84,15 @@ raises `TypeError` when the `Task` is constructed — signature defaults are
 applied by Python at call time and would bypass the argument resolver, leaking
 the raw sentinel object into the function body.
 
-`DASK_CLIENT` requires a task request with `nodes > 1` and is currently
-realized by `SlurmExecutor`. Misen starts one worker per allocated node and
-executes the task body once on the coordinator. `LocalExecutor` and
-`InProcessExecutor` intentionally remain single-node executors.
+`DASK_CLIENT` requires a task request with `nodes > 1` and is realized by
+`SlurmExecutor` and `SkyPilotExecutor`. Misen starts one worker per allocated
+node and executes the task body once on the coordinator. With SkyPilot, this
+runtime is contained within one `num_nodes` managed job: rank 0 hosts the
+scheduler and coordinator, and every rank hosts one worker. `LocalExecutor`
+and `InProcessExecutor` intentionally remain single-node executors.
+This is intra-work-unit parallelism: the executor still schedules the Misen
+DAG as separate work units, and each Dask-backed work unit owns an isolated
+temporary cluster rather than sharing a global worker pool.
 
 To discover the resources allotted to a task at runtime, read what the
 runtime sees: `os.sched_getaffinity(0)` for CPU cores and the accelerator's

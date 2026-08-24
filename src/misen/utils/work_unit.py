@@ -21,6 +21,8 @@ from misen.utils.runtime_values import RuntimeValues
 from misen.utils.task_utils import build_task_dependency_graph
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
     from misen.workspace import Workspace
@@ -149,7 +151,14 @@ class WorkUnit:
                     if last_use.get(dependency) == i:
                         task_results.pop(dependency)
 
-    def as_payload(self, workspace: Workspace, job_id: str) -> bytes:
+    def as_payload(
+        self,
+        workspace: Workspace,
+        job_id: str,
+        *,
+        submission_id: str | None = None,
+        dependency_jobs: Mapping[WorkUnit, str] | None = None,
+    ) -> bytes:
         """Serialize executable payload for backend dispatch.
 
         The payload bundles the workspace separately from the callable so
@@ -160,20 +169,42 @@ class WorkUnit:
             workspace: Workspace instance, surfaced for the worker's
                 streaming-log context.
             job_id: Job id captured for logging.
+            submission_id: Submission namespace for dependency markers.
+            dependency_jobs: Prerequisite work units mapped to their Misen
+                job ids. ``None`` disables the dependency gate.
 
         Returns:
             Cloudpickle payload bytes containing ``{"workspace": ..., "fn": ...}``
             where ``fn`` is a zero-arg callable.
         """
+        execute = functools.partial(
+            WorkUnit.execute,
+            graph=self.graph,
+            workspace=workspace,
+            job_id=job_id,
+        )
+        if dependency_jobs is not None:
+            if submission_id is None:
+                msg = "submission_id is required when dependency_jobs are provided."
+                raise ValueError(msg)
+            from misen.utils.job_dependencies import run_with_dependencies
+            from misen.utils.runtime_events import work_unit_label
+
+            execute = functools.partial(
+                run_with_dependencies,
+                execute,
+                workspace=workspace,
+                submission_id=submission_id,
+                job_id=job_id,
+                dependencies=tuple(
+                    (dependency_id, work_unit_label(dependency))
+                    for dependency, dependency_id in dependency_jobs.items()
+                ),
+            )
         return cloudpickle.dumps(
             {
                 "workspace": workspace,
-                "fn": functools.partial(
-                    WorkUnit.execute,
-                    graph=self.graph,
-                    workspace=workspace,
-                    job_id=job_id,
-                ),
+                "fn": execute,
             }
         )
 

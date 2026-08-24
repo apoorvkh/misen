@@ -386,6 +386,7 @@ def test_pandas_interval_roundtrip(tmp_path: pathlib.Path) -> None:
 
 def test_pandas_index_roundtrip(tmp_path: pathlib.Path) -> None:
     pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
     idx = pd.Index(["a", "b", "c"], name="letters")
     serde.save(idx, tmp_path)
 
@@ -397,6 +398,7 @@ def test_pandas_index_roundtrip(tmp_path: pathlib.Path) -> None:
 
 def test_pandas_multi_index_roundtrip(tmp_path: pathlib.Path) -> None:
     pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
     idx = pd.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1)], names=["k", "v"])
     serde.save(idx, tmp_path)
 

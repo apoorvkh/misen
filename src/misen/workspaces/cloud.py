@@ -53,6 +53,7 @@ VT = TypeVar("VT", bound=Hash)
 CloudBackend: TypeAlias = Literal["s3", "gcs", "azure"]
 _CHUNKS = ".chunks"
 _STATE = ".state.json"
+_LOG_CHUNK_SIZE = 8 * 1024 * 1024
 _RESULT_POINTER_PREFIX = b"misen-result-v2:"
 logger = logging.getLogger(__name__)
 
@@ -685,18 +686,18 @@ class _LiveLogUploader:
         offset = self._uploaded_offset
         with self._local_path.open("rb") as f:
             f.seek(offset)
-            payload = f.read()
-        if not payload:
+            while offset < size and (payload := f.read(min(_LOG_CHUNK_SIZE, size - offset))):
+                obs.put(self._store, f"{self._remote_key}{_CHUNKS}/{offset:020d}.chunk", payload, mode="overwrite")
+                offset += len(payload)
+        if offset == self._uploaded_offset:
             return
-        new_offset = offset + len(payload)
-        obs.put(self._store, f"{self._remote_key}{_CHUNKS}/{offset:020d}.chunk", payload, mode="overwrite")
         obs.put(
             self._store,
             f"{self._remote_key}{_STATE}",
-            msgspec.json.encode({"offset": new_offset, "closed": False}),
+            msgspec.json.encode({"offset": offset, "closed": False}),
             mode="overwrite",
         )
-        self._uploaded_offset = new_offset
+        self._uploaded_offset = offset
 
     def _delete_live_objects(self) -> None:
         keys = [
@@ -958,13 +959,18 @@ class CloudWorkspace(Workspace):
     # -- job files ------------------------------------------------------
 
     def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
-        if not name or "/" in name or "\\" in name or name in {".", ".."}:
-            msg = f"Invalid job-file name: {name!r}"
-            raise ValueError(msg)
+        self._validate_job_file_name(name)
         ref = self._under("job_files", submission_id, name)
         with _cloud_errors(f"Could not publish job file {name!r}"):
             obs.put(self._store, ref, data, mode="overwrite")
         return ref
+
+    def read_job_file(self, submission_id: str, name: str) -> bytes:
+        """Read one submission file without hiding a not-yet-published object."""
+        self._validate_job_file_name(name)
+        ref = self._under("job_files", submission_id, name)
+        with _cloud_errors(f"Could not read job file {name!r}", passthrough=(FileNotFoundError,)):
+            return bytes(obs.get(self._store, ref).bytes())
 
     def _get_scratch_dir(self, task: Task) -> Path:
         path = self._cache / "scratch" / task.resolved_hash(workspace=self).b32()
@@ -1098,15 +1104,25 @@ class CloudWorkspace(Workspace):
                 ).compact()
 
     def _ensure_local_copy(self, remote_key: str, local_path: Path) -> None:
+        tmp_path: Path | None = None
         try:
             with _cloud_errors(f"Could not download log object {remote_key}", passthrough=(FileNotFoundError,)):
-                data = bytes(obs.get(self._store, remote_key).bytes())
+                response = obs.get(self._store, remote_key)
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    "wb", dir=local_path.parent, prefix=f".{local_path.name}.", suffix=".tmp", delete=False
+                ) as tmp:
+                    tmp_path = Path(tmp.name)
+                    for chunk in response.stream():
+                        tmp.write(chunk)
+                tmp_path.replace(local_path)
+                tmp_path = None
         except FileNotFoundError as e:
             msg = f"Object not found: {remote_key}"
             raise FileNotFoundError(msg) from e
-        with _storage_errors(f"Could not cache log object {remote_key} at {local_path}"):
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            local_path.write_bytes(data)
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     def _remote_final_info(self, remote_key: str) -> tuple[int, float] | None:
         try:
@@ -1153,11 +1169,15 @@ class CloudWorkspace(Workspace):
                     tmp_path = Path(tmp.name)
                     expected_offset = 0
                     for offset, path in sorted(chunks):
+                        if expected_size is not None and offset >= expected_size:
+                            continue
                         if offset != expected_offset:
                             return False
                         try:
                             data = bytes(obs.get(self._store, path).bytes())
                         except FileNotFoundError:
+                            return False
+                        if expected_size is not None and expected_offset + len(data) > expected_size:
                             return False
                         tmp.write(data)
                         expected_offset += len(data)

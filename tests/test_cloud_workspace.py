@@ -21,9 +21,9 @@ from obstore.store import MemoryStore
 
 from misen import SCRATCH_DIR, Task, meta
 from misen.exceptions import LockUnavailableError, StorageError
+from misen.utils import locks as locks_module
 from misen.utils.hashing import ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, ObjectStoreLock
-from misen.utils import locks as locks_module
 from misen.utils.settings import Settings
 from misen.workspace import Workspace
 from misen.workspaces import cloud as cloud_mod
@@ -307,12 +307,14 @@ def test_object_store_lock_against_memory_store_conditional_writes() -> None:
 
 
 def test_object_store_lock_verifies_ownership_synchronously(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A conditional refresh detects a lease that changed ownership."""
     store = MemoryStore()
     lock = ObjectStoreLock(store=store, key="locks/verify", lifetime=60, refresh_interval=None)
     lock.acquire(blocking=True)
 
     def lose_lease(*_args: object, **_kwargs: object) -> None:
-        raise PreconditionError("stale token")
+        msg = "stale token"
+        raise PreconditionError(msg)
 
     monkeypatch.setattr(locks_module._obs, "put", lose_lease)
 
@@ -420,6 +422,7 @@ def test_obstore_mapping_iter_and_delete() -> None:
 
 
 def test_obstore_mapping_corrupt_value_raises_storage_error() -> None:
+    """Corrupt persisted hashes surface as workspace storage failures."""
     store = MemoryStore()
     mapping: ObstoreMapping[TaskHash, ResolvedTaskHash] = ObstoreMapping[TaskHash, ResolvedTaskHash](store, "resolved")
     key = TaskHash.from_object("corrupt")
@@ -594,6 +597,67 @@ def test_cloud_workspace_streaming_job_log_uploads_on_exit(tmp_path) -> None:
     paths = list(other.job_log_iter(work_unit=work_unit))
     assert len(paths) == 1
     assert paths[0].read_text() == "job output"
+
+
+def test_cloud_workspace_job_files_support_coordination_reads(tmp_path) -> None:
+    """Submission files can act as remotely visible dependency markers."""
+    workspace = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket="test-job-file-coordination",
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    workspace.put_job_file("submission", "job.state", b"done")
+
+    assert workspace.read_job_file("submission", "job.state") == b"done"
+    with pytest.raises(FileNotFoundError):
+        workspace.read_job_file("submission", "missing.state")
+
+
+def test_cloud_workspace_recovery_does_not_rewrite_active_job_log(tmp_path) -> None:
+    """A recovered worker never replaces the file already opened by its log writer."""
+    bucket = "test-job-log-recovery"
+    first = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        cache_dir=str(tmp_path / "cache-first"),
+    )
+    work_unit = _work_unit_for(cloud_test_task_a)
+    first_path = first.get_job_log(job_id="recovered-job", work_unit=work_unit)
+    remote_key = first._job_log_remote_key(first_path)
+    obs.put(
+        first._store,
+        f"{remote_key}.chunks/00000000000000000000.chunk",
+        b"first worker output\n",
+        mode="overwrite",
+    )
+    obs.put(
+        first._store,
+        f"{remote_key}.state.json",
+        b'{"offset": 20, "closed": false}',
+        mode="overwrite",
+    )
+
+    recovered = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        cache_dir=str(tmp_path / "cache-recovered"),
+    )
+    recovered_path = recovered.get_job_log(job_id="recovered-job", work_unit=work_unit)
+    recovered_path.write_text("second worker bootstrap\n")
+    with recovered_path.open("ab", buffering=0) as writer, recovered.streaming_job_log(recovered_path):
+        writer.write(b"second worker task\n")
+
+    fresh = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        cache_dir=str(tmp_path / "cache-fresh"),
+    )
+    [final_path] = list(fresh.job_log_iter(work_unit=work_unit))
+    assert final_path.read_text().splitlines() == [
+        "second worker bootstrap",
+        "second worker task",
+    ]
 
 
 def test_cloud_workspace_job_log_chunks_are_compacted_on_finalize(tmp_path) -> None:
@@ -1145,7 +1209,8 @@ def test_cloud_workspace_producer_finalizer_uploads_after_failed_close(tmp_path)
     class FailingSync:
         def stop(self, *, final_upload: bool) -> None:
             assert final_upload
-            raise StorageError("scratch finalization failed")
+            msg = "scratch finalization failed"
+            raise StorageError(msg)
 
     workspace._scratch_dir_syncs["failing"] = FailingSync()  # type: ignore[assignment]
     with workspace.streaming_job_log(log_path):

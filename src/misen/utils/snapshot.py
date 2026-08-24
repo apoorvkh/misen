@@ -49,7 +49,7 @@ from misen.utils.runtime_events import runtime_event
 from misen.utils.uv_tool import find_or_install_uv
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
     from misen.task_metadata import AcceleratorType
     from misen.utils.work_unit import WorkUnit
@@ -286,6 +286,7 @@ class ProjectSnapshot:
         cpu_indices: list[int] | None,
         accelerator_type: AcceleratorType,
         accelerator_indices: list[int] | None,
+        dependency_jobs: Mapping[WorkUnit, str] | None = None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute one work unit.
 
@@ -304,6 +305,8 @@ class ProjectSnapshot:
             accelerator_indices: Device indices assigned by a host-level executor,
                 ``[]`` to hide all maskable devices, or ``None`` to preserve
                 scheduler-provided isolation.
+            dependency_jobs: Prerequisite work units mapped to their Misen
+                job ids, or ``None`` when the backend supplies dependencies.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -313,9 +316,16 @@ class ProjectSnapshot:
                 workspace (see messages).
         """
         job_id = token_base32(6)
-        payload_ref = self.workspace.put_job_file(
-            self.submission_id, f"{job_id}.pkl", work_unit.as_payload(workspace=workspace, job_id=job_id)
-        )
+        if dependency_jobs is None:
+            payload = work_unit.as_payload(workspace=workspace, job_id=job_id)
+        else:
+            payload = work_unit.as_payload(
+                workspace=workspace,
+                job_id=job_id,
+                submission_id=self.submission_id,
+                dependency_jobs=dependency_jobs,
+            )
+        payload_ref = self.workspace.put_job_file(self.submission_id, f"{job_id}.pkl", payload)
         log_path = self.workspace.get_job_log(job_id=job_id, work_unit=work_unit)
 
         if self.prewarmed is not None:

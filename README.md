@@ -10,7 +10,7 @@ A Python framework for writing **research experiments as end-to-end, reproducibl
 
 - **Reproducibility.** Experiment artifacts are kept in sync with the experiment code. Edit a task and `misen` recomputes exactly everything affected. Whole project replication becomes as easy as running one command.
 
-- **Execution.** `misen` runs your experiments' steps in parallel. You can declare necessary resources (e.g. CPUs, GPUs) per task and `misen` will provision these appropriately. You can run the code on any system; we integrate with different backends, like SLURM. We snapshot your code, so you can freely edit while experiments are queued or running.
+- **Execution.** `misen` runs your experiments' steps in parallel. You can declare necessary resources (e.g. CPUs, GPUs) per task and `misen` will provision these appropriately. You can run the code locally, on SLURM, or on SkyPilot-supported clouds and clusters through the optional SkyPilot executor. We snapshot your code, so you can freely edit while experiments are queued or running.
 
 - **Portability.** Anyone can easily clone and replicate `misen` projects. Since they are standard Python packages, they can even be `pip install`-ed in other projects, so experiments can be modified and repurposed downstream.
 
@@ -248,13 +248,177 @@ Keys may be `str`, `int`, `float`, `bool`, or `None`. Exclusions apply eagerly (
 
 **Selective access and granularity.** A `FileMap` is *one* cached result holding all its files. On a shared filesystem (`DiskWorkspace` on NFS), reading a single entry (`files[step]`) touches just that one file — loading a `FileMap` reads only its manifest, never the file contents — so accessing one checkpoint out of many is cheap. On `CloudWorkspace`, a result is fetched as a unit, so the first access materializes *all* of a `FileMap`'s files. If you have many large checkpoints and a downstream task on another machine needs only one, give each checkpoint its own cached task (so each is an independently-fetched result) rather than bundling them into one `FileMap` — this is a DAG-shaping choice, not a property of the type. (Per-entry lazy fetch on cloud would be a general `CloudWorkspace` improvement, independent of `FileMap`.)
 
-The **Executor** decides where tasks run. `LocalExecutor` and `InProcessExecutor` currently accept only single-node requests; `SlurmExecutor` maps `nodes` to the corresponding allocation flag.
+The **Executor** decides where tasks run. `LocalExecutor` and `InProcessExecutor`
+accept only single-node requests; `SlurmExecutor` and `SkyPilotExecutor` map
+`nodes` to their scheduler's allocation request.
 
 - `LocalExecutor` — parallel on your machine (default)
 - `InProcessExecutor` — single-process, useful in notebooks and tests
 - `SlurmExecutor` — submits each work unit as a SLURM job
+- `SkyPilotExecutor` — optional execution on SkyPilot-supported clouds and clusters, with one durable managed job per work unit
 
-For a multi-node Slurm allocation, the task body still runs exactly once on the first node. Bind `DASK_CLIENT` to use Misen's managed worker group, or omit it when the task intentionally manages its own allocation-scoped runtime. In the latter case, the task also owns remote-process bootstrap; a node-local, non-prewarmed Misen environment exists only on the coordinator node, while a shared prewarmed environment can be invoked directly with tools such as `srun`.
+For a multi-node Slurm or SkyPilot allocation, the task body still runs exactly
+once on the first node. Bind `DASK_CLIENT` to use Misen's managed worker group,
+with one Dask worker per allocated node, or omit it when the task intentionally
+manages its own allocation-scoped runtime. In the latter case, the task also
+owns remote-process bootstrap. Slurm can launch into a shared prewarmed
+environment with tools such as `srun`; SkyPilot code can use its rank and node
+IP environment variables to coordinate the allocation.
+
+### Remote execution with SkyPilot (optional)
+
+Install Misen's optional SkyPilot extra into the same environment that runs
+Misen (not only as an isolated `uv tool`). The Misen extra deliberately
+installs the provider-neutral SkyPilot SDK; compose it with only the upstream
+provider extras needed by the SkyPilot environment that actually provisions
+compute. With SkyPilot's default local API server, that is Misen's environment;
+a logged-in remote API server owns its own provider packages and configuration,
+so the Misen client can use the base extra alone. Misen tests this integration
+with SkyPilot 0.13 on Python 3.11–3.14; individual provider extras may impose
+additional constraints:
+
+```bash
+# AWS and GCP
+uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13,<0.14"
+
+# One or more other backends, selected independently
+uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13,<0.14"
+
+# Azure currently needs SkyPilot's documented uv prerequisite
+uv pip install --prerelease allow "azure-cli<2.87.0"
+uv pip install "misen[skypilot]" "skypilot[azure]>=0.13,<0.14"
+
+sky check
+
+# Developing this repository
+uv sync --extra skypilot
+uv run --extra skypilot --with "skypilot[runpod]>=0.13,<0.14" sky check runpod
+```
+
+Provider selection is passed through unchanged in `executor.infra`:
+
+| Compute target | SkyPilot extra | Example `infra` | Multi-node in 0.13 |
+|---|---|---|---|
+| AWS | `aws` | `aws/us-east-1` | Yes |
+| Google Cloud | `gcp` | `gcp/us-central1` | Yes, with TPU-node caveats |
+| Microsoft Azure | `azure` | `azure/eastus` | Yes |
+| Oracle Cloud | `oci` | `oci` | Yes |
+| Lambda Cloud | `lambda` | `lambda` | Yes |
+| RunPod | `runpod` | `runpod` | No |
+| Kubernetes | `kubernetes` | `k8s/my-context` | Yes |
+| Existing machines | `ssh` | `ssh/my-node-pool` | Yes |
+| Slurm through SkyPilot | `slurm` | `slurm/my-cluster/my-partition` | Yes |
+
+An ordered `infra = [...]` list may mix backend families. Values such as
+`instance_type` and `image_id` apply to every alternative, so leave them unset
+for heterogeneous lists unless the value is portable across every target.
+
+Other SkyPilot providers work the same way: install their named
+[upstream extra](https://docs.skypilot.co/en/latest/getting-started/installation.html),
+authenticate it, and use its infrastructure string. Azure's CLI currently
+needs the additional uv installation step documented upstream. Misen does not
+depend on `skypilot[all]`: that would install large, unrelated provider stacks
+and authentication clients for every user. Backend features remain
+SkyPilot-owned: a `nodes > 1` request (including managed `DASK_CLIENT`) needs a
+target with multi-node support. Some targets also cannot host SkyPilot's
+managed-jobs controller themselves, so SkyPilot may require another enabled,
+controller-capable infrastructure.
+
+Then pair the executor with a `CloudWorkspace`. For example, this provisions
+AWS compute while storing Misen's snapshots, payloads, results, locks, and logs
+in S3:
+
+```toml
+[executor]
+type = "skypilot"
+infra = "aws/us-east-1"
+use_spot = true
+snapshot = true
+prewarm_envs = false
+dask_startup_timeout = 600
+dask_scheduler_port = 8786
+
+[executor.accelerators]
+cuda = ["A100", "L4"]
+
+[executor.accelerator_memory]
+A100 = 40
+L4 = 24
+
+[workspace]
+type = "cloud"
+backend = "s3"
+bucket = "my-misen-workspace"
+prefix = "experiments"
+cache_dir = ".cache/misen"
+```
+
+For GCP, use an infrastructure such as `infra = "gcp/us-central1"` and
+`backend = "gcs"`. The configured accelerator names are concrete SkyPilot
+hardware choices, not Misen accelerator types; CPU-only workflows can omit
+both accelerator tables.
+
+The compute backend and workspace object store are independent. For example,
+RunPod or Kubernetes compute may use an S3 workspace, and Azure compute may
+use GCS, as long as every worker can reach and authenticate to that store.
+`executor.infra` controls compute provisioning; `workspace.backend` controls
+Misen's snapshots, payloads, results, locks, and logs.
+
+The machine that owns SkyPilot's API server authenticates to the compute
+backend (the submitter for the default local server, or the remote server
+otherwise). Workers need independent ambient access to the workspace bucket
+through an instance role, service account, or equivalent workload identity.
+`CloudWorkspace.config` is deliberately not copied into worker bootstrap
+commands and cannot be used to carry worker secrets.
+
+The adapter requires `snapshot = true`, `prewarm_envs = false`, a remotely
+fetchable workspace transport, and a relative workspace `cache_dir`. It
+supports arbitrary Misen DAGs by eagerly submitting one managed job per
+pending work unit. Independent branches run in parallel; each dependent
+worker waits on durable, submission-scoped workspace markers before entering
+user code. This remains durable after submission, but a downstream job may
+provision and incur cost while it waits.
+
+DAG parallelism and multi-node task parallelism are separate layers. Misen
+can run independent work units as separate SkyPilot managed jobs at the same
+time. A work unit that binds `DASK_CLIENT` gets its own temporary Dask cluster
+inside its single SkyPilot allocation; Dask does not replace Misen's DAG
+scheduler or share workers between work units.
+
+Multi-node requests use SkyPilot's `num_nodes`. Without `DASK_CLIENT`, the
+Misen payload runs only on rank 0 and user code owns any additional-node
+orchestration. SkyPilot invokes the same wrapper on every node; Misen branches
+on `SKYPILOT_NODE_RANK` and discovers the head through `SKYPILOT_NODE_IPS`.
+With `DASK_CLIENT`, rank 0 starts a private Dask scheduler and the sole task
+coordinator, and every node, including rank 0, starts exactly one worker. CPU,
+memory, and accelerator requests are per node; the scheduler and coordinator
+share rank 0's resources with its worker. Dask traffic stays on the
+allocation's private node network, which must allow every node to reach the
+scheduler at `dask_scheduler_port` (default 8786). This allocation-internal
+connection is not authenticated or encrypted, so the network must also be
+trusted and isolated from other tenants. Do not use managed Dask where an
+untrusted workload can reach the scheduler port. Choose a different free port
+if the default conflicts with the worker image or network policy (valid range
+1024–65535).
+
+Worker images must provide Bash and GNU `timeout`; the normal snapshot
+bootstrap also needs worker-side package-index access unless its tools and
+caches are pre-provisioned. For managed Dask work, every node independently
+fetches and materializes the same immutable snapshot, so its workspace
+identity and dependency access must be available throughout the allocation;
+the project environment must also include `distributed`. The Dask cluster has
+fixed membership rather than elasticity: losing any role fails the SkyPilot
+task, while normal scheduler shutdown releases workers on every rank. A Misen
+job log reflects the current worker attempt; prior-attempt and non-head
+diagnostics remain available in SkyPilot's managed-job logs. A user-code
+failure publishes its own dependency marker, but provisioning or
+early-bootstrap failures happen before that publisher exists: descendants
+learn about them only when the submitting Misen process observes the terminal
+SkyPilot status, or eventually fail at their cumulative command timeout.
+Those early diagnostics may exist only in SkyPilot's managed-job logs. See the
+[remote executor design](https://github.com/apoorvkh/misen/blob/main/docs/design_remote_executors.md) for the decision,
+tradeoffs, and roadmap for SSH, remote Slurm, Kubernetes, Modal, and direct
+provider Batch adapters.
 
 ### Distributed tasks with Dask
 
@@ -289,20 +453,28 @@ if __name__ == "__main__":
     MultiNodeSmokeTest.cli()
 ```
 
-Fill the task id, then submit it from a project directory visible to the Slurm batch node:
+Fill the task id, then submit with either supported multi-node executor:
 
 ```bash
 uv run misen fill src/my_project/experiments/multinode.py
 uv run -m my_project.experiments.multinode --executor slurm run --no-tui
+# Or, with a configured CloudWorkspace:
+uv run -m my_project.experiments.multinode --executor skypilot run --no-tui
 ```
 
-Add cluster-specific options such as `--executor.partition <name>` when needed. A successful run prints two worker addresses mapped to two distinct hostnames.
+Add backend-specific options such as `--executor.partition <name>` for Slurm
+or `--executor.infra aws/us-east-1` for SkyPilot when needed. A successful run
+prints two worker addresses mapped to two distinct hostnames.
 
 `DASK_CLIENT` requires `nodes > 1`. Misen provisions a private Dask runtime only for pending work units that bind this sentinel. Its client connection opens when the first uncached function resolves the sentinel, is shared by every requesting task in the work unit, and closes when that work unit finishes; task code must not close the client or shut down the cluster. The client represents the work unit's complete fixed allocation, with one Dask worker per node. Every task using it in the same work unit must therefore request exactly the work unit's node and accelerator topology. `cpus`, `memory`, and `accelerators` are per-node quantities.
 
-Gather futures into ordinary serializable values before returning—Dask clients and futures are tied to the live allocation and are not task results. `SlurmExecutor` currently realizes `DASK_CLIENT`; `LocalExecutor` and `InProcessExecutor` remain single-node executors and reject it. Unit tests can call the task function directly with a local Dask client.
+This is intra-work-unit parallelism, independent of Misen's DAG scheduling.
+Two ready Dask-backed work units can run concurrently as two separate backend
+allocations; workers are never pooled or shared between them.
 
-The coordinator runs once on the first node and should stay lightweight while work executes through the client. Each node has one multi-threaded Dask worker; pure-Python CPU work therefore gains process parallelism across nodes, while within-node execution follows Dask's normal threading semantics. Slurm nodes must share a trusted, mutually reachable compute network because this initial implementation uses Dask's default TCP transport and interface selection.
+Gather futures into ordinary serializable values before returning—Dask clients and futures are tied to the live allocation and are not task results. `SlurmExecutor` and `SkyPilotExecutor` realize `DASK_CLIENT`; `LocalExecutor` and `InProcessExecutor` remain single-node executors and reject it. Unit tests can call the task function directly with a local Dask client.
+
+The coordinator runs once on the first node and should stay lightweight while work executes through the client. Each node has one multi-threaded Dask worker; pure-Python CPU work therefore gains process parallelism across nodes, while within-node execution follows Dask's normal threading semantics. The cluster has fixed membership: the coordinator waits for exactly one worker per node and fails if membership changes. All allocated nodes must share a trusted, mutually reachable compute network because the managed runtime uses Dask's TCP transport without authentication or encryption inside the allocation.
 
 Runtime resources do not contribute to task identity. If node count or accelerator topology affects the logical result, make that choice an ordinary task argument (and therefore part of the task hash) and derive `resources` from it with a resource callback.
 
@@ -312,7 +484,18 @@ Select a compatible backend from the CLI or a config file:
 python -m my_project.experiments.training --executor slurm
 ```
 
-For SLURM, set cluster-specific fields in `.misen.toml` (`partition`, `account`, `qos`, `constraint`, `dask_startup_timeout`, plus any `default_flags`). `dask_startup_timeout` is the positive per-phase number of seconds to wait first for the managed scheduler and then for its workers (default 600). Executor `rules` match the resource fields directly, then set local flags such as `gpu-type`, `partition`, or `constraint`. Allocation-shaping flags such as `nodes`, `cpus-per-task`, `mem`, `time`, and `gpus-per-node` are owned by Misen and cannot be overridden this way. For example, this site declares how to satisfy Project B's request above:
+Both multi-node executors expose `dask_startup_timeout`, the positive number
+of seconds allowed while the managed scheduler and complete fixed worker set
+start (default 600). SkyPilot additionally exposes `dask_scheduler_port`
+(default 8786, valid range 1024–65535), which must be free on rank 0 and
+reachable from every allocated node. For Slurm, set cluster-specific fields in
+`.misen.toml` (`partition`, `account`, `qos`, `constraint`, plus any
+`default_flags`).
+Executor `rules` match the resource fields directly, then set local flags such
+as `gpu-type`, `partition`, or `constraint`. Allocation-shaping flags such as
+`nodes`, `cpus-per-task`, `mem`, `time`, and `gpus-per-node` are owned by Misen
+and cannot be overridden this way. For example, this site declares how to
+satisfy Project B's request above:
 
 ```toml
 [[executor.rules]]

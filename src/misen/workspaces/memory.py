@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Self
 
 from misen.exceptions import LockUnavailableError, StorageError
+from misen.utils.fsync import atomic_write_bytes as _atomic_write_bytes
 from misen.utils.hashing import ResultHash
 from misen.workspace import Workspace, _storage_errors
 
@@ -238,15 +239,20 @@ class InMemoryWorkspace(Workspace):
 
     def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
         """Store an owner-only submission file and return its path."""
-        if not name or "/" in name or "\\" in name or name in {".", ".."}:
-            msg = f"Invalid job-file name: {name!r}"
-            raise ValueError(msg)
+        self._validate_job_file_name(name)
         path = self._directory / "job_files" / submission_id / name
         with _storage_errors(f"Could not persist job file {name!r} for submission {submission_id!r}"):
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            _atomic_write_bytes(path, data)
             path.chmod(0o600)
         return str(path)
+
+    def read_job_file(self, submission_id: str, name: str) -> bytes:
+        """Read one submission file without hiding a not-yet-published file."""
+        self._validate_job_file_name(name)
+        path = self._directory / "job_files" / submission_id / name
+        with _storage_errors(f"Could not read job file {name!r}", passthrough=(FileNotFoundError,)):
+            return path.read_bytes()
 
     def bootstrap_transport(self) -> None:
         """Use directly visible paths for this process-local workspace."""

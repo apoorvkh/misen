@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -18,11 +19,16 @@ from distributed import Client
 from misen.utils import dask_runtime
 from misen.utils.dask_runtime import (
     DASK_CPUS_ENV,
+    DASK_EXPECTED_WORKERS_ENV,
     DASK_MEMORY_GIB_ENV,
     DASK_ROLE_ENV,
     DASK_SCHEDULER_ADDRESS_ENV,
     DASK_SCHEDULER_FILE_ENV,
+    DASK_SCHEDULER_HOST_ENV,
+    DASK_SCHEDULER_PORT_ENV,
+    DASK_STARTUP_TIMEOUT_ENV,
     managed_cluster_script,
+    managed_ranked_cluster_script,
     run_role_from_env,
 )
 
@@ -34,6 +40,18 @@ _ROLE_COMMAND = [
     "-c",
     "from misen.utils.dask_runtime import run_role_from_env; run_role_from_env()",
 ]
+
+_RANKED_ROLE_SOURCE = """
+import os
+
+from distributed import Client
+from misen.utils.dask_runtime import run_role_from_env
+
+if not run_role_from_env():
+    with Client(os.environ["MISEN_DASK_SCHEDULER_ADDRESS"], set_as_default=False) as client:
+        client.wait_for_workers(int(os.environ["MISEN_DASK_EXPECTED_WORKERS"]), timeout=10)
+        assert client.submit(pow, 2, 5).result() == 32
+"""
 
 _FAKE_ROLE_SOURCE = """
 import os
@@ -56,6 +74,8 @@ elif role == "worker":
         sys.exit(exit_code)
     while not Path(os.environ["MISEN_DASK_SCHEDULER_ADDRESS"]).exists():
         time.sleep(0.05)
+elif role == "preflight":
+    pass
 else:
     time.sleep(float(os.environ.get("MISEN_TEST_COORDINATOR_DELAY", "0")))
     sys.exit(int(os.environ.get("MISEN_TEST_COORDINATOR_EXIT", "0")))
@@ -85,6 +105,28 @@ def _managed_script(*environment: str, workers: int = 2) -> str:
         memory_gib=1,
         startup_timeout=5,
     )
+
+
+def _ranked_script(*environment: str, workers: int = 2) -> str:
+    return managed_ranked_cluster_script(
+        [sys.executable, "-c", _FAKE_ROLE_SOURCE],
+        environment=dict(item.split("=", 1) for item in environment),
+        workers=workers,
+        cpus=1,
+        memory_gib=1,
+        startup_timeout=5,
+        node_rank_env="MISEN_TEST_NODE_RANK",
+        node_ips_env="MISEN_TEST_NODE_IPS",
+        scheduler_port=18786,
+    )
+
+
+def _ranked_env(rank: int, *, tmp_path: Path) -> dict[str, str]:
+    return os.environ | {
+        "MISEN_TEST_NODE_RANK": str(rank),
+        "MISEN_TEST_NODE_IPS": "127.0.0.1\n127.0.0.2",
+        "TMPDIR": str(tmp_path),
+    }
 
 
 def test_scheduler_and_two_worker_roles_form_a_private_cluster(tmp_path: Path) -> None:
@@ -194,10 +236,60 @@ def test_no_dask_role_leaves_normal_worker_execution_unchanged(monkeypatch: pyte
     assert not run_role_from_env()
 
 
+def test_scheduler_role_binds_executor_selected_host_and_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    scheduler_file = tmp_path / "scheduler-address"
+    captured: dict[str, object] = {}
+
+    async def fake_scheduler(path: Path, *, host: str | None, port: int) -> None:
+        captured.update(path=path, host=host, port=port)
+
+    monkeypatch.setenv(DASK_ROLE_ENV, "scheduler")
+    monkeypatch.setenv(DASK_SCHEDULER_FILE_ENV, str(scheduler_file))
+    monkeypatch.setenv(DASK_SCHEDULER_HOST_ENV, "10.2.3.4")
+    monkeypatch.setenv(DASK_SCHEDULER_PORT_ENV, "18786")
+    monkeypatch.setattr(dask_runtime, "_run_scheduler", fake_scheduler)
+
+    assert run_role_from_env()
+    assert captured == {"path": scheduler_file, "host": "10.2.3.4", "port": 18786}
+
+
+def test_preflight_role_waits_for_the_complete_worker_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, address: str, **kwargs: object) -> None:
+            observed.update(address=address, kwargs=kwargs)
+
+        def wait_for_workers(self, workers: int, *, timeout: int) -> None:
+            observed.update(workers=workers, timeout=timeout)
+
+        def scheduler_info(self) -> dict[str, object]:
+            return {"workers": {f"worker-{index}": {} for index in range(3)}}
+
+        def close(self) -> None:
+            observed["closed"] = True
+
+    monkeypatch.setattr(distributed, "Client", FakeClient)
+    monkeypatch.setenv(DASK_ROLE_ENV, "preflight")
+    monkeypatch.setenv(DASK_SCHEDULER_ADDRESS_ENV, "tcp://10.2.3.4:18786")
+    monkeypatch.setenv(DASK_EXPECTED_WORKERS_ENV, "3")
+    monkeypatch.setenv(DASK_STARTUP_TIMEOUT_ENV, "45")
+
+    assert run_role_from_env()
+    assert observed == {
+        "address": "tcp://10.2.3.4:18786",
+        "kwargs": {"set_as_default": False, "timeout": 45},
+        "workers": 3,
+        "timeout": 45,
+        "closed": True,
+    }
+
+
 def test_dask_role_preserves_unexpected_runtime_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def fail_run(coroutine: object) -> None:
         coroutine.close()  # type: ignore[attr-defined]
-        raise AssertionError("runtime bug")
+        msg = "runtime bug"
+        raise AssertionError(msg)
 
     monkeypatch.setenv(DASK_ROLE_ENV, "scheduler")
     monkeypatch.setenv(DASK_SCHEDULER_FILE_ENV, str(tmp_path / "scheduler-address"))
@@ -242,3 +334,100 @@ def test_managed_cluster_script_fails_when_a_worker_exits() -> None:
 
     result = subprocess.run([_bash(), "-c", script], timeout=10, check=False)
     assert result.returncode == 1
+
+
+def test_ranked_cluster_script_assigns_head_and_worker_roles_safely() -> None:
+    script = managed_ranked_cluster_script(
+        ["bash", "-c", "printf '%s\\n' \"$VALUE\""],
+        environment={"VALUE": "spaces and 'quotes'"},
+        workers=3,
+        cpus=4,
+        memory_gib=8,
+        startup_timeout=30,
+        node_rank_env="SKYPILOT_NODE_RANK",
+        node_ips_env="SKYPILOT_NODE_IPS",
+        scheduler_port=18786,
+    )
+
+    subprocess.run([_bash(), "-n"], input=script, text=True, check=True)
+    assert "SKYPILOT_NODE_RANK" in script
+    assert "SKYPILOT_NODE_IPS" in script
+    assert "MISEN_DASK_ROLE=scheduler" in script
+    assert "MISEN_DASK_ROLE=worker" in script
+    assert "MISEN_DASK_ROLE=preflight" in script
+    assert "MISEN_DASK_ROLE=coordinator" not in script
+    assert "MISEN_DASK_EXPECTED_WORKERS=3" in script
+    assert "MISEN_DASK_CPUS=4" in script
+    assert "MISEN_DASK_MEMORY_GIB=8" in script
+    assert "MISEN_DASK_STARTUP_TIMEOUT=30" in script
+    assert "18786" in script
+
+
+def test_ranked_cluster_script_propagates_non_head_worker_failure(tmp_path: Path) -> None:
+    expected_status = 9
+    script = _ranked_script(f"MISEN_TEST_WORKER_EXIT={expected_status}")
+
+    result = subprocess.run(
+        [_bash(), "-c", script],
+        env=_ranked_env(1, tmp_path=tmp_path),
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == expected_status
+
+
+def test_ranked_cluster_script_cleans_up_and_propagates_coordinator_failure(tmp_path: Path) -> None:
+    expected_status = 7
+    script = _ranked_script(f"MISEN_TEST_COORDINATOR_EXIT={expected_status}")
+
+    result = subprocess.run(
+        [_bash(), "-c", script],
+        env=_ranked_env(0, tmp_path=tmp_path),
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == expected_status
+    assert not list(tmp_path.glob("misen-dask.*"))
+
+
+def test_ranked_cluster_script_forms_a_real_two_rank_cluster(tmp_path: Path) -> None:
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        scheduler_port = reservation.getsockname()[1]
+    script = managed_ranked_cluster_script(
+        [sys.executable, "-c", _RANKED_ROLE_SOURCE],
+        environment={},
+        workers=2,
+        cpus=1,
+        memory_gib=1,
+        startup_timeout=10,
+        node_rank_env="MISEN_TEST_NODE_RANK",
+        node_ips_env="MISEN_TEST_NODE_IPS",
+        scheduler_port=scheduler_port,
+    )
+    head: subprocess.Popen[bytes] | None = None
+    worker: subprocess.Popen[bytes] | None = None
+    try:
+        head = subprocess.Popen(
+            [_bash(), "-c", script],
+            env=_ranked_env(0, tmp_path=tmp_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        worker = subprocess.Popen(
+            [_bash(), "-c", script],
+            env=_ranked_env(1, tmp_path=tmp_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        head_stdout, head_stderr = head.communicate(timeout=20)
+        worker_stdout, worker_stderr = worker.communicate(timeout=20)
+
+        assert head.returncode == 0, (head_stdout, head_stderr)
+        assert worker.returncode == 0, (worker_stdout, worker_stderr)
+        assert not list(tmp_path.glob("misen-dask.*"))
+    finally:
+        _stop(head)
+        _stop(worker)

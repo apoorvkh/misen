@@ -279,6 +279,28 @@ def test_experiment_cli_instance_defaults_still_overridable_by_flags(captured_ar
     assert exp.value == 99
 
 
+def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_args) -> None:
+    from misen.executors.skypilot import SkyPilotExecutor
+
+    experiment_cli(
+        CliExperiment,
+        argv=[
+            "--executor",
+            "skypilot",
+            "--executor.infra",
+            "gcp/us-central1",
+            "--executor.name-prefix",
+            "research",
+            "list",
+        ],
+    )
+
+    executor = getattr(captured_args["args"], "executor")
+    assert isinstance(executor, SkyPilotExecutor)
+    assert executor.infra == "gcp/us-central1"
+    assert executor.name_prefix == "research"
+
+
 def test_resolve_experiment_reference_accepts_instance(monkeypatch, tmp_path) -> None:
     project_src = tmp_path / "src" / "config_pkg"
     project_src.mkdir(parents=True)

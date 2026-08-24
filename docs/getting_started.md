@@ -66,7 +66,7 @@ MyExperiment(n=1000).run()
 
 `"auto"` workspace/executor resolution uses layered TOML configuration:
 
-1. `$XDG_CONFIG_HOME/misen/config.toml` — user-level defaults
+1. `$XDG_CONFIG_HOME/misen.toml` — user-level defaults
 2. `./.misen.toml` — project-level overrides (sections replace XDG sections)
 3. `$MISEN_CONFIG` env var or `--config` CLI flag — explicit override (replaces the chain)
 

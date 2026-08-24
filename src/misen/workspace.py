@@ -290,6 +290,30 @@ class Workspace(Configurable):
             otherwise an opaque ref consumed by that transport.
         """
 
+    def read_job_file(self, submission_id: str, name: str) -> bytes:
+        """Read submission-scoped bytes previously written by this workspace.
+
+        Executors may use small job files for durable coordination between
+        workers. Missing files must raise :class:`FileNotFoundError` so a
+        consumer can distinguish "not published yet" from a storage failure.
+
+        Backends that do not support coordination reads may retain this
+        default; executors requiring the capability must reject them during
+        submission preflight.
+        """
+        raise NotImplementedError
+
+    def supports_job_file_reads(self) -> bool:
+        """Return whether this backend implements submission-file reads."""
+        return type(self).read_job_file is not Workspace.read_job_file
+
+    @staticmethod
+    def _validate_job_file_name(name: str) -> None:
+        """Reject names that could escape a submission's job-file prefix."""
+        if not name or "/" in name or "\\" in name or name in {".", ".."}:
+            msg = f"Invalid job-file name: {name!r}"
+            raise ValueError(msg)
+
     @abstractmethod
     def bootstrap_transport(self) -> str | None:
         """Return Bash that fetches snapshots/job files, or ``None`` for paths.
@@ -364,6 +388,7 @@ class Workspace(Configurable):
         consistent state if it runs, but if it does not run the next
         invocation must still produce correct behavior.
         """
+        del task
 
     def finalize_scratch_dir(self, task: Task) -> None:
         """Stop the background sync and perform a final upload sweep.
@@ -374,6 +399,7 @@ class Workspace(Configurable):
         resumption can start from the latest checkpoint. Path-backed
         workspaces may implement this as a no-op.
         """
+        del task
 
     def remove_scratch_dir(self, task: Task) -> None:
         """Remove durable + local copies of a cacheable task's scratch_dir.
@@ -437,6 +463,7 @@ class Workspace(Configurable):
         must be idempotent and tolerant of a missing local file.
         Path-backed workspaces may implement this as a no-op.
         """
+        del task, job_id
 
     def read_task_log(self, task: Task, job_id: str | None = None) -> TextIO:
         """Open a previously-written task log for reading.
@@ -542,6 +569,7 @@ class Workspace(Configurable):
         local file. Workspaces where ``local_path`` is already on durable
         shared storage may implement this as a no-op.
         """
+        del local_path
 
     def job_log_iter(self, work_unit: WorkUnit | None = None) -> Iterator[Path]:
         """Return iterator over job-log files.

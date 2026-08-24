@@ -1,10 +1,12 @@
 # Design: content-addressed snapshots and a universal worker bootstrap
 
 Status: phases 1–3 implemented (`ProjectSnapshot`, workspace snapshot
-store + job files, universal bootstrap, `env_store_dir`/`prewarm_envs`);
-phases 4 (SSH/SkyPilot executors) and 5 (prune) pending. Builds on
-`design_shared_env_store.md` (whose store protocol is unchanged);
-supersedes the deep/shallow split.
+store + job files, universal bootstrap, `env_store_dir`/`prewarm_envs`).
+Phase 4 has its first adapter, `SkyPilotExecutor`; SSH and the other remote
+adapters remain pending. Phase 5 (prune) is pending. Builds on
+`design_shared_env_store.md` (whose store protocol is unchanged) and
+supersedes the deep/shallow split. See
+`design_remote_executors.md` for the remote-control-plane decision.
 
 ## Motivation
 
@@ -15,7 +17,7 @@ content-addressable, shareable across submissions), the **submission**
 cloudpickled payload written at dispatch). It is also duplicated across two
 build paths (deep: `uv sync` from the working tree at submission; shallow:
 staged export + worker-side build), and its transport assumes a shared
-filesystem — which planned SSH and SkyPilot executors do not have.
+filesystem — which SSH and SkyPilot execution do not have.
 
 This design collapses all of that into one model:
 
@@ -222,10 +224,11 @@ package).
   disabled, the same Bash bootstrap and local env store as other executors.
 - **SlurmExecutor**: `sbatch --wrap` carries the bootstrap invocation;
   everything bulky rides the workspace. With `DiskWorkspace` this is
-  today's shared-FS layout. With `CloudWorkspace` the shared-FS
-  requirement disappears entirely (snapshots, payloads, env files, logs,
-  results all flow through the object store — job logs already stream via
-  `_LiveLogUploader`).
+  today's shared-FS layout. With `CloudWorkspace`, snapshots, payloads,
+  env files, results, and streamed Misen logs flow through the object store.
+  The current Slurm adapter still requires its job working directory and
+  scheduler output path to be visible on the batch node; removing that
+  separate path dependency remains future work.
 - **SSH executor (planned)**: `ssh` is the control channel, `scp`/sftp the
   file channel (env files with `0600`, misen wheel when needed, optionally
   the `uv` binary). Requires a workspace both sides can reach — results
@@ -233,9 +236,26 @@ package).
   cannot work; `CloudWorkspace` (or a remote-mounted disk workspace) can.
   Content-addressed snapshots make repeat submissions cheap: the remote
   cache is keyed by hash, so unchanged code transfers nothing.
-- **SkyPilot executor (planned)**: provisioning + `setup` installs uv;
-  `file_mounts` for env files; everything else via `CloudWorkspace`, which
-  is the natural (likely required) pairing.
+- **SkyPilotExecutor (implemented first adapter)**: SkyPilot provisions or
+  selects compute on its supported clouds and clusters and owns the durable
+  managed-job lifecycle; Misen's
+  workspace remains the data plane. The adapter eagerly submits one managed
+  job per pending work unit and implements arbitrary DAG dependencies with
+  durable workspace state files; independent branches run concurrently, while
+  descendants may provision before their gates open. Multi-node requests use
+  SkyPilot `num_nodes`. Work units that bind `DASK_CLIENT` receive one private
+  Dask worker per node, with the scheduler and task coordinator on rank 0;
+  without that sentinel, the Misen payload runs only on rank 0 and user code
+  orchestrates the other nodes. The Dask scheduler uses the first
+  `SKYPILOT_NODE_IPS` address and configurable `dask_scheduler_port` on the
+  allocation's trusted private network. The adapter
+  requires `snapshot=true`, `prewarm_envs=false`, a non-path workspace
+  transport (normally `CloudWorkspace`), and a relative worker cache path.
+  Workers fetch snapshots, env files, payloads, results, and logs through that
+  workspace using ambient IAM/service-account credentials. Failures before a
+  worker starts need the submitting Misen process to observe their status and
+  publish dependency state; otherwise descendants eventually reach their
+  cumulative timeout.
 
 Compatibility (validated at submit, failing early with a clear error):
 
@@ -244,7 +264,7 @@ Compatibility (validated at submit, failing early with a clear error):
 | InProcess/Local | ✓ | ✓ | ✓ | ✓ |
 | Slurm | ✓ | ✗ | ✓ | ✗ |
 | SSH | ✓ (if mounted) | ✗ | ✓ | ✗ |
-| SkyPilot | ✗ | ✗ | ✓ | ✗ |
+| SkyPilot (current) | ✗ | ✗ | ✓ | ✗ |
 
 ## Lifecycle
 
@@ -298,8 +318,10 @@ safe when nothing is queued or running.
    snapshots dispatch directly; `env_store_dir` + `prewarm_envs` replace
    `snapshot="shallow"`/`env_cache`/`snapshots_dir`; dependency envs use
    the staged project's frozen uv sync on either host.
-4. **New executors** (pending): SSH, then SkyPilot, on the phase-3
-   contract; submit-time workspace/executor compatibility validation
-   beyond the current prewarm checks.
+4. **New executors** (partial): SkyPilot is implemented as the first optional
+   adapter on the phase-3 contract, including submit-time workspace validation
+   and a managed multi-node `DASK_CLIENT` runtime. Direct SSH, remote Slurm,
+   Kubernetes, Modal, and provider Batch adapters remain on the roadmap; see
+   `design_remote_executors.md`.
 5. **Prune** (pending): age-based GC across snapshot/env/job stores +
    dispatch-time marker touches.

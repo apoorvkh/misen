@@ -25,7 +25,7 @@ from misen.utils.settings import Configurable
 from misen.utils.work_unit import build_work_graph
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from pathlib import Path
 
     from misen.task_metadata import Resources
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Executor", "Job", "JobState", "bulk_job_states", "raise_for_failed_jobs"]
 
-ExecutorType: TypeAlias = Literal["local", "in_process", "slurm"]
+ExecutorType: TypeAlias = Literal["local", "in_process", "slurm", "skypilot"]
 JobState: TypeAlias = Literal["pending", "running", "done", "failed", "unknown"]
 _VALID_JOB_STATES: frozenset[JobState] = frozenset({"pending", "running", "done", "failed", "unknown"})
 JobT = TypeVar("JobT", bound="Job")
@@ -58,6 +58,7 @@ class Executor(Configurable, Generic[JobT]):
         "local": "misen.executors.local:LocalExecutor",
         "in_process": "misen.executors.in_process:InProcessExecutor",
         "slurm": "misen.executors.slurm:SlurmExecutor",
+        "skypilot": "misen.executors.skypilot:SkyPilotExecutor",
     }
 
     snapshot: bool = True
@@ -124,6 +125,7 @@ class Executor(Configurable, Generic[JobT]):
         if pending_work_units:
             from misen.utils.snapshot import ProjectSnapshot, _detect_pixi_wrap
 
+            self._validate_submission(work_graph=work_graph, pending_work_units=pending_work_units, workspace=workspace)
             logger.info("%s creating snapshot for %d pending work unit(s).", executor_name, num_dispatch)
             started_at = time.perf_counter()
             try:
@@ -148,62 +150,13 @@ class Executor(Configurable, Generic[JobT]):
             runtime_event(f"Created a snapshot of the project environment in {elapsed_s:.2f}s", style="green")
 
             with runtime_progress(f"Submitting jobs to {executor_name}", total=num_dispatch) as progress_bar:
-                for work_unit in pending_work_units:
-                    started_at = time.perf_counter()
-                    try:
-                        dependencies = {
-                            jobs[dependency]
-                            for dependency in work_unit.dependencies
-                            if not isinstance(jobs[dependency], CompletedJob)
-                        }
-                        logger.debug(
-                            "%s dispatching %s with %d dependency job(s).",
-                            executor_name,
-                            work_unit_label(work_unit),
-                            len(dependencies),
-                        )
-                        dispatched_job = self._dispatch(
-                            work_unit=work_unit,
-                            dependencies=dependencies,
-                            workspace=workspace,
-                            snapshot=snapshot,
-                        )
-                        jobs[work_unit] = dispatched_job
-                        logger.debug(
-                            "%s dispatched %s (job_id=%s) in %.2fs.",
-                            executor_name,
-                            work_unit_label(work_unit),
-                            dispatched_job.job_id or "n/a",
-                            time.perf_counter() - started_at,
-                        )
-                    except Exception as exc:
-                        elapsed_s = time.perf_counter() - started_at
-                        logger.exception(
-                            "%s failed to dispatch %s after %.2fs.",
-                            executor_name,
-                            work_unit_label(work_unit),
-                            elapsed_s,
-                        )
-                        runtime_event(
-                            (
-                                f"Dispatch failed for "
-                                f"{task_label(work_unit.root, include_hash=False, include_arguments=True)} "
-                                f"in {elapsed_s:.2f}s"
-                            ),
-                            style="bold red",
-                        )
-                        submitted = tuple(job for job in jobs.values() if not isinstance(job, CompletedJob))
-                        if submitted and isinstance(exc, SubmissionError):
-                            msg = (
-                                f"Could not submit {work_unit_label(work_unit)} after "
-                                f"{len(submitted)} earlier job(s) were accepted: {exc}"
-                            )
-                            raise SubmissionError(msg, submitted_jobs=(*submitted, *exc.submitted_jobs)) from exc
-                        if submitted:
-                            labels = ", ".join(job.label for job in submitted)
-                            exc.add_note(f"Already submitted jobs: {labels}.")
-                        raise
-                    progress_bar(1)
+                self._dispatch_work_graph(
+                    pending_work_units=pending_work_units,
+                    jobs=jobs,
+                    workspace=workspace,
+                    snapshot=snapshot,
+                    progress=progress_bar,
+                )
 
         task_counts = {work_unit: len(work_unit.graph.nodes()) for work_unit in work_units}
         dispatched_task_count = sum(task_counts[work_unit] for work_unit in pending_work_units)
@@ -238,6 +191,98 @@ class Executor(Configurable, Generic[JobT]):
             raise_for_failed_jobs(states, context=executor_name)
 
         return job_graph
+
+    def _validate_submission(
+        self,
+        *,
+        work_graph: DependencyGraph[WorkUnit],
+        pending_work_units: Sequence[WorkUnit],
+        workspace: Workspace,
+    ) -> None:
+        """Validate backend-specific submission compatibility before snapshotting.
+
+        Workflow and remote backends can reject unsupported graph shapes or
+        workspace transports here, before project staging performs any work.
+        Per-work-unit resource validation may still happen during dispatch.
+
+        The default accepts every submission. Backends should override this
+        only when they have additional preflight constraints.
+        """
+        del work_graph, pending_work_units, workspace
+
+    def _dispatch_work_graph(
+        self,
+        *,
+        pending_work_units: Sequence[WorkUnit],
+        jobs: dict[WorkUnit, CompletedJob | JobT],
+        workspace: Workspace,
+        snapshot: ProjectSnapshot | None,
+        progress: Callable[[int], None],
+    ) -> None:
+        """Dispatch pending work units, preserving the default eager behavior.
+
+        Backends with a native workflow primitive may override this hook to
+        submit the pending graph atomically. The default implementation calls
+        :meth:`_dispatch` in dependency order and retains partial-submission
+        diagnostics for schedulers such as SLURM.
+        """
+        executor_name = self.__class__.__name__
+        for work_unit in pending_work_units:
+            started_at = time.perf_counter()
+            try:
+                dependencies = {
+                    jobs[dependency]
+                    for dependency in work_unit.dependencies
+                    if not isinstance(jobs[dependency], CompletedJob)
+                }
+                logger.debug(
+                    "%s dispatching %s with %d dependency job(s).",
+                    executor_name,
+                    work_unit_label(work_unit),
+                    len(dependencies),
+                )
+                dispatched_job = self._dispatch(
+                    work_unit=work_unit,
+                    dependencies=cast("set[JobT]", dependencies),
+                    workspace=workspace,
+                    snapshot=snapshot,
+                )
+                jobs[work_unit] = dispatched_job
+                logger.debug(
+                    "%s dispatched %s (job_id=%s) in %.2fs.",
+                    executor_name,
+                    work_unit_label(work_unit),
+                    dispatched_job.job_id or "n/a",
+                    time.perf_counter() - started_at,
+                )
+            except Exception as exc:
+                elapsed_s = time.perf_counter() - started_at
+                logger.exception(
+                    "%s failed to dispatch %s after %.2fs.",
+                    executor_name,
+                    work_unit_label(work_unit),
+                    elapsed_s,
+                )
+                runtime_event(
+                    (
+                        f"Dispatch failed for "
+                        f"{task_label(work_unit.root, include_hash=False, include_arguments=True)} "
+                        f"in {elapsed_s:.2f}s"
+                    ),
+                    style="bold red",
+                )
+                submitted = tuple(job for job in jobs.values() if not isinstance(job, CompletedJob))
+                if submitted and isinstance(exc, SubmissionError):
+                    msg = (
+                        f"Could not submit {work_unit_label(work_unit)} after "
+                        f"{len(submitted)} earlier job(s) were accepted: {exc}"
+                    )
+                    raise SubmissionError(msg, submitted_jobs=(*submitted, *exc.submitted_jobs)) from exc
+                if submitted:
+                    labels = ", ".join(job.label for job in submitted)
+                    exc.add_note(f"Already submitted jobs: {labels}.")
+                raise
+            progress(1)
 
     @abstractmethod
     def _dispatch(
