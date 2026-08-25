@@ -3,21 +3,20 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
+import pytest
+
 import misen.executors.local as local_module
 from misen import Task, meta
-from misen.exceptions import StorageError
+from misen.exceptions import ExecutionError, StorageError
 from misen.executors.local import LocalJob
 from misen.utils.work_unit import WorkUnit
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
-
-    import pytest
 
     from misen.task_metadata import Resources
     from misen.workspace import Workspace
@@ -188,7 +187,7 @@ def test_log_finalization_failure_only_fails_affected_job(
     affected.assigned_cpu_indices = [0]
     sibling._cached_state = "running"
     sibling_process = MagicMock()
-    sibling_process.poll.return_value = None
+    sibling_process.status.is_active = True
     sibling._process = sibling_process
     sibling.assigned_cpu_indices = [1]
 
@@ -210,45 +209,33 @@ def test_log_finalization_failure_only_fails_affected_job(
     workspace.finalize_job_log.assert_called_once_with(affected.log_path)
 
 
-def test_process_group_kill_uses_portable_popen_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    process = MagicMock()
-    monkeypatch.setattr(local_module, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(local_module, "signal", SimpleNamespace(SIGTERM=15))
-
-    local_module._signal_process_group(process, "kill")
-
-    process.kill.assert_called_once_with()
-    process.terminate.assert_not_called()
-
-
-def test_process_group_kill_uses_killpg_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
-    process = MagicMock(spec=local_module.subprocess.Popen)
-    process.pid = 1234
-    fake_os = SimpleNamespace(name="posix", killpg=MagicMock())
-    monkeypatch.setattr(local_module, "os", fake_os)
-    monkeypatch.setattr(local_module, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
-
-    local_module._signal_process_group(process, "kill")
-
-    fake_os.killpg.assert_called_once_with(1234, 9)
-    process.kill.assert_not_called()
-
-
-def test_shutdown_force_kills_every_job_after_polling_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_shutdown_stops_every_job_after_one_stop_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     scheduler = _scheduler(monkeypatch)
-    failed_poll = MagicMock(spec=LocalJob)
+    failed_stop = MagicMock(spec=LocalJob)
     sibling = MagicMock(spec=LocalJob)
-    failed_poll.state.side_effect = StorageError("log upload failed")
-    sibling.state.return_value = "running"
-    failed_poll.force_kill.return_value = True
-    sibling.force_kill.return_value = True
+    failed_stop.astop.side_effect = RuntimeError("stop failed")
+    sibling.astop.return_value = True
     monkeypatch.setattr(local_module, "_SHUTDOWN_TERM_GRACE_S", 0.01)
-    scheduler._running = {failed_poll: None, sibling: None}
+    scheduler._running = {failed_stop: None, sibling: None}
 
     scheduler._terminate_running_jobs()
 
-    failed_poll.force_kill.assert_called_once()
-    sibling.force_kill.assert_called_once()
+    reason = "Local executor shut down before the job completed."
+    failed_stop.astop.assert_awaited_once_with(grace_seconds=0.01, reason=reason)
+    sibling.astop.assert_awaited_once_with(grace_seconds=0.01, reason=reason)
+
+
+def test_shutdown_fails_queued_jobs_and_rejects_new_submissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = _scheduler(monkeypatch)
+    queued = _job(0)
+    scheduler.submit(queued)
+
+    scheduler._terminate_running_jobs()
+
+    assert queued.state() == "failed"
+    assert queued.failure.reason == "Local executor shut down before the job completed."
+    with pytest.raises(ExecutionError, match="shutting down"):
+        scheduler.submit(_job(1))
 
 
 def test_launch_failure_releases_resources_and_fails_dependents(monkeypatch: pytest.MonkeyPatch) -> None:

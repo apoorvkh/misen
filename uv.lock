@@ -1475,6 +1475,7 @@ dependencies = [
     { name = "libcst" },
     { name = "msgspec" },
     { name = "obstore" },
+    { name = "processkit-py" },
     { name = "psutil", marker = "sys_platform != 'linux'" },
     { name = "python-dotenv" },
     { name = "rich" },
@@ -1509,6 +1510,7 @@ requires-dist = [
     { name = "libcst", specifier = ">=1.8.2" },
     { name = "msgspec", specifier = ">=0.20.0" },
     { name = "obstore", specifier = ">=0.9.4" },
+    { name = "processkit-py", specifier = ">=1.5.0,<2" },
     { name = "psutil", marker = "sys_platform != 'linux'", specifier = ">=6.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=13.7.0" },
@@ -2297,6 +2299,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/81/74/ba08d81e668ccfe8658d7520a307e63c19862c08eb4ccb26f356c5239a7a/prettytable-3.18.0.tar.gz", hash = "sha256:439217116152244369caf3d9f1caf2f9fe29b03bd79e88d2928c8e718c95d680", size = 76373 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/be/2e6798ace5cc036f5d05d36b7b2fd85346f1a708c87060890b070d0ec607/prettytable-3.18.0-py3-none-any.whl", hash = "sha256:b3346e0e6f79180833aebaac088ae926340586cf6d7d991b9eb125b65f72313a", size = 37357 },
+]
+
+[[package]]
+name = "processkit-py"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/d3/6a1cebb5395cbb3c567241e3fe69c4352f0a0cc165bb4016fd12a1a92326/processkit_py-1.5.0.tar.gz", hash = "sha256:4c113874751cfece5ac7a76865070a7be6d99ccfbeb6216a76d248df985eea19", size = 4435566 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/88/845e2334e0741ab3c7ad15c238ceb5a52c2c0a98088663b1543c4de8c890/processkit_py-1.5.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:f38ff2fd43ddb9a619dd78547a29dd4f2c0a56e405f414931faace9e6195d1e6", size = 1801576 },
+    { url = "https://files.pythonhosted.org/packages/b1/97/7d5acd2229f63b215a6d8ae5af5b7e446c90638896bd6eff2601fa56bfb6/processkit_py-1.5.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:100b553cca7b05b418b2dbd00a53cad681cf8c2ae033c83ed52e3bdb9380d2d3", size = 1733255 },
+    { url = "https://files.pythonhosted.org/packages/32/66/4fa38b4cdf0e2462e8714b53cdcdc90d0244bafe6493de9821c6165c9f0c/processkit_py-1.5.0-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:66005ea7e189dbec88d46e6b33d011cc81a7143a0bf6dcef8498d079aeece37f", size = 1824864 },
+    { url = "https://files.pythonhosted.org/packages/14/e3/dede5966098ec09998b3c69e2b603a58706443324e3bffb62e845df9650d/processkit_py-1.5.0-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:9d858a8d19121ab28502163ddc0132810b242f4ef1eb2b0d3311fb8b9c9a8efc", size = 1915553 },
+    { url = "https://files.pythonhosted.org/packages/31/89/4579bf265f98501f5429b3622590d1c967e7fcbbf5571c7c816f081d75d6/processkit_py-1.5.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:ae918253e22b51ef2d21425b47c82f6a6af01ae6f732eaf09e19130f8a908529", size = 1888395 },
+    { url = "https://files.pythonhosted.org/packages/eb/25/7ad324fa57e9cbf8726927cd17c128463cf6046e4f20e539ca34838e0327/processkit_py-1.5.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:34d1ea9d9e74687fb76686eb714a2dea589868aecf5f3cd4651c0cd7f9295d5b", size = 2001728 },
+    { url = "https://files.pythonhosted.org/packages/39/83/bdc45b1445db880a56de67d2a155bdcb5b0d0411cc15944e706bbcad3ae2/processkit_py-1.5.0-cp310-abi3-win_amd64.whl", hash = "sha256:6cd6cd9b9fd89e09f5e7b9e3d6365977bf8f7333c8e504c25d8700f0dc30a07d", size = 2134647 },
+    { url = "https://files.pythonhosted.org/packages/4b/77/91cdac415d6eb35cdb134ab4e523f4add1380abcbf8ec03725a1341461d8/processkit_py-1.5.0-cp310-abi3-win_arm64.whl", hash = "sha256:7899cb6d89ebf40fc09f5af40a45ddaad9e16da7c47bf7196ba7ab536a1d5a9f", size = 1998138 },
+    { url = "https://files.pythonhosted.org/packages/e3/58/71b6b737f5735881420e71cd628061ec92ddecb834aab48ff421ad1eee8c/processkit_py-1.5.0-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:bdd92735e61638b7e97a367b42f89a3e0119fd80ea6dd109b260b4355f2681c5", size = 1815566 },
+    { url = "https://files.pythonhosted.org/packages/01/ae/8ac5fdddfdde89335f5b05e0f32ec3480739c44e9ee0599734637434bc89/processkit_py-1.5.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:60bb5c5ec8939073d7f77943327af8d298a2435292059b2a90386eb71036f5f9", size = 1709026 },
+    { url = "https://files.pythonhosted.org/packages/5b/d7/65adcca35070df914ee3f02bb4d3a789895ca776f5477eb6bbca00199008/processkit_py-1.5.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:604b219ef15b1fbe9bff0cf007d09a4296ae8630e54b8bb7c84108efcc90c01b", size = 1816459 },
+    { url = "https://files.pythonhosted.org/packages/41/f9/4dfc5e734c72ba42c952fe63293568e67ab2a867fd9ff25091be9b6d8c90/processkit_py-1.5.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:513eb62dd6e37c66915f1d776849aa482da32b2ceeb4bc7dce9334fecea54c5d", size = 1907412 },
+    { url = "https://files.pythonhosted.org/packages/5e/ea/a295daa7f4ab2af5d49da3f342b40189fcbb052d4e002ca86719627923d9/processkit_py-1.5.0-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:5eae1c260f3a73445dbfc1e2660513f744484310b94fd1f7222d36c6b016383e", size = 1880904 },
+    { url = "https://files.pythonhosted.org/packages/69/65/6e34b6e5737a87628d1376321a9411e66b696e0db3cf13d398fa6087656f/processkit_py-1.5.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:80bc09d023209262f9f0c93929ded1ad128daa817a27bc55421026b008165f0e", size = 1994207 },
+    { url = "https://files.pythonhosted.org/packages/c1/39/ba19dbd67862b48b8bc858b8bdb4933ccb200dd485208638fb476d036b23/processkit_py-1.5.0-cp314-cp314t-win_amd64.whl", hash = "sha256:6c1de0f2002205a7c5f907ada4fbaf8938c4987b12797291393d9570129af460", size = 2115847 },
+    { url = "https://files.pythonhosted.org/packages/d8/2c/c03b0f8ec4a13b76a9536150e4a925119b456a123e5e615fc94615ae69b4/processkit_py-1.5.0-cp314-cp314t-win_arm64.whl", hash = "sha256:18328424835e72d5b8ff8d9f21a04ce791323b2176878c68463be4a67f8c3e0d", size = 1982377 },
 ]
 
 [[package]]

@@ -9,10 +9,13 @@ from misen.utils.resource_binding import apply_resource_binding
 
 
 def test_apply_resource_binding_sets_thread_caps_when_cpu_indices_given(monkeypatch) -> None:
+    affinity_calls: list[tuple[int, set[int]]] = []
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr(os, "sched_setaffinity", lambda pid, cpus: affinity_calls.append((pid, cpus)))
 
     apply_resource_binding(cpu_indices=[0, 1, 2])
 
+    assert affinity_calls == [(0, {0, 1, 2})]
     assert os.environ["OMP_NUM_THREADS"] == "3"
     assert os.environ["MKL_NUM_THREADS"] == "3"
 

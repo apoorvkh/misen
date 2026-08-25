@@ -89,7 +89,7 @@ def execute(
     workspace = bundle["workspace"]
     payload_fn: Callable[[], None] = bundle["fn"]
 
-    # The parent points the scheduler's stdout (``Popen(stdout=...)`` /
+    # The parent points the executor's stdout (a direct processkit redirect /
     # SLURM ``--output=...``) at this same path, so the live uploader
     # sees everything the worker writes -- allocation/setup,
     # ``WorkUnit.execute``, post-execute Python finalizers.

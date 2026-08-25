@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextlib
 import logging
 import os
 import signal
-import subprocess
 import sys
 import threading
-import time
 from bisect import insort
 from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+
+from processkit import Command, ProcessError, ProcessResult, SupervisionSession, Supervisor
 
 from misen.exceptions import ExecutionError, StorageError, SubmissionError
 from misen.executor import Executor, Job
@@ -31,7 +32,6 @@ from misen.utils.snapshot import prepare_live_job
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from io import FileIO
     from types import FrameType
 
     from misen.task_metadata import Resources
@@ -42,43 +42,24 @@ if TYPE_CHECKING:
 __all__ = ("LocalExecutor", "LocalJob")
 
 _JobState = Literal["pending", "running", "done", "failed"]
-_ProcessSignal = Literal["terminate", "kill"]
 logger = logging.getLogger(__name__)
 _TIMEOUT_KILL_GRACE_S = 5.0
-_FATAL_REAP_TIMEOUT_S = 2.0
 _SHUTDOWN_TERM_GRACE_S = 2.0
 _SIGTERM_CLEANUP_TIMEOUT_S = 5.0
 
 
-def _signal_process_group(process: subprocess.Popen[bytes], action: _ProcessSignal) -> OSError | None:
-    """Signal a local worker and its descendants, with a portable fallback."""
-    if os.name == "posix" and isinstance(process, subprocess.Popen):
-        sig = signal.SIGTERM if action == "terminate" else signal.SIGKILL
+def _inherited_cpu_indices() -> list[int]:
+    """Return the CPU pool this process may safely pass to its children."""
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if sched_getaffinity is not None:
         try:
-            os.killpg(process.pid, sig)
-        except OSError:
+            cpu_indices = sorted(sched_getaffinity(0))
+        except (OSError, ValueError):
             pass
         else:
-            return None
-    try:
-        getattr(process, action)()
-    except OSError as exc:
-        return exc
-    return None
-
-
-def _start_process_reaper(process: subprocess.Popen[bytes]) -> None:
-    """Keep killing and waiting for a child that fatal recovery could not reap."""
-
-    def reap() -> None:
-        while process.poll() is None:
-            _signal_process_group(process, "kill")
-            try:
-                process.wait(timeout=1.0)
-            except (OSError, subprocess.TimeoutExpired):
-                time.sleep(0.1)
-
-    threading.Thread(target=reap, daemon=True, name=f"misen-process-reaper[{process.pid}]").start()
+            if cpu_indices:
+                return cpu_indices
+    return list(range(os.cpu_count() or 1))
 
 
 class LocalJob(Job):
@@ -87,11 +68,7 @@ class LocalJob(Job):
     __slots__ = (
         "_cached_state",
         "_lock",
-        "_log_fp",
         "_process",
-        "_started_at",
-        "_timed_out_at",
-        "_timeout_kill_sent",
         "assigned_accelerator_indices",
         "assigned_cpu_indices",
         "dependencies",
@@ -113,12 +90,8 @@ class LocalJob(Job):
         self.workspace = workspace
         self.assigned_cpu_indices: list[int] = []
         self.assigned_accelerator_indices: list[int] = []
-        self._process: subprocess.Popen[bytes] | None = None
-        self._log_fp: FileIO | None = None
+        self._process: SupervisionSession | None = None
         self._cached_state: _JobState = "pending"
-        self._started_at: float | None = None
-        self._timed_out_at: float | None = None
-        self._timeout_kill_sent = False
         self._lock = threading.Lock()
 
     def state(self) -> _JobState:
@@ -128,153 +101,136 @@ class LocalJob(Job):
                 self._finalize_job_log_locked()
                 return self._cached_state
             if self._process is None:
-                return "pending"
+                return self._cached_state
 
-            return_code = self._process.poll()
-            if return_code is None:
-                return "running"
-
-            # No descendant may outlive the worker process-group leader.
-            _signal_process_group(self._process, "kill")
-            close_error = self._close_log_fp_locked()
-            self._cached_state = "done" if return_code == 0 and self._timed_out_at is None else "failed"
-            if return_code != 0 and self._timed_out_at is None:
-                self._record_failure(f"Process exited with code {return_code}.")
-            if close_error is not None:
+            process = self._process
+            try:
+                if process.status.is_active:
+                    return "running"
+                self._process = None
+                result = process.wait().final_result
+            except (ProcessError, RuntimeError) as exc:
+                self._process = None
                 self._cached_state = "failed"
-                self._record_failure(f"Closing the local job log failed: {close_error}")
-            self._finalize_job_log_locked()
-            logger.info(
-                "Local job %s for %s exited with code %d -> state=%s.",
-                self.job_id or "n/a",
-                self.label,
-                return_code,
-                self._cached_state,
-            )
-            return self._cached_state
+                self._record_failure(f"Process supervision failed: {type(exc).__name__}: {exc}")
+                self._finalize_job_log_locked()
+                return self._cached_state
+            return self._finish_locked(result)
+
+    def _finish_locked(self, result: ProcessResult) -> _JobState:
+        """Apply one terminal process result and publish the completed log."""
+        self._process = None
+        if self.failure.reason is None:
+            if result.timed_out:
+                self._record_failure(f"Exceeded the requested {self.resources['time']} minute time limit.")
+            elif not result.is_success:
+                if result.code is not None:
+                    self._record_failure(f"Process exited with code {result.code}.")
+                elif result.signal is not None:
+                    self._record_failure(f"Process terminated by signal {result.signal}.")
+                else:
+                    self._record_failure("Process failed without an exit code or signal.")
+        self._cached_state = "done" if result.is_success and self.failure.reason is None else "failed"
+        self._finalize_job_log_locked()
+        logger.info(
+            "Local job %s for %s exited (code=%s, signal=%s, timed_out=%s) -> state=%s.",
+            self.job_id or "n/a",
+            self.label,
+            result.code,
+            result.signal,
+            result.timed_out,
+            self._cached_state,
+        )
+        return self._cached_state
 
     def _finalize_job_log_locked(self) -> None:
         """Publish the terminal log once the worker process has exited."""
-        if self._process is not None and self._process.poll() is None:
+        if self._cached_state not in {"done", "failed"}:
             return
         self._finalize_log(self.workspace, failed=self._cached_state == "failed")
 
     def set_process(
         self,
-        process: subprocess.Popen[bytes],
+        process: SupervisionSession,
         *,
-        log_fp: FileIO,
         cpu_indices: list[int],
         accelerator_indices: list[int],
-    ) -> None:
-        """Attach subprocess/log handles and mark the job running."""
+    ) -> int | None:
+        """Attach process supervision and mark the job running."""
+        pid = process.status.pid
         with self._lock:
             self._process = process
-            self._log_fp = log_fp
             self.assigned_cpu_indices = list(cpu_indices)
             self.assigned_accelerator_indices = list(accelerator_indices)
             self._cached_state = "running"
-            self._started_at = time.monotonic()
             logger.info(
-                "Local job %s for %s is running (pid=%d).",
+                "Local job %s for %s is running (pid=%s).",
                 self.job_id or "n/a",
                 self.label,
-                process.pid,
+                pid or "pending",
             )
-
-    def time_limit_exceeded(self) -> bool:
-        """Return True if a running job has exceeded its requested time limit."""
-        with self._lock:
-            if self._started_at is None or self._cached_state != "running":
-                return False
-            return time.monotonic() - self._started_at > self.resources["time"] * 60
+            return pid
 
     def mark_failed(self, reason: str | None = None) -> None:
-        """Mark a pending/running job failed and close local handles."""
+        """Mark a pending/running job failed."""
         with self._lock:
-            close_error = self._close_log_fp_locked()
             if reason is not None:
                 self._record_failure(reason)
-            if close_error is not None:
-                self._record_failure(f"Additionally, closing the local job log failed: {close_error}")
             self._cached_state = "failed"
             logger.error("Local job %s for %s marked failed.", self.job_id or "n/a", self.label)
 
-    def terminate(self, *, reason: str | None = None) -> None:
-        """Send SIGTERM to the subprocess if it is still running."""
-        with self._lock:
-            if self._process is None or self._process.poll() is not None:
-                return
-            if reason is not None:
-                self._record_failure(reason)
-            if _signal_process_group(self._process, "terminate") is not None:
-                return
-            logger.info(
-                "Local job %s for %s sent SIGTERM (pid=%d).",
-                self.job_id or "n/a",
-                self.label,
-                self._process.pid,
-            )
-
-    def force_kill(self, *, reason: str | None = None, wait_timeout_s: float = _FATAL_REAP_TIMEOUT_S) -> bool:
-        """Kill and reap a subprocess, handing stubborn processes to a watchdog."""
-        with self._lock:
-            if self._process is None:
-                return True
-            process = self._process
-            leader_running = process.poll() is None
-            if reason is not None:
-                self._record_failure(reason)
-            if _signal_process_group(process, "kill") is not None:
-                if leader_running:
-                    _start_process_reaper(process)
-                    return False
-                return True
-        if not leader_running:
+    def stop(self, *, grace_seconds: float, reason: str | None = None) -> bool:
+        """Stop and reap the supervised process tree within a grace window."""
+        process = self._detach_process(reason)
+        if process is None:
             return True
         try:
-            process.wait(timeout=wait_timeout_s)
-        except (OSError, subprocess.TimeoutExpired):
-            _start_process_reaper(process)
-            return False
-        return True
+            result = process.stop(grace_seconds).final_result
+        except (ProcessError, RuntimeError) as exc:
+            return self._record_stop_failure(exc)
+        return self._record_stopped(result)
 
-    def enforce_timeout(self, *, kill_grace_s: float = _TIMEOUT_KILL_GRACE_S) -> Literal["terminate", "kill"] | None:
-        """Enforce the requested limit once, escalating to SIGKILL after a grace period."""
-        with self._lock:
-            if self._started_at is None or self._cached_state != "running" or self._process is None:
-                return None
-            if self._process.poll() is not None:
-                return None
-
-            now = time.monotonic()
-            if self._timed_out_at is None:
-                if now - self._started_at <= self.resources["time"] * 60:
-                    return None
-                self._timed_out_at = now
-                self._record_failure(f"Exceeded the requested {self.resources['time']} minute time limit.")
-                if _signal_process_group(self._process, "terminate") is not None:
-                    return None
-                return "terminate"
-
-            if self._timeout_kill_sent or now - self._timed_out_at < kill_grace_s:
-                return None
-            if _signal_process_group(self._process, "kill") is not None:
-                return None
-            self._timeout_kill_sent = True
-            return "kill"
-
-    def _close_log_fp_locked(self) -> OSError | None:
-        if self._log_fp is None:
-            return None
-        log_fp = self._log_fp
-        self._log_fp = None
+    async def astop(self, *, grace_seconds: float, reason: str | None = None) -> bool:
+        """Asynchronously stop and reap the supervised process tree."""
+        process = self._detach_process(reason)
+        if process is None:
+            return True
         try:
-            log_fp.close()
-        except OSError as exc:
-            logger.exception("Could not close the local job log for %s.", self.label)
-            return exc
-        return None
+            result = (await process.astop(grace_seconds)).final_result
+        except (ProcessError, RuntimeError) as exc:
+            return self._record_stop_failure(exc)
+        return self._record_stopped(result)
+
+    def _detach_process(self, reason: str | None) -> SupervisionSession | None:
+        """Claim the live session for one terminal operation."""
+        with self._lock:
+            if self._process is None:
+                self._finalize_job_log_locked()
+                return None
+            if reason is not None:
+                self._record_failure(reason)
+            process = self._process
+            self._process = None
+            return process
+
+    def _record_stop_failure(self, exc: Exception) -> bool:
+        """Record a failed processkit terminal operation."""
+        with self._lock:
+            self._record_failure(f"Stopping process supervision failed: {type(exc).__name__}: {exc}")
+            self._cached_state = "failed"
+            self._finalize_job_log_locked()
+            logger.error("Could not stop local job %s for %s: %s", self.job_id or "n/a", self.label, exc)
+            return False
+
+    def _record_stopped(self, result: ProcessResult) -> bool:
+        """Apply the result of a successful processkit stop."""
+        with self._lock:
+            self._finish_locked(result)
+            return True
+
+    def force_kill(self, *, reason: str | None = None) -> bool:
+        """Immediately stop and reap the supervised process tree."""
+        return self.stop(grace_seconds=0, reason=reason)
 
 
 class LocalExecutor(Executor[LocalJob]):
@@ -316,14 +272,21 @@ class LocalExecutor(Executor[LocalJob]):
         if self.num_cpus != "all" and self.cpu_indices is not None:
             msg = "num_cpus and cpu_indices should not both be passed to LocalExecutor."
             raise ValueError(msg)
+        inherited_cpu_indices = _inherited_cpu_indices()
         if self.cpu_indices is None:
             if self.num_cpus == "all":
-                cpu_indices = list(range(os.cpu_count() or 1))
+                cpu_indices = inherited_cpu_indices
             elif isinstance(self.num_cpus, bool) or not isinstance(self.num_cpus, int) or self.num_cpus < 1:
                 msg = "num_cpus must be 'all' or a positive integer."
                 raise ValueError(msg)
+            elif self.num_cpus > len(inherited_cpu_indices):
+                msg = (
+                    f"num_cpus={self.num_cpus} exceeds the {len(inherited_cpu_indices)} CPU(s) "
+                    "available to this process."
+                )
+                raise ValueError(msg)
             else:
-                cpu_indices = list(range(self.num_cpus))
+                cpu_indices = inherited_cpu_indices[: self.num_cpus]
         else:
             if not self.cpu_indices or any(
                 isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in self.cpu_indices
@@ -331,6 +294,10 @@ class LocalExecutor(Executor[LocalJob]):
                 msg = "cpu_indices must contain nonnegative integer CPU indices."
                 raise ValueError(msg)
             cpu_indices = sorted(set(self.cpu_indices))
+            unavailable_cpu_indices = sorted(set(cpu_indices).difference(inherited_cpu_indices))
+            if unavailable_cpu_indices:
+                msg = f"cpu_indices contains CPUs unavailable to this process: {unavailable_cpu_indices}."
+                raise ValueError(msg)
 
         if self.accelerator_type not in ("cuda", "rocm", "xpu", "mps", "tpu"):
             msg = f"Unsupported accelerator type: {self.accelerator_type!r}."
@@ -470,6 +437,7 @@ class _LocalScheduler:
         "_fatal_error",
         "_ready",
         "_running",
+        "_shutting_down",
         "_thread",
         "_waiting",
         "available_accelerator_indices",
@@ -497,6 +465,7 @@ class _LocalScheduler:
         self._running: dict[LocalJob, None] = {}
         self._waiting: dict[LocalJob, int] = {}
         self._fatal_error: Exception | None = None
+        self._shutting_down = False
         self._condition = threading.Condition()
         self._thread = threading.Thread(name="misen-local-scheduler", target=self._run, daemon=True)
         self._thread.start()
@@ -507,6 +476,9 @@ class _LocalScheduler:
     def submit(self, job: LocalJob) -> None:
         """Queue a job for scheduling."""
         with self._condition:
+            if self._shutting_down:
+                msg = "Local scheduler is shutting down."
+                raise ExecutionError(msg)
             if self._fatal_error is not None:
                 msg = f"Local scheduler is unavailable after {type(self._fatal_error).__name__}: {self._fatal_error}"
                 raise ExecutionError(msg) from self._fatal_error
@@ -532,6 +504,8 @@ class _LocalScheduler:
         while True:
             try:
                 with self._condition:
+                    if self._shutting_down:
+                        return
                     self._tick_locked()
                     self._condition.wait(timeout=0.1 if self._running else None)
             except Exception as exc:
@@ -543,22 +517,11 @@ class _LocalScheduler:
                 return
 
     def _tick_locked(self) -> None:
-        if self.enforce_time_limits:
-            self._terminate_timed_out_locked()
+        if self._shutting_down:
+            return
         if self._collect_finished_locked():
             self._retry_blocked_locked()
         self._start_ready_jobs_locked()
-
-    def _terminate_timed_out_locked(self) -> None:
-        for job in list(self._running):
-            action = job.enforce_timeout()
-            if action is not None:
-                self._logger.warning(
-                    "Local job %s for %s exceeded its time limit; sent %s.",
-                    job.job_id or "n/a",
-                    job.label,
-                    "SIGTERM" if action == "terminate" else "SIGKILL",
-                )
 
     def _collect_finished_locked(self) -> bool:
         finished_any = False
@@ -660,8 +623,7 @@ class _LocalScheduler:
             collection.clear()
 
     def _launch_job(self, job: LocalJob, *, cpu_indices: list[int], accelerator_indices: list[int]) -> None:
-        log_fp: FileIO | None = None
-        process: subprocess.Popen[bytes] | None = None
+        process: SupervisionSession | None = None
         try:
             prepare = job.snapshot.prepare_job if job.snapshot is not None else prepare_live_job
             job.job_id, argv, env_overrides, job.log_path = prepare(
@@ -671,7 +633,6 @@ class _LocalScheduler:
                 accelerator_type=self.available_budget.accelerator_type,
                 accelerator_indices=accelerator_indices,
             )
-            log_fp = job.log_path.open("ab", buffering=0)
             self._logger.debug(
                 "Launching local subprocess for %s with job_id=%s cpu_indices=%s accelerator_indices=%s log=%s.",
                 job.work_unit,
@@ -680,43 +641,44 @@ class _LocalScheduler:
                 accelerator_indices,
                 job.log_path,
             )
-            process = subprocess.Popen(  # noqa: S603
-                argv,
-                env=os.environ
-                | {
-                    "FORCE_COLOR": "1",
-                    "MISEN_RUNTIME_EVENTS": "1",
-                }
-                | env_overrides,
-                stdout=log_fp,
-                stderr=subprocess.STDOUT,
-                preexec_fn=_PREEXEC_FN,  # noqa: PLW1509
-                start_new_session=os.name == "posix",
+            command = (
+                Command(argv[0], argv[1:])
+                .envs(
+                    {
+                        "FORCE_COLOR": "1",
+                        "MISEN_RUNTIME_EVENTS": "1",
+                    }
+                    | env_overrides
+                )
+                .stdout_file(job.log_path, append=True)
+                .stderr_file(job.log_path, append=True)
+                .kill_on_parent_death()
             )
-            job.set_process(
+            if sys.platform in {"linux", "win32"}:
+                command = command.cpu_affinity(cpu_indices)
+            if self.enforce_time_limits:
+                command = command.timeout(job.resources["time"] * 60).timeout_grace(_TIMEOUT_KILL_GRACE_S)
+            process = Supervisor(command, restart="never").start()
+            pid = job.set_process(
                 process,
-                log_fp=log_fp,
                 cpu_indices=cpu_indices,
                 accelerator_indices=accelerator_indices,
             )
         except BaseException as exc:
-            if process is not None and process.poll() is None:  # noqa: SIM102 - preserve cleanup error
-                if cleanup_error := _signal_process_group(process, "terminate"):
-                    exc.add_note(f"Additionally, terminating the partial local launch failed: {cleanup_error}")
-            if log_fp is not None:
+            if process is not None:
                 try:
-                    log_fp.close()
-                except OSError as cleanup_error:
-                    exc.add_note(f"Additionally, closing the partial local job log failed: {cleanup_error}")
+                    process.stop(0)
+                except (ProcessError, RuntimeError) as cleanup_error:
+                    exc.add_note(f"Additionally, stopping the partial local launch failed: {cleanup_error}")
             raise
 
         self._logger.info(
-            "Launched local subprocess for %s (job_id=%s, pid=%d).",
+            "Launched local subprocess for %s (job_id=%s, pid=%s).",
             job.work_unit,
             job.job_id,
-            process.pid,
+            pid or "pending",
         )
-        runtime_job_running(id(job), job_id=job.job_id, pid=process.pid)
+        runtime_job_running(id(job), job_id=job.job_id, pid=pid)
 
     def _reserve_indices(self, resources: Resources) -> tuple[list[int], list[int]] | None:
         cpu_count = resources["cpus"]
@@ -740,54 +702,45 @@ class _LocalScheduler:
             insort(self.available_accelerator_indices, index)
 
     def _terminate_running_jobs(self) -> None:
-        """Terminate, then kill and reap every running job during shutdown."""
+        """Gracefully stop and reap every running job during shutdown."""
         with self._condition:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
             jobs = list(self._running)
+            pending = set(self._ready) | set(self._blocked) | set(self._waiting)
+            pending.update(job for dependents in self._dependents.values() for job in dependents)
+            pending.difference_update(self._running)
+            reason = "Local executor shut down before the job completed."
+            for job in pending:
+                job.mark_failed(reason=reason)
+                with contextlib.suppress(Exception):
+                    runtime_job_failed(id(job))
+            for collection in (self._ready, self._blocked, self._waiting, self._dependents):
+                collection.clear()
+            self._condition.notify_all()
         if jobs:
             self._logger.info("LocalScheduler terminating %d running job(s) at shutdown.", len(jobs))
-        for job in jobs:
-            try:
-                job.terminate()
-            except Exception:
-                self._logger.exception("Error terminating job %s during shutdown.", job.work_unit)
 
-        def still_running(job: LocalJob) -> bool:
-            try:
-                return job.state() == "running"
-            except Exception:
-                self._logger.exception("Error polling job %s during shutdown.", job.work_unit)
-                return True
+        async def stop_jobs() -> list[bool | BaseException]:
+            return await asyncio.gather(
+                *(
+                    job.astop(
+                        grace_seconds=_SHUTDOWN_TERM_GRACE_S,
+                        reason=reason,
+                    )
+                    for job in jobs
+                ),
+                return_exceptions=True,
+            )
 
-        deadline = time.monotonic() + _SHUTDOWN_TERM_GRACE_S
-        while time.monotonic() < deadline and any(still_running(job) for job in jobs):
-            time.sleep(0.05)
-        for job in jobs:
-            job.force_kill(reason="Local executor shut down before the job completed.")
-
-
-def _build_preexec_fn() -> Callable[[], None] | None:
-    """Return a Linux-only preexec hook that SIGTERMs children on parent death."""
-    if sys.platform != "linux":
-        return None
-    try:
-        import ctypes
-        import ctypes.util
-
-        prctl = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True).prctl
-    except (OSError, AttributeError):
-        return None
-
-    pr_set_pdeathsig = 1
-
-    def _set_pdeathsig() -> None:
-        prctl(pr_set_pdeathsig, signal.SIGTERM, 0, 0, 0)
-        if os.getppid() == 1:
-            os.kill(os.getpid(), signal.SIGTERM)
-
-    return _set_pdeathsig
-
-
-_PREEXEC_FN = _build_preexec_fn()
+        for job, result in zip(jobs, asyncio.run(stop_jobs()), strict=True):
+            if isinstance(result, BaseException):
+                self._logger.error("Error terminating job %s during shutdown: %s", job.work_unit, result)
+            with contextlib.suppress(Exception):
+                runtime_job_failed(id(job))
+        with self._condition:
+            self._running.clear()
 
 
 def _install_sigterm_handler(cleanup: Callable[[], None]) -> None:

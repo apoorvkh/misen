@@ -230,14 +230,14 @@ class TestConfigurable:
 
     def test_executor_auto_from_toml(self, tmp_path: Path) -> None:
         f = tmp_path / "cfg.toml"
-        f.write_text('[executor]\ntype = "local"\nnum_cpus = 4\n', encoding="utf-8")
+        f.write_text('[executor]\ntype = "local"\nnum_cpus = 1\n', encoding="utf-8")
 
         from misen.executor import Executor
         from misen.executors.local import LocalExecutor
 
         ex = Executor.auto(settings=Settings(config_file=f))
         assert isinstance(ex, LocalExecutor)
-        assert ex.num_cpus == 4
+        assert ex.num_cpus == 1
 
     def test_skypilot_executor_alias_auto_from_toml(self, tmp_path: Path) -> None:
         config = tmp_path / "skypilot.toml"

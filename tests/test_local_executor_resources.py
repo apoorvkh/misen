@@ -28,6 +28,21 @@ def test_local_executor_defaults_an_unspecified_accelerator_type_to_cuda() -> No
     assert _resources(accelerators=1)["accelerator_type"] == "cuda"
 
 
+def test_local_executor_uses_the_inherited_cpu_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_module.os, "sched_getaffinity", lambda _pid: {3, 7})
+
+    executor = LocalExecutor(num_cpus=1)
+
+    assert executor._scheduler.available_cpu_indices == [3]  # noqa: SLF001
+
+
+def test_local_executor_rejects_cpus_outside_the_inherited_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_module.os, "sched_getaffinity", lambda _pid: {3, 7})
+
+    with pytest.raises(ValueError, match="unavailable"):
+        LocalExecutor(cpu_indices=[1])
+
+
 def test_local_executor_accepts_mps_as_an_accelerator_type() -> None:
     executor = LocalExecutor(accelerators=1, accelerator_type="mps")
     assert executor._resource_budget.fits(_resources(accelerators=1, accelerator_type="mps"))  # noqa: SLF001
