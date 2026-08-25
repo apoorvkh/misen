@@ -153,9 +153,6 @@ def test_staging_contents_and_key_stability(tmp_path: Path, counted_run: list[li
         snapshot.prepare_job(
             _StubWorkUnit(),  # type: ignore[arg-type]
             workspace,
-            cpu_indices=None,
-            accelerator_type="cuda",
-            accelerator_indices=None,
         )
 
     # Identical code -> identical content key (SOURCE_DATE_EPOCH pins the
@@ -302,12 +299,12 @@ def test_live_dispatch_uses_current_python_without_uv(tmp_path: Path, monkeypatc
     _, argv, _, _ = prepare_live_job(
         _StubWorkUnit(),  # type: ignore[arg-type]
         workspace,
-        cpu_indices=None,
-        accelerator_type="cuda",
-        accelerator_indices=None,
     )
 
     assert argv[:3] == [snapshot_mod.sys.executable, "-m", "misen.utils.execute"]
+    assert "--cpu-indices" not in argv
+    assert "--accelerator-type" not in argv
+    assert "--accelerator-indices" not in argv
 
 
 def test_worker_shell_bootstrap_resolves_configured_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -432,9 +429,6 @@ def test_bootstrap_dispatch_argv(tmp_path: Path) -> None:
     _job_id, argv, env_overrides, log_path = snapshot.prepare_job(
         _StubWorkUnit(),  # type: ignore[arg-type]
         workspace,
-        cpu_indices=[0, 1],
-        accelerator_type="rocm",
-        accelerator_indices=[],
     )
     # Path transport: one self-contained shell program, with no transport.
     assert env_overrides == {}
@@ -444,9 +438,9 @@ def test_bootstrap_dispatch_argv(tmp_path: Path) -> None:
     assert "misen.utils.materialize_env" in shell
     assert str(snapshot.project_dir) in shell
     assert "/scratch/envs" in shell
-    assert "--cpu-indices 0 1" in shell
-    assert "--accelerator-type rocm" in shell
-    assert "--accelerator-indices" in shell
+    assert "--cpu-indices" not in shell
+    assert "--accelerator-type" not in shell
+    assert "--accelerator-indices" not in shell
     assert str(log_path) in shell
 
 
@@ -457,16 +451,8 @@ def _run_materializer(
     snapshot: ProjectSnapshot,
     store_root: Path | str,
     payload_path: str,
-    *,
-    accelerator_type: str = "cuda",
-    accelerator_indices: list[int] | None = None,
 ) -> None:
     """Invoke the path-only worker materializer directly."""
-    accelerator_args = (
-        []
-        if accelerator_indices is None
-        else ["--accelerator-type", accelerator_type, "--accelerator-indices", *map(str, accelerator_indices)]
-    )
     tyro.cli(
         materialize_env.main,
         args=[
@@ -476,7 +462,6 @@ def _run_materializer(
             str(store_root),
             "--payload",
             payload_path,
-            *accelerator_args,
             JOB_LOG_PATH_ARG,
             str(Path(store_root) / "job.log"),
         ],
@@ -485,23 +470,29 @@ def _run_materializer(
 
 @pytest.mark.usefixtures("in_project")
 def test_bootstrap_builds_reuses_and_execs(
-    tmp_path: Path, counted_run: list[list[str]], captured_exec: list[ExecCall]
+    tmp_path: Path,
+    counted_run: list[list[str]],
+    captured_exec: list[ExecCall],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = DiskWorkspace(directory=str(tmp_path / ".misen"))
     store_root = tmp_path / "env-store"
     snapshot = ProjectSnapshot(workspace=workspace, prewarm=False)
     payload_ref = workspace.put_job_file(snapshot.submission_id, "JOB.pkl", b"payload")
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "1")
 
-    _run_materializer(snapshot, store_root, payload_ref, accelerator_type="rocm", accelerator_indices=[])
+    _run_materializer(snapshot, store_root, payload_ref)
     path, argv, env = captured_exec[-1]
     assert path == argv[0]
     assert Path(path).name == "python"
     assert Path(path).is_relative_to(store_root / "overlay-envs")
     assert "misen.utils.execute" in argv
     assert argv[argv.index("--payload") + 1] == payload_ref  # disk refs are paths
-    assert argv[argv.index("--accelerator-type") + 1] == "rocm"
-    accelerator_flag = argv.index("--accelerator-indices")
-    assert argv[accelerator_flag + 1].startswith("--")
+    assert "--accelerator-type" not in argv
+    assert "--accelerator-indices" not in argv
+    assert env["OMP_NUM_THREADS"] == "2"
+    assert env["HIP_VISIBLE_DEVICES"] == "1"
 
     overlay_venv = Path(env["VIRTUAL_ENV"])
     assert overlay_venv.is_relative_to(store_root / "overlay-envs")

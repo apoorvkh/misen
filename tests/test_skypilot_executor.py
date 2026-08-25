@@ -171,12 +171,9 @@ def test_submit_accepts_diamond_dag_and_launches_one_managed_job_per_work_unit(m
             *,
             work_unit: WorkUnit,
             workspace: Workspace,
-            cpu_indices: object,
-            accelerator_type: object,
-            accelerator_indices: object,
             dependency_jobs: dict[WorkUnit, str],
         ) -> tuple[str, list[str], dict[str, str], Path]:
-            del workspace, cpu_indices, accelerator_type, accelerator_indices
+            del workspace
             prepared.append((work_unit, dependency_jobs))
             task_id = work_unit.root.kwargs["value"]
             return (
@@ -215,8 +212,14 @@ def test_submit_accepts_diamond_dag_and_launches_one_managed_job_per_work_unit(m
     assert all(
         launch_call.kwargs["name"] == task.name for launch_call, task in zip(launch_calls, sky_tasks, strict=True)
     )
-    assert "timeout --signal=TERM --kill-after=30s 60m" in cast("str", sky_tasks[0].run)
-    assert "tee -a" in cast("str", sky_tasks[0].run)
+    first_run = cast("str", sky_tasks[0].run)
+    assert "timeout --signal=TERM --kill-after=30s 60m" in first_run
+    assert "tee -a" in first_run
+    assert "OMP_DYNAMIC=FALSE" in first_run
+    assert "MKL_DYNAMIC=FALSE" in first_run
+    assert "OPENBLAS_DYNAMIC=0" in first_run
+    assert "OMP_NUM_THREADS=" not in first_run
+    assert "CUDA_VISIBLE_DEVICES=" not in first_run
 
     jobs = [cast("SkyPilotJob", job_graph[index]) for index in range(4)]
     assert all(isinstance(job, SkyPilotJob) for job in jobs)

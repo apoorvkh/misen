@@ -51,7 +51,6 @@ from misen.utils.uv_tool import find_or_install_uv
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-    from misen.task_metadata import AcceleratorType
     from misen.utils.work_unit import WorkUnit
     from misen.workspace import Workspace
 
@@ -83,10 +82,6 @@ JOB_LOG_PATH_ARG = "--job-log-path"
 def prepare_live_job(
     work_unit: WorkUnit,
     workspace: Workspace,
-    *,
-    cpu_indices: list[int] | None,
-    accelerator_type: AcceleratorType,
-    accelerator_indices: list[int] | None,
 ) -> tuple[str, list[str], dict[str, str], Path]:
     """Prepare a work unit to run with the current Python environment.
 
@@ -108,12 +103,6 @@ def prepare_live_job(
     Args:
         work_unit: Work unit to execute.
         workspace: Workspace for payload/log paths.
-        cpu_indices: CPU logical-core indices for worker affinity, or
-            ``None`` when the scheduler already pins CPUs (e.g. SLURM).
-        accelerator_type: Accelerator backend whose visibility should be bound.
-        accelerator_indices: Device indices assigned by a host-level executor,
-            ``[]`` to hide all maskable devices, or ``None`` when a scheduler
-            already provides isolation.
 
     Returns:
         Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -141,9 +130,6 @@ def prepare_live_job(
             sys.executable,
             _active_env_files(),
             payload_path,
-            cpu_indices=cpu_indices,
-            accelerator_type=accelerator_type,
-            accelerator_indices=accelerator_indices,
         ),
         JOB_LOG_PATH_ARG,
         str(log_path),
@@ -283,9 +269,6 @@ class ProjectSnapshot:
         work_unit: WorkUnit,
         workspace: Workspace,
         *,
-        cpu_indices: list[int] | None,
-        accelerator_type: AcceleratorType,
-        accelerator_indices: list[int] | None,
         dependency_jobs: Mapping[WorkUnit, str] | None = None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute one work unit.
@@ -299,12 +282,6 @@ class ProjectSnapshot:
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log storage.
-            cpu_indices: CPU logical-core indices for worker affinity, or
-                ``None`` to leave inherited affinity untouched.
-            accelerator_type: Accelerator backend whose visibility should be bound.
-            accelerator_indices: Device indices assigned by a host-level executor,
-                ``[]`` to hide all maskable devices, or ``None`` to preserve
-                scheduler-provided isolation.
             dependency_jobs: Prerequisite work units mapped to their Misen
                 job ids, or ``None`` when the backend supplies dependencies.
 
@@ -333,10 +310,7 @@ class ProjectSnapshot:
                 self.prewarmed,
                 [Path(ref) for ref in self.env_file_refs],
                 Path(payload_ref),
-                cpu_indices=cpu_indices,
                 log_path=log_path,
-                accelerator_type=accelerator_type,
-                accelerator_indices=accelerator_indices,
             )
             return job_id, argv, _activation_env(self.prewarmed), log_path
 
@@ -351,11 +325,7 @@ class ProjectSnapshot:
 
         project_dir, snapshot_key = (self.project_dir, None) if transport is None else (None, self.snapshot_key)
 
-        worker_args = [
-            *_resource_argv(cpu_indices, accelerator_type, accelerator_indices),
-            JOB_LOG_PATH_ARG,
-            str(log_path),
-        ]
+        worker_args = [JOB_LOG_PATH_ARG, str(log_path)]
         script = worker_bootstrap_script(
             uv_bin=_uv_bin(),
             pixi_bin=self.pixi_bin,
@@ -1053,10 +1023,7 @@ def _worker_command(
     env_files: list[Path],
     payload_path: Path,
     *,
-    cpu_indices: list[int] | None,
     log_path: Path,
-    accelerator_type: AcceleratorType,
-    accelerator_indices: list[int] | None,
 ) -> list[str]:
     """Build the worker command for materialized envs.
 
@@ -1071,9 +1038,6 @@ def _worker_command(
         envs.overlay_venv_dir / "bin" / "python",
         env_files,
         payload_path,
-        cpu_indices=cpu_indices,
-        accelerator_type=accelerator_type,
-        accelerator_indices=accelerator_indices,
     )
     argv += [JOB_LOG_PATH_ARG, str(log_path)]
     return argv
@@ -1394,10 +1358,6 @@ def _execute_argv(
     python_bin: str | Path,
     env_files: list[Path] | tuple[Path, ...],
     payload_path: Path,
-    *,
-    cpu_indices: list[int] | None,
-    accelerator_type: AcceleratorType,
-    accelerator_indices: list[int] | None,
 ) -> list[str]:
     """Build the ``python -m misen.utils.execute ...`` argv.
 
@@ -1411,23 +1371,7 @@ def _execute_argv(
         *(["--env-file", *(str(path) for path in env_files)] if env_files else []),
         "--payload",
         str(payload_path),
-        *_resource_argv(cpu_indices, accelerator_type, accelerator_indices),
     ]
-
-
-def _resource_argv(
-    cpu_indices: list[int] | None,
-    accelerator_type: AcceleratorType,
-    accelerator_indices: list[int] | None,
-) -> list[str]:
-    """Render explicit CPU and accelerator bindings."""
-    cpu = ["--cpu-indices", *(str(i) for i in cpu_indices)] if cpu_indices else []
-    accelerator = (
-        ["--accelerator-type", accelerator_type, "--accelerator-indices", *(str(i) for i in accelerator_indices)]
-        if accelerator_indices is not None
-        else []
-    )
-    return [*cpu, *accelerator]
 
 
 def _pixi_run_prefix(pixi_bin: str, manifest_path: Path) -> list[str]:

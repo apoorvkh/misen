@@ -100,7 +100,11 @@ visibility view (e.g. `range(torch.cuda.device_count())`), or the PJRT/XLA
 device inventory for a TPU task. For resource requests supported by both
 backends, the same task definition runs locally or on SLURM: `LocalExecutor`
 applies the configured accelerator type's visibility mask when one exists and
-pins CPU affinity, while `SlurmExecutor` lets SLURM's cgroups handle isolation.
+pins CPU affinity on Linux and Windows, while `SlurmExecutor` lets SLURM's
+cgroups handle isolation.
+Local memory is an aggregate scheduling budget rather than a hard process
+limit, and accelerator visibility masks are cooperative runtime controls rather
+than a device-access security boundary.
 
 ## Serialization
 

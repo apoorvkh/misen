@@ -362,9 +362,9 @@ def test_slurm_dispatch_delegates_resource_isolation_to_slurm(monkeypatch, tmp_p
         snapshot=snapshot,
     )
 
-    # SLURM handles accelerator visibility and CPU affinity.
-    assert snapshot.prepare_job.call_args.kwargs["cpu_indices"] is None
-    assert snapshot.prepare_job.call_args.kwargs["accelerator_indices"] is None
+    # SLURM handles accelerator visibility and CPU affinity; no explicit
+    # resource assignment enters snapshot or worker arguments.
+    assert set(snapshot.prepare_job.call_args.kwargs) == {"work_unit", "workspace"}
 
 
 def test_slurm_dispatch_kills_jobs_with_invalid_dependencies(monkeypatch, tmp_path) -> None:
@@ -409,7 +409,13 @@ def test_slurm_dispatch_requests_task_nodes(monkeypatch, tmp_path) -> None:
 
     nodes_index = command.index("--nodes")
     assert command[nodes_index + 1] == "3"
-    assert shlex.split(command[command.index("--wrap") + 1]) == ["env", "python", "-m", "worker"]
+    wrapped = shlex.split(command[command.index("--wrap") + 1])
+    assert wrapped[0] == "env"
+    assert "OMP_DYNAMIC=FALSE" in wrapped
+    assert "MKL_DYNAMIC=FALSE" in wrapped
+    assert "OPENBLAS_DYNAMIC=0" in wrapped
+    assert not any(value.startswith(("OMP_NUM_THREADS=", "CUDA_VISIBLE_DEVICES=")) for value in wrapped)
+    assert wrapped[-3:] == ["python", "-m", "worker"]
 
 
 def test_slurm_dask_dispatch_bootstraps_one_private_worker_per_node(monkeypatch, tmp_path) -> None:

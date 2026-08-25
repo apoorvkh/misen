@@ -19,9 +19,7 @@ import cloudpickle
 import tyro
 from dotenv import load_dotenv
 
-from misen.task_metadata import AcceleratorType
 from misen.utils.dask_runtime import run_role_from_env
-from misen.utils.resource_binding import apply_resource_binding
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -33,9 +31,6 @@ def execute(
     payload: Path,
     *,
     env_file: tuple[Path, ...] = (),
-    cpu_indices: list[int] | None = None,
-    accelerator_type: AcceleratorType = "cuda",
-    accelerator_indices: list[int] | None = None,
     job_log_path: Path | None = None,
 ) -> None:
     """Execute a cloudpickle work-unit payload file.
@@ -47,13 +42,6 @@ def execute(
             :meth:`Workspace.streaming_job_log` for live log publishing.
         env_file: Dotenv files loaded in order. Later files override earlier
             files, while variables already present in the worker environment win.
-        cpu_indices: CPU logical-core indices to bind via
-            :func:`os.sched_setaffinity`. Pass ``None`` when the scheduler
-            (e.g. SLURM) already pins CPUs for this process.
-        accelerator_type: Accelerator backend whose visibility should be bound.
-        accelerator_indices: Device indices assigned by a host-level executor,
-            ``[]`` to hide all maskable devices, or ``None`` to preserve
-            scheduler-provided isolation.
         job_log_path: Path where the parent executor is writing this worker's
             combined stdout/stderr log. When provided, the workspace can stream
             the log while the worker is still running.
@@ -77,11 +65,6 @@ def execute(
         os.execve(sys.executable, [sys.executable, "-m", "misen.utils.execute", *sys.argv[1:]], env)  # noqa: S606
         return
 
-    apply_resource_binding(
-        cpu_indices=cpu_indices,
-        accelerator_type=accelerator_type,
-        accelerator_indices=accelerator_indices,
-    )
     if run_role_from_env():
         return
 

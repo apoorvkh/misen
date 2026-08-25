@@ -20,6 +20,7 @@ from processkit import Command, ProcessError, ProcessResult, SupervisionSession,
 from misen.exceptions import ExecutionError, StorageError, SubmissionError
 from misen.executor import Executor, Job
 from misen.task_metadata import AcceleratorType  # noqa: TC001  # needed by msgspec during config decoding
+from misen.utils.resource_env import resource_environment
 from misen.utils.runtime_events import (
     runtime_job_done,
     runtime_job_failed,
@@ -243,6 +244,11 @@ class LocalExecutor(Executor[LocalJob]):
     concurrent jobs share them and env failures surface before any job
     starts; with ``prewarm_envs=False`` the first job builds them at
     startup instead.
+
+    Resource requests are scheduling controls. ``max_memory`` is an aggregate
+    admission budget for declared job memory, not a per-job OS-enforced limit.
+    Accelerator assignments use cooperative runtime visibility variables, not
+    a device-access security boundary.
     """
 
     max_memory: int | Literal["all"] = "all"
@@ -256,7 +262,7 @@ class LocalExecutor(Executor[LocalJob]):
     _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
 
     def __post_init__(self) -> None:
-        """Infer resource limits and initialize the scheduler."""
+        """Infer scheduling capacity and initialize the scheduler."""
         if self.max_memory == "all":
             try:
                 self.max_memory = max(
@@ -360,10 +366,10 @@ class LocalExecutor(Executor[LocalJob]):
             raise SubmissionError(msg)
         if not self._resource_budget.fits(resources):
             msg = (
-                "Requested resources exceed LocalExecutor limits: "
+                "Requested resources exceed LocalExecutor capacity: "
                 f"requested cpus={resources['cpus']}, memory={resources['memory']}, "
                 f"accelerators={resources['accelerators']} (type={resources['accelerator_type']}); "
-                f"limits cpus={self._resource_budget.cpus}, memory={self._resource_budget.memory}, "
+                f"capacity cpus={self._resource_budget.cpus}, memory={self._resource_budget.memory}, "
                 f"accelerators={self._resource_budget.accelerators} "
                 f"(type={self._resource_budget.accelerator_type})."
             )
@@ -629,9 +635,6 @@ class _LocalScheduler:
             job.job_id, argv, env_overrides, job.log_path = prepare(
                 work_unit=job.work_unit,
                 workspace=job.workspace,
-                cpu_indices=cpu_indices,
-                accelerator_type=self.available_budget.accelerator_type,
-                accelerator_indices=accelerator_indices,
             )
             self._logger.debug(
                 "Launching local subprocess for %s with job_id=%s cpu_indices=%s accelerator_indices=%s log=%s.",
@@ -649,6 +652,11 @@ class _LocalScheduler:
                         "MISEN_RUNTIME_EVENTS": "1",
                     }
                     | env_overrides
+                    | resource_environment(
+                        cpu_indices,
+                        self.available_budget.accelerator_type,
+                        accelerator_indices,
+                    )
                 )
                 .stdout_file(job.log_path, append=True)
                 .stderr_file(job.log_path, append=True)

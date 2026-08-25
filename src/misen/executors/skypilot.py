@@ -31,6 +31,7 @@ from misen.utils.dask_runtime import (
     managed_ranked_cluster_script,
 )
 from misen.utils.job_dependencies import dependency_state_name
+from misen.utils.resource_env import resource_environment
 from misen.utils.runtime_events import work_unit_label
 
 if TYPE_CHECKING:
@@ -508,11 +509,9 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
         job_id, argv, env, log_path = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,
-            cpu_indices=None,
-            accelerator_type=resources["accelerator_type"],
-            accelerator_indices=None,
             dependency_jobs=dependency_jobs,
         )
+        env = env | resource_environment()
         deadline_minutes = resources["time"] + max(
             (dependency.deadline_minutes for dependency in dependencies),
             default=0,

@@ -135,12 +135,17 @@ def test_prewarmed_snapshot_wraps_argv_in_pixi_run(tmp_path: Path, monkeypatch: 
         "/usr/bin/env",
         "bash",
         "-c",
-        'printf "%s\\n%s\\n" "$CONDA_PREFIX" "$PATH"',
+        'printf "%s\\n%s\\n%s\\n%s\\n" "$CONDA_PREFIX" "$PATH" "$OMP_NUM_THREADS" "$CUDA_VISIBLE_DEVICES"',
     ]
-    result = subprocess.run(wrapped, capture_output=True, text=True, check=True)  # noqa: S603
-    conda_prefix, path_value, *_ = result.stdout.splitlines()
+    launch_env = os.environ.copy()
+    launch_env["OMP_NUM_THREADS"] = "2"
+    launch_env["CUDA_VISIBLE_DEVICES"] = "1"
+    result = subprocess.run(wrapped, env=launch_env, capture_output=True, text=True, check=True)  # noqa: S603
+    conda_prefix, path_value, thread_count, visible_devices, *_ = result.stdout.splitlines()
     assert Path(conda_prefix).resolve() == prefix_dir.resolve()
     assert Path(path_value.split(":")[0]).resolve() == (prefix_dir / "bin").resolve()
+    assert thread_count == "2"
+    assert visible_devices == "1"
 
     # A second snapshot reuses the conda env entry instead of reinstalling.
     second = ProjectSnapshot(workspace=workspace, env_store_dir=str(store_root), prewarm=True)

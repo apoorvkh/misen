@@ -9,7 +9,6 @@ from pathlib import Path
 import tyro
 
 from misen.exceptions import SnapshotError
-from misen.task_metadata import AcceleratorType
 from misen.utils.bootstrap_transport import PIXI_BIN_ENV
 from misen.utils.snapshot import (
     _activation_env,
@@ -31,9 +30,6 @@ def main(
     snapshot_key: str | None = None,
     env_store_root: Path | None = None,
     pixi_bin: str | None = None,
-    cpu_indices: list[int] | None = None,
-    accelerator_type: AcceleratorType = "cuda",
-    accelerator_indices: list[int] | None = None,
 ) -> None:
     """Build/reuse environments for local snapshot data, then exec the job.
 
@@ -75,10 +71,7 @@ def main(
         envs,
         list(env_file),
         payload,
-        cpu_indices=cpu_indices,
         log_path=job_log_path,
-        accelerator_type=accelerator_type,
-        accelerator_indices=accelerator_indices,
     )
 
     env = os.environ.copy()

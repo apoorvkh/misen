@@ -194,6 +194,11 @@ def test_launch_delegates_optional_timeout_to_processkit(
 
     executor._scheduler._launch_job(job, cpu_indices=[0], accelerator_indices=[])  # noqa: SLF001
 
+    launch_env = next(value for name, value in calls if name == "envs")
+    assert isinstance(launch_env, dict)
+    assert launch_env["OMP_NUM_THREADS"] == "1"
+    assert launch_env["CUDA_VISIBLE_DEVICES"] == ""
+    assert launch_env["NVIDIA_VISIBLE_DEVICES"] == ""
     timeout_calls = [call for call in calls if call[0] in {"timeout", "timeout_grace"}]
     assert timeout_calls == ([("timeout", 60), ("timeout_grace", 5.0)] if enforce_time_limits else [])
 

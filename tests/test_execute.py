@@ -32,83 +32,28 @@ class _RecordingWorkspace:
         yield
 
 
-def test_execute_forwards_assigned_resources_to_binding(tmp_path, monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-    payload_marker = tmp_path / "payload-ran.txt"
-
-    def fake_apply_resource_binding(
-        *, cpu_indices: object, accelerator_type: object, accelerator_indices: object
-    ) -> None:
-        calls.append(
-            {
-                "cpu_indices": cpu_indices,
-                "accelerator_type": accelerator_type,
-                "accelerator_indices": accelerator_indices,
-            }
-        )
-
-    monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
-
-    def payload_fn() -> None:
-        payload_marker.write_text("ran", encoding="utf-8")
-
-    payload_path = tmp_path / "payload.pkl"
-    payload_path.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": payload_fn}))
-    loads = execute_mod.cloudpickle.loads
-
-    def checked_loads(data: bytes) -> object:
-        assert calls  # Binding must happen before payload imports/deserialization.
-        return loads(data)
-
-    monkeypatch.setattr(execute_mod.cloudpickle, "loads", checked_loads)
-
-    execute_mod.execute(
-        payload=payload_path,
-        cpu_indices=[1, 2],
-        accelerator_type="rocm",
-        accelerator_indices=[],
-    )
-
-    assert calls == [{"cpu_indices": [1, 2], "accelerator_type": "rocm", "accelerator_indices": []}]
-    assert payload_marker.read_text(encoding="utf-8") == "ran"
-
-
-def test_execute_passes_none_indices_when_scheduler_isolates(tmp_path, monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-    payload_path = tmp_path / "payload.pkl"
-    payload_path.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": lambda: None}))
-
-    def fake_apply_resource_binding(
-        *, cpu_indices: object, accelerator_type: object, accelerator_indices: object
-    ) -> None:
-        calls.append(
-            {
-                "cpu_indices": cpu_indices,
-                "accelerator_type": accelerator_type,
-                "accelerator_indices": accelerator_indices,
-            }
-        )
-
-    monkeypatch.setattr(execute_mod, "apply_resource_binding", fake_apply_resource_binding)
-
-    execute_mod.execute(payload=payload_path)
-
-    assert calls == [{"cpu_indices": None, "accelerator_type": "cuda", "accelerator_indices": None}]
-
-
 def test_execute_reexecs_after_loading_env_files(tmp_path) -> None:
     module_dir = tmp_path / "modules"
     module_dir.mkdir()
     (module_dir / "injected.py").write_text("VALUE = 'loaded'\n")
     first = tmp_path / ".env"
     second = tmp_path / ".env.local"
-    first.write_text(f"PYTHONPATH={module_dir}\nFROM_FILES=first\nINHERITED=from-file\n")
+    first.write_text(
+        f"PYTHONPATH={module_dir}\n"
+        "FROM_FILES=first\n"
+        "INHERITED=from-file\n"
+        "OMP_NUM_THREADS=from-file\n"
+        "CUDA_VISIBLE_DEVICES=from-file\n"
+    )
     second.write_text("FROM_FILES=second\n")
     marker = tmp_path / "environment.txt"
 
     def payload_fn() -> None:
         injected = __import__("injected")
-        marker.write_text(f"{injected.VALUE}:{os.environ['FROM_FILES']}:{os.environ['INHERITED']}")
+        marker.write_text(
+            f"{injected.VALUE}:{os.environ['FROM_FILES']}:{os.environ['INHERITED']}:"
+            f"{os.environ['OMP_NUM_THREADS']}:{os.environ['CUDA_VISIBLE_DEVICES']}"
+        )
 
     payload = tmp_path / "payload.pkl"
     payload.write_bytes(cloudpickle.dumps({"workspace": _stub_workspace(), "fn": payload_fn}))
@@ -116,6 +61,8 @@ def test_execute_reexecs_after_loading_env_files(tmp_path) -> None:
     env.pop("PYTHONPATH", None)
     env.pop("MISEN_ENV_FILES_LOADED", None)
     env["INHERITED"] = "worker"
+    env["OMP_NUM_THREADS"] = "2"
+    env["CUDA_VISIBLE_DEVICES"] = "1"
 
     subprocess.run(
         [sys.executable, "-m", "misen.utils.execute", "--payload", str(payload), "--env-file", str(first), str(second)],
@@ -123,7 +70,7 @@ def test_execute_reexecs_after_loading_env_files(tmp_path) -> None:
         check=True,
     )
 
-    assert marker.read_text() == "loaded:second:worker"
+    assert marker.read_text() == "loaded:second:worker:2:1"
 
 
 def test_execute_places_active_venv_first_on_path(tmp_path, monkeypatch) -> None:

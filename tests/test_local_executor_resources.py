@@ -1,6 +1,7 @@
 """Local accelerator request resolution."""
 # ruff: noqa: D103, PLR2004, S101
 
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import cloudpickle
@@ -114,20 +115,30 @@ def test_local_executor_round_trips_through_cloudpickle() -> None:
     assert restored.accelerator_type == "rocm"
 
 
-def test_local_executor_forwards_its_pool_binding_to_the_final_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_local_executor_builds_launch_environment_from_its_pool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     executor = LocalExecutor(accelerators=1, accelerator_type="rocm")
     work_unit = WorkUnit(root=Task(_local_resource_test), dependencies=set())
     job = LocalJob(work_unit, dependencies=set(), snapshot=None, workspace=cast("Workspace", None))
-    captured: dict[str, object] = {}
+    prepare_kwargs: dict[str, object] = {}
+    resource_args: tuple[object, ...] | None = None
 
-    def capture_prepare(**kwargs: object) -> None:
-        captured.update(kwargs)
+    def capture_prepare(**kwargs: object) -> tuple[str, list[str], dict[str, str], Path]:
+        prepare_kwargs.update(kwargs)
+        return "job-id", ["python"], {}, tmp_path / "job.log"
+
+    def capture_resource_environment(*args: object) -> dict[str, str]:
+        nonlocal resource_args
+        resource_args = args
         msg = "captured"
         raise RuntimeError(msg)
 
     monkeypatch.setattr(local_module, "prepare_live_job", capture_prepare)
+    monkeypatch.setattr(local_module, "resource_environment", capture_resource_environment)
     with pytest.raises(RuntimeError, match="captured"):
         executor._scheduler._launch_job(job, cpu_indices=[0], accelerator_indices=[])  # noqa: SLF001
 
-    assert captured["accelerator_type"] == "rocm"
-    assert captured["accelerator_indices"] == []
+    assert set(prepare_kwargs) == {"work_unit", "workspace"}
+    assert resource_args == ([0], "rocm", [])

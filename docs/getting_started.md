@@ -74,7 +74,7 @@ MyExperiment(n=1000).run()
 [executor]
 type = "local"
 num_cpus = "all"
-max_memory = "all"
+max_memory = "all"  # aggregate scheduling budget, not a hard process limit
 
 [workspace]
 type = "disk"

@@ -15,6 +15,7 @@ import msgspec
 from misen.exceptions import StatusQueryError, SubmissionError
 from misen.executor import Executor, Job, JobState
 from misen.utils.dask_runtime import DEFAULT_DASK_STARTUP_TIMEOUT, managed_cluster_script
+from misen.utils.resource_env import resource_environment
 from misen.utils.runtime_events import work_unit_label
 from misen.utils.snapshot import prepare_live_job
 
@@ -288,17 +289,13 @@ class SlurmExecutor(Executor[SlurmJob]):
             )
 
         # SLURM cgroups already mask GPUs and pin CPU affinity for the job
-        # step, so the worker leaves the inherited environment alone — user
-        # code reads ``CUDA_VISIBLE_DEVICES`` / ``os.sched_getaffinity`` to
-        # discover its allotment.
+        # step, so Misen preserves those scheduler-provided controls.
         prepare = snapshot.prepare_job if snapshot is not None else prepare_live_job
         job_id, argv, env_overrides, log_path = prepare(
             work_unit=work_unit,
             workspace=workspace,
-            cpu_indices=None,
-            accelerator_type=resources["accelerator_type"],
-            accelerator_indices=None,
         )
+        env_overrides = env_overrides | resource_environment()
 
         # ``argv`` already carries ``--job-log-path`` so the worker can
         # wrap its lifecycle in ``workspace.streaming_job_log(...)``;

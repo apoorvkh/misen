@@ -51,12 +51,19 @@ def test_local_launch_logs_both_streams_and_reaps_descendants(
         "print(f'descendant={child.pid}', flush=True); "
         "get_affinity = getattr(os, 'sched_getaffinity', lambda _pid: ()); "
         "print('affinity=' + ','.join(map(str, sorted(get_affinity(0)))), flush=True); "
+        "print('threads=' + os.environ['OMP_NUM_THREADS'], flush=True); "
+        "print('devices=' + os.environ['CUDA_VISIBLE_DEVICES'], flush=True); "
         "print('stderr-marker', file=sys.stderr, flush=True)"
     )
     monkeypatch.setattr(
         local_module,
         "prepare_live_job",
-        lambda **_: ("job-id", [sys.executable, "-c", code], {}, log_path),
+        lambda **_: (
+            "job-id",
+            [sys.executable, "-c", code],
+            {"OMP_NUM_THREADS": "99", "CUDA_VISIBLE_DEVICES": "inherited"},
+            log_path,
+        ),
     )
     monkeypatch.setattr(local_module, "runtime_job_running", lambda *_args, **_kwargs: None)
 
@@ -75,6 +82,8 @@ def test_local_launch_logs_both_streams_and_reaps_descendants(
     assert "stderr-marker" in log
     if hasattr(os, "sched_getaffinity"):
         assert f"affinity={_allowed_cpu()}" in log
+    assert "threads=1" in log
+    assert "devices=\n" in log
     descendant_line = next(line for line in log.splitlines() if line.startswith("descendant="))
     descendant_pid = int(descendant_line.partition("=")[2])
     assert not process_is_alive(descendant_pid)

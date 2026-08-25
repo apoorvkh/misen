@@ -125,9 +125,6 @@ def test_prepare_live_job_translates_payload_io_failures(
         snapshot_mod.prepare_live_job(
             cast("WorkUnit", _PayloadWorkUnit()),
             cast("Workspace", _PayloadWorkspace(temp_dir)),
-            cpu_indices=None,
-            accelerator_type="cuda",
-            accelerator_indices=None,
         )
 
     assert isinstance(raised.value.__cause__, expected_cause)
