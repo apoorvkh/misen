@@ -20,11 +20,12 @@ import shutil
 from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar, cast
 
 from misen.exceptions import CacheError, LockUnavailableError, SerializationError, StorageError
 from misen.tasks import Task
 from misen.utils import serde
+from misen.utils.fsync import atomic_write_bytes as _atomic_write_bytes
 from misen.utils.settings import Configurable
 
 if TYPE_CHECKING:
@@ -41,6 +42,20 @@ __all__ = ["Workspace"]
 WorkspaceType: TypeAlias = Literal["disk", "cloud", "memory"]
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
+_HashMappingT = TypeVar("_HashMappingT")
+
+
+def _hash_mapping_type(cls: type[_HashMappingT], item: tuple[type[Any], type[Any]]) -> type[_HashMappingT]:
+    """Build a hash mapping specialized with concrete key/value types."""
+    key_type, value_type = item
+    return cast(
+        "type[_HashMappingT]",
+        type(
+            f"{cls.__name__}[{key_type.__name__},{value_type.__name__}]",
+            (cls,),
+            {"_key_type": key_type, "_value_type": value_type, "__module__": cls.__module__},
+        ),
+    )
 
 
 @contextmanager
@@ -597,6 +612,30 @@ class Workspace(Configurable):
                 yield from paths
 
         return iter_paths()
+
+
+class _PathWorkspace(Workspace):
+    """Workspace whose job-file references are directly visible paths."""
+
+    def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
+        """Store an owner-only submission file and return its path."""
+        self._validate_job_file_name(name)
+        path = self.get_temp_dir().parent / "job_files" / submission_id / name
+        with _storage_errors(f"Could not persist job file {name!r} for submission {submission_id!r}"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(path, data)
+            path.chmod(0o600)
+        return str(path)
+
+    def read_job_file(self, submission_id: str, name: str) -> bytes:
+        """Read one submission file without hiding a not-yet-published file."""
+        self._validate_job_file_name(name)
+        path = self.get_temp_dir().parent / "job_files" / submission_id / name
+        with _storage_errors(f"Could not read job file {name!r}", passthrough=(FileNotFoundError,)):
+            return path.read_bytes()
+
+    def bootstrap_transport(self) -> None:
+        """Use directly worker-visible snapshot and job-file paths."""
 
 
 R = TypeVar("R")

@@ -20,7 +20,7 @@ import shutil
 import tempfile
 from collections.abc import Iterator, MutableMapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Generic, Literal, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Literal, Self, TypeVar
 
 from misen.exceptions import LockUnavailableError, StorageError
 from misen.utils.fsync import atomic_write_bytes as _atomic_write_bytes
@@ -28,7 +28,7 @@ from misen.utils.fsync import fsync_dir as _fsync_dir
 from misen.utils.fsync import fsync_file as _fsync_file
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import LockLike, NFSLock
-from misen.workspace import Workspace, _storage_errors
+from misen.workspace import _hash_mapping_type, _PathWorkspace, _storage_errors
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,23 +100,8 @@ class FileKVMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     __slots__ = ("_directory",)
 
     def __class_getitem__(cls, item: tuple[type[KT], type[VT]]) -> type[Self]:
-        """Parameterize the mapping with concrete key/value hash types.
-
-        Args:
-            item: ``(KeyHashType, ValueHashType)`` tuple.
-
-        Returns:
-            Specialized ``FileKVMapping`` subclass.
-        """
-        key_t, val_t = item
-        return cast(
-            "type[Self]",
-            type(
-                f"{cls.__name__}[{key_t.__name__},{val_t.__name__}]",
-                (cls,),
-                {"_key_type": key_t, "_value_type": val_t, "__module__": cls.__module__},
-            ),
-        )
+        """Parameterize the mapping with concrete key/value hash types."""
+        return _hash_mapping_type(cls, item)
 
     def __init__(self, directory: Path) -> None:
         """Initialize the file-backed mapping rooted at ``directory``.
@@ -356,7 +341,7 @@ class DiskResultStore(MutableMapping[ResultHash, Path]):
         return sum(1 for _ in self)
 
 
-class DiskWorkspace(Workspace):
+class DiskWorkspace(_PathWorkspace):
     """Workspace implementation backed by local/NFS-accessible directories."""
 
     directory: str = ".misen"
@@ -456,26 +441,6 @@ class DiskWorkspace(Workspace):
             msg = f"No snapshot published under key {key!r} in {snapshots_dir}."
             raise FileNotFoundError(msg)
         return path
-
-    def put_job_file(self, submission_id: str, name: str, data: bytes) -> str:
-        """Store an owner-only submission file and return its path."""
-        self._validate_job_file_name(name)
-        path = self._directory_path / "job_files" / submission_id / name
-        with _storage_errors(f"Could not persist job file {name!r} for submission {submission_id!r}"):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_bytes(path, data)
-            path.chmod(0o600)
-        return str(path)
-
-    def read_job_file(self, submission_id: str, name: str) -> bytes:
-        """Read one submission file without hiding a not-yet-published file."""
-        self._validate_job_file_name(name)
-        path = self._directory_path / "job_files" / submission_id / name
-        with _storage_errors(f"Could not read job file {name!r}", passthrough=(FileNotFoundError,)):
-            return path.read_bytes()
-
-    def bootstrap_transport(self) -> None:
-        """Use directly worker-visible snapshot and job-file paths."""
 
     def _get_scratch_dir(self, task: Task) -> Path:
         """Return stable scratch directory for a task.

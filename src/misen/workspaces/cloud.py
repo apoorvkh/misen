@@ -13,7 +13,6 @@ import binascii
 import contextlib
 import io
 import logging
-import os
 import shutil
 import tarfile
 import tempfile
@@ -36,7 +35,7 @@ from misen.utils.bootstrap_transport import render_python_transport
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
 from misen.utils.locks import ObjectStoreLock, _cleanup_on_exit
 from misen.utils.serde import MANIFEST_FILENAME
-from misen.workspace import Workspace, _storage_errors
+from misen.workspace import Workspace, _hash_mapping_type, _storage_errors
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -187,25 +186,6 @@ def _download_snapshot(store: Any, prefix: str, key: str, target_dir: Path) -> P
     return target_dir
 
 
-def _download_file(store: Any, object_key: str, target: Path, mode: int = 0o600) -> Path:
-    """Materialize one object as a local owner-only file (cached if present).
-
-    Raises:
-        FileNotFoundError: If the object does not exist.
-    """
-    if target.is_file():
-        return target
-    try:
-        payload = obs.get(store, object_key).bytes()
-    except FileNotFoundError as e:
-        raise FileNotFoundError(object_key) from e
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "wb") as f:
-        f.write(payload)
-    return target
-
-
 def _delete_prefix(store: Any, prefix: str) -> None:
     """Bulk-delete every object under ``prefix``."""
     keys = [entry["path"] for batch in obs.list(store, prefix=prefix) for entry in batch]
@@ -221,15 +201,7 @@ class ObstoreMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     __slots__ = ("_prefix", "_store")
 
     def __class_getitem__(cls, item: tuple[type[KT], type[VT]]) -> type[Self]:
-        key_t, val_t = item
-        return cast(
-            "type[Self]",
-            type(
-                f"{cls.__name__}[{key_t.__name__},{val_t.__name__}]",
-                (cls,),
-                {"_key_type": key_t, "_value_type": val_t, "__module__": cls.__module__},
-            ),
-        )
+        return _hash_mapping_type(cls, item)
 
     def __init__(self, store: Any, prefix: str) -> None:
         if not hasattr(self, "_key_type") or not hasattr(self, "_value_type"):

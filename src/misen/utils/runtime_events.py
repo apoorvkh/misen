@@ -21,14 +21,12 @@ if TYPE_CHECKING:
     from misen.utils.work_unit import WorkUnit
 
 __all__ = [
-    "RuntimeJobSummary",
     "runtime_activity",
     "runtime_event",
     "runtime_job_done",
     "runtime_job_failed",
     "runtime_job_pending",
     "runtime_job_running",
-    "runtime_job_summary_lines",
     "runtime_progress",
     "task_label",
     "work_unit_label",
@@ -38,10 +36,8 @@ _FALSEY = frozenset({"0", "false", "no", "off"})
 _LIVE_CONTEXT: dict[str, int] = {"depth": 0}
 _LIVE_CONTEXT_LOCK = threading.Lock()
 _JOB_BOARD_ENV = "MISEN_RUNTIME_JOB_BOARD"
-_STATE_ORDER = {state: index for index, state in enumerate(("done", "failed", "running", "pending", "unknown"))}
 
 _JobState = Literal["pending", "running", "done", "failed"]
-RuntimeJobState = Literal["pending", "running", "done", "failed", "unknown"]
 
 
 @dataclass
@@ -50,14 +46,6 @@ class _JobStatusLine:
     state: _JobState = "pending"
     job_id: str | None = None
     pid: int | None = None
-
-
-@dataclass(frozen=True)
-class RuntimeJobSummary:
-    """Final one-line summary row for a job."""
-
-    label: str
-    state: RuntimeJobState
 
 
 class _RuntimeJobBoard:
@@ -291,13 +279,6 @@ def runtime_job_done(job_key: int) -> None:
 def runtime_job_failed(job_key: int) -> None:
     """Mark one local job as failed in the live status board."""
     _job_board_action(_JOB_BOARD.update, job_key, "failed")
-
-
-def runtime_job_summary_lines(rows: list[RuntimeJobSummary]) -> list[str]:
-    """Format final job summary rows for terminal output."""
-    ordered_rows = sorted(rows, key=lambda row: (_STATE_ORDER.get(row.state, 99), row.label))
-
-    return [f"{('complete' if row.state == 'done' else row.state):<8} {row.label}" for row in ordered_rows]
 
 
 def task_label(

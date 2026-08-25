@@ -1,7 +1,6 @@
 """Dependency graph behavior."""
 # ruff: noqa: D103, S101
 
-from io import StringIO
 from operator import is_
 
 import pytest
@@ -56,22 +55,6 @@ def test_successors_and_roots_use_dependency_semantics() -> None:
     assert graph.is_root(parent)
     assert not graph.is_root(first)
     assert not graph.is_root(second)
-
-
-def test_copy_has_independent_values_and_topology() -> None:
-    graph: DependencyGraph[str] = DependencyGraph()
-    root = graph.add_node("root")
-    leaf = graph.add_node("leaf")
-    graph.add_edge(root, leaf)
-
-    copied = graph.copy()
-    copied[root] = "changed"
-    copied.remove_node_by_value("leaf")
-
-    assert graph.nodes() == ["root", "leaf"]
-    assert graph.successors(root) == ["leaf"]
-    assert copied.nodes() == ["changed"]
-    assert copied.node_indices() == [root]
 
 
 def test_remove_node_by_value_preserves_stable_indices() -> None:
@@ -129,15 +112,3 @@ def test_long_chain_uses_iterative_traversal() -> None:
     assert len(order) == size
     assert order[0] == 0
     assert order[-1] == size - 1
-
-
-def test_pretty_print() -> None:
-    graph: DependencyGraph[str] = DependencyGraph()
-    root = graph.add_node("root")
-    leaf = graph.add_node("leaf")
-    graph.add_edge(root, leaf)
-    target = StringIO()
-
-    graph.pretty_print(target=target)
-
-    assert target.getvalue() == "root\n└── leaf\n"

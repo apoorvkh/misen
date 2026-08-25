@@ -5,9 +5,8 @@ Edge convention used across Misen: ``A -> B`` means "A depends on B".
 
 from __future__ import annotations
 
-import sys
 from operator import eq
-from typing import TYPE_CHECKING, Any, Generic, TextIO, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -57,14 +56,6 @@ class DependencyGraph(Generic[T]):
         self._dependencies[index].clear()
         self._dependents[index].clear()
         self._nodes[index] = _REMOVED
-
-    def copy(self) -> DependencyGraph[T]:
-        """Return a shallow copy of the graph."""
-        new: DependencyGraph[T] = DependencyGraph()
-        new._nodes = self._nodes.copy()
-        new._dependencies = [neighbors.copy() for neighbors in self._dependencies]
-        new._dependents = [neighbors.copy() for neighbors in self._dependents]
-        return new
 
     def nodes(self) -> list[T]:
         """Return node values in storage order."""
@@ -175,82 +166,3 @@ class DependencyGraph(Generic[T]):
                 for dependency in self._dependencies[node]:
                     self._add_edge(dependent, dependency)
             self._remove_node(node)
-
-    def pretty_print(
-        self,
-        *,
-        roots: list[T] | None = None,
-        max_depth: int | None = None,
-        show_duplicates: bool = False,
-        target: TextIO | None = None,
-    ) -> None:
-        """Pretty-print a dependency graph as a hierarchy.
-
-        Interprets edges as: u -> v  means "u depends on v" (so v is printed under u).
-
-        Args:
-            roots: Optional list of root nodes to start from.
-            max_depth: Optional maximum depth to render.
-            show_duplicates: If True, show repeated nodes instead of back-references.
-            target: Stream to write to (defaults to sys.stdout).
-        """
-        stream = sys.stdout if target is None else target
-
-        def write_line(text: str = "") -> None:
-            stream.write(f"{text}\n")
-
-        indices = self.node_indices()
-        adjacency: dict[T, list[T]] = {self[index]: self.successors(index) for index in indices}
-
-        def sort_key(node: T) -> str:
-            return str(node)
-
-        def children(node: T) -> list[T]:
-            return sorted(adjacency.get(node, []), key=sort_key)
-
-        root_nodes = (
-            roots
-            if roots is not None
-            else sorted((self[index] for index in indices if self.is_root(index)), key=sort_key)
-        )
-
-        printed: set[T] = set()
-
-        def walk(node: T, prefix: str, *, is_last: bool, depth: int, stack: set[T]) -> None:
-            connector = "└── " if is_last else "├── "
-
-            if node in stack:
-                write_line(prefix + connector + f"{node} (cycle)")
-                return
-
-            if (not show_duplicates) and (node in printed):
-                write_line(prefix + connector + f"{node} (↩︎)")
-                return
-
-            write_line(prefix + connector + str(node))
-            printed.add(node)
-
-            if max_depth is not None and depth >= max_depth:
-                return
-
-            child_nodes = children(node)
-            new_prefix = prefix + ("    " if is_last else "│   ")
-            next_stack = stack | {node}
-            for i, child in enumerate(child_nodes):
-                walk(
-                    child,
-                    new_prefix,
-                    is_last=i == len(child_nodes) - 1,
-                    depth=depth + 1,
-                    stack=next_stack,
-                )
-
-        for root_index, root in enumerate(root_nodes):
-            # Print root without a connector for a cleaner look
-            if root_index:
-                write_line()
-            write_line(str(root))
-
-            child_nodes = children(root)
-            for i, child in enumerate(child_nodes):
-                walk(child, "", is_last=i == len(child_nodes) - 1, depth=1, stack={root})

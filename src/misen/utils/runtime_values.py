@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from misen.exceptions import ExecutionError
 from misen.sentinels import DASK_CLIENT
+from misen.utils.cleanup import _cleanup_on_exit
 from misen.utils.dask_runtime import (
     DASK_EXPECTED_WORKERS_ENV,
     DASK_SCHEDULER_ADDRESS_ENV,
@@ -65,7 +66,7 @@ def _open_dask_client() -> Iterator[Any]:
         msg = f"Could not start the Dask client runtime: {exc}"
         raise ExecutionError(msg) from exc
 
-    with _closing_dask_client(client):
+    with _cleanup_on_exit(client.close, "closing the Dask client"):
         try:
             client.wait_for_workers(expected_workers, timeout=startup_timeout)
             initial_workers = _dask_worker_topology(client)
@@ -87,26 +88,6 @@ def _open_dask_client() -> Iterator[Any]:
                 f"initial={sorted(initial_workers)!r}, current={sorted(current_workers)!r}."
             )
             raise ExecutionError(msg)
-
-
-@contextmanager
-def _closing_dask_client(client: Any) -> Iterator[None]:
-    """Close a borrowed client without replacing an active task failure."""
-    primary: BaseException | None = None
-    try:
-        yield
-    except BaseException as exc:
-        primary = exc
-        raise
-    finally:
-        try:
-            # ``shutdown`` would stop the executor-owned scheduler; only close
-            # this WorkUnit's borrowed connection.
-            client.close()
-        except BaseException as exc:
-            if primary is None:
-                raise
-            primary.add_note(f"Additionally, closing the Dask client failed: {type(exc).__name__}: {exc}")
 
 
 def _dask_worker_topology(client: Any) -> frozenset[str]:
