@@ -435,7 +435,89 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
         return sum(1 for _ in self)
 
 
-class _ScratchDirSync:
+class _PeriodicPublisher:
+    """Shared lifecycle for best-effort periodic cloud publication."""
+
+    __slots__ = (
+        "_finalized",
+        "_interval_s",
+        "_lifecycle_lock",
+        "_local_path",
+        "_remote_key",
+        "_stop",
+        "_store",
+        "_thread",
+    )
+
+    _failure_message: ClassVar[str]
+    _finalized_on_skip: ClassVar[bool] = False
+    _stop_prefix: ClassVar[str]
+    _thread_prefix: ClassVar[str]
+
+    def __init__(self, store: Any, local_path: Path, remote_key: str, interval_s: float) -> None:
+        self._store = store
+        self._local_path = local_path
+        self._remote_key = remote_key
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.Lock()
+        self._finalized = False
+
+    def _before_start(self) -> None:
+        pass
+
+    def _publish_once(self) -> None: ...
+
+    def _finalize(self) -> None: ...
+
+    def start(self) -> None:
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._before_start()
+            self._finalized = False
+            self._thread = threading.Thread(
+                target=self._run,
+                daemon=True,
+                name=f"{self._thread_prefix}[{self._remote_key}]",
+            )
+            self._thread.start()
+
+    @property
+    def active(self) -> bool:
+        """Return whether periodic publication is accepting more work."""
+        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval_s):
+            try:
+                self._publish_once()
+            except (OSError, ObstoreError):
+                logger.exception(self._failure_message, self._local_path, self._remote_key)
+
+    def stop(self, *, final_upload: bool = True) -> None:
+        with self._lifecycle_lock:
+            self._stop.set()
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                timeout_s = max(self._interval_s * 2, 2.0)
+                thread.join(timeout=timeout_s)
+                if thread.is_alive():
+                    msg = f"{self._stop_prefix} {self._local_path} did not stop within {timeout_s:g}s."
+                    raise StorageError(msg)
+            self._thread = None
+            if not final_upload:
+                if self._finalized_on_skip:
+                    self._finalized = True
+                return
+            if not self._finalized:
+                self._finalize()
+                self._finalized = True
+
+
+class _ScratchDirSync(_PeriodicPublisher):
     """Sync a local scratch_dir to/from cloud object storage.
 
     The runtime lock for cacheable tasks already guarantees a single
@@ -454,38 +536,26 @@ class _ScratchDirSync:
     sweep runs so the bucket reflects the directory's terminal state.
     """
 
-    __slots__ = (
-        "_finalized",
-        "_interval_s",
-        "_known",
-        "_lifecycle_lock",
-        "_local_dir",
-        "_remote_prefix",
-        "_stop",
-        "_store",
-        "_thread",
-    )
+    __slots__ = ("_known",)
+
+    _failure_message = "Scratch dir sync failed for %s -> %s."
+    _finalized_on_skip = True
+    _stop_prefix = "Scratch sync for"
+    _thread_prefix = "misen-scratch-sync"
 
     def __init__(self, store: Any, local_dir: Path, remote_prefix: str, interval_s: float) -> None:
-        self._store = store
-        self._local_dir = local_dir
-        self._remote_prefix = remote_prefix.rstrip("/")
-        self._interval_s = interval_s
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        super().__init__(store, local_dir, remote_prefix.rstrip("/"), interval_s)
         self._known: dict[str, tuple[int, float]] = {}
-        self._lifecycle_lock = threading.Lock()
-        self._finalized = False
 
     def restore(self) -> None:
         """Download the remote snapshot into the local dir."""
-        prefix = f"{self._remote_prefix}/"
+        prefix = f"{self._remote_key}/"
         for batch in obs.list(self._store, prefix=prefix):
             for entry in batch:
                 rel = entry["path"][len(prefix) :]
                 if not rel:
                     continue
-                local_path = self._local_dir / rel
+                local_path = self._local_path / rel
                 local_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     data = bytes(obs.get(self._store, entry["path"]).bytes())
@@ -495,49 +565,24 @@ class _ScratchDirSync:
                 stat = local_path.stat()
                 self._known[rel] = (stat.st_size, stat.st_mtime)
 
-    def start(self) -> None:
-        with self._lifecycle_lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._stop.clear()
-            self._finalized = False
-            self._thread = threading.Thread(
-                target=self._run,
-                daemon=True,
-                name=f"misen-scratch-sync[{self._remote_prefix}]",
-            )
-            self._thread.start()
-
-    @property
-    def active(self) -> bool:
-        """Return whether periodic sync is running and accepting more work."""
-        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
-
-    def _run(self) -> None:
-        while not self._stop.wait(self._interval_s):
-            try:
-                self._sync_once()
-            except (OSError, ObstoreError):
-                logger.exception("Scratch dir sync failed for %s -> %s.", self._local_dir, self._remote_prefix)
-
-    def _sync_once(self) -> None:
+    def _publish_once(self) -> None:
         seen: set[str] = set()
-        if self._local_dir.exists():
-            for path in self._local_dir.rglob("*"):
+        if self._local_path.exists():
+            for path in self._local_path.rglob("*"):
                 if not path.is_file():
                     continue
                 try:
                     stat = path.stat()
                 except FileNotFoundError:
                     continue
-                rel = path.relative_to(self._local_dir).as_posix()
+                rel = path.relative_to(self._local_path).as_posix()
                 seen.add(rel)
                 current = (stat.st_size, stat.st_mtime)
                 if self._known.get(rel) == current:
                     continue
                 try:
                     with path.open("rb") as f:
-                        obs.put(self._store, f"{self._remote_prefix}/{rel}", f, mode="overwrite")
+                        obs.put(self._store, f"{self._remote_key}/{rel}", f, mode="overwrite")
                 except FileNotFoundError:
                     continue
                 self._known[rel] = current
@@ -547,34 +592,12 @@ class _ScratchDirSync:
         # left alone.
         for rel in [r for r in self._known if r not in seen]:
             with contextlib.suppress(FileNotFoundError):
-                obs.delete(self._store, f"{self._remote_prefix}/{rel}")
+                obs.delete(self._store, f"{self._remote_key}/{rel}")
             del self._known[rel]
 
-    def stop(self, *, final_upload: bool = True) -> None:
-        """Stop periodic syncing and durably publish the terminal state.
-
-        Raises:
-            StorageError: If the requested final sync cannot access the local
-                directory or backing object store.
-        """
-        with self._lifecycle_lock:
-            self._stop.set()
-            thread = self._thread
-            if thread is not None and thread.is_alive():
-                timeout_s = max(self._interval_s * 2, 2.0)
-                thread.join(timeout=timeout_s)
-                if thread.is_alive():
-                    msg = f"Scratch sync for {self._local_dir} did not stop within {timeout_s:g}s."
-                    raise StorageError(msg)
-            self._thread = None
-            if not final_upload:
-                self._finalized = True
-                return
-            if self._finalized:
-                return
-            with _cloud_errors(f"Could not finalize scratch directory {self._local_dir} to {self._remote_prefix}"):
-                self._sync_once()
-            self._finalized = True
+    def _finalize(self) -> None:
+        with _cloud_errors(f"Could not finalize scratch directory {self._local_path} to {self._remote_key}"):
+            self._publish_once()
 
     def finalize_current_tree(self) -> None:
         """Mirror the current local tree after an earlier owner was closed.
@@ -585,66 +608,34 @@ class _ScratchDirSync:
         remote files that the task removed after ``close()`` returned.
         """
         with self._lifecycle_lock:
-            prefix = f"{self._remote_prefix}/"
-            with _cloud_errors(f"Could not finalize scratch directory {self._local_dir} to {self._remote_prefix}"):
+            prefix = f"{self._remote_key}/"
+            with _cloud_errors(f"Could not finalize scratch directory {self._local_path} to {self._remote_key}"):
                 for batch in obs.list(self._store, prefix=prefix):
                     for entry in batch:
                         rel = entry["path"][len(prefix) :]
                         if rel:
                             self._known[rel] = (-1, -1.0)
-                self._sync_once()
+                self._publish_once()
             self._finalized = True
 
 
-class _LiveLogUploader:
+class _LiveLogUploader(_PeriodicPublisher):
     """Upload appended log chunks in the background, then compact on close."""
 
-    __slots__ = (
-        "_finalized",
-        "_interval_s",
-        "_lifecycle_lock",
-        "_local_path",
-        "_remote_key",
-        "_stop",
-        "_store",
-        "_thread",
-        "_uploaded_offset",
-    )
+    __slots__ = ("_uploaded_offset",)
+
+    _failure_message = "Live chunk upload failed for %s -> %s."
+    _stop_prefix = "Log uploader for"
+    _thread_prefix = "misen-log-upload"
 
     def __init__(self, store: Any, local_path: Path, remote_key: str, interval_s: float) -> None:
-        self._store = store
-        self._local_path = local_path
-        self._remote_key = remote_key
-        self._interval_s = interval_s
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        super().__init__(store, local_path, remote_key, interval_s)
         self._uploaded_offset = 0
-        self._lifecycle_lock = threading.Lock()
-        self._finalized = False
 
-    def start(self) -> None:
-        with self._lifecycle_lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._stop.clear()
-            self._delete_live_objects()
-            self._finalized = False
-            self._thread = threading.Thread(target=self._run, daemon=True, name=f"misen-log-upload[{self._remote_key}]")
-            self._thread.start()
+    def _before_start(self) -> None:
+        self._delete_live_objects()
 
-    @property
-    def active(self) -> bool:
-        """Return whether live upload is running and accepting more work."""
-        return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
-
-    def _run(self) -> None:
-        while not self._stop.wait(self._interval_s):
-            try:
-                self._upload_once()
-            except (OSError, ObstoreError):
-                logger.exception("Live chunk upload failed for %s -> %s.", self._local_path, self._remote_key)
-
-    def _upload_once(self) -> None:
+    def _publish_once(self) -> None:
         try:
             size = self._local_path.stat().st_size
         except FileNotFoundError:
@@ -703,20 +694,8 @@ class _LiveLogUploader:
         except (OSError, ObstoreError):
             logger.exception("Compacted %s, but live-log cleanup failed for %s.", self._local_path, self._remote_key)
 
-    def stop(self, *, final_upload: bool = True) -> None:
-        with self._lifecycle_lock:
-            self._stop.set()
-            thread = self._thread
-            if thread is not None and thread.is_alive():
-                timeout_s = max(self._interval_s * 2, 2.0)
-                thread.join(timeout=timeout_s)
-                if thread.is_alive():
-                    msg = f"Log uploader for {self._local_path} did not stop within {timeout_s:g}s."
-                    raise StorageError(msg)
-            self._thread = None
-            if final_upload and not self._finalized:
-                self.compact()
-                self._finalized = True
+    def _finalize(self) -> None:
+        self.compact()
 
 
 class CloudWorkspace(Workspace):

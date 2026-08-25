@@ -62,6 +62,48 @@ class _StuckThread:
         self.joined = True
 
 
+def _periodic_publisher(kind: str, tmp_path: Path) -> Any:
+    if kind == "scratch":
+        return cloud_module._ScratchDirSync(MemoryStore(), tmp_path / "scratch", "scratch", 60)
+    return cloud_module._LiveLogUploader(MemoryStore(), tmp_path / "job.log", "job.log", 60)
+
+
+@pytest.mark.parametrize("kind", ["scratch", "log"])
+def test_periodic_publisher_start_is_idempotent(kind: str, tmp_path: Path) -> None:
+    publisher = _periodic_publisher(kind, tmp_path)
+
+    publisher.start()
+    thread = publisher._thread  # noqa: SLF001
+    publisher.start()
+
+    assert publisher.active
+    assert publisher._thread is thread  # noqa: SLF001
+    publisher.stop(final_upload=False)
+    assert not publisher.active
+
+
+@pytest.mark.parametrize(("kind", "method"), [("scratch", "_publish_once"), ("log", "compact")])
+def test_periodic_publisher_finalizes_once(
+    kind: str,
+    method: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher = _periodic_publisher(kind, tmp_path)
+    calls = 0
+
+    def finalize(_self: object) -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(type(publisher), method, finalize)
+
+    publisher.stop(final_upload=True)
+    publisher.stop(final_upload=True)
+
+    assert calls == 1
+
+
 def test_live_uploader_does_not_compact_while_background_thread_is_alive(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -97,7 +139,7 @@ def test_scratch_sync_does_not_finalize_while_background_thread_is_alive(
         nonlocal finalized
         finalized = True
 
-    monkeypatch.setattr(cloud_module._ScratchDirSync, "_sync_once", sync_once)
+    monkeypatch.setattr(cloud_module._ScratchDirSync, "_publish_once", sync_once)
 
     with pytest.raises(StorageError, match="did not stop"):
         sync.stop(final_upload=True)
