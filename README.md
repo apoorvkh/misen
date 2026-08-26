@@ -53,7 +53,7 @@ def add(a: int, b: int) -> int:
     return a + b
 ```
 
-You should run `misen fill` to tag functions with unique ids: e.g. `@meta(id="3X2CLIX6MM")`. Don't type this in yourself.
+You should run `misen fill` to tag functions with unique ids: e.g. `@meta(id="4fG7Kp2mQ9xR")`. Don't type this in yourself.
 
 `Task(add, a=1, b=2)` is a *lazy* handle to `add(a=1, b=2)`. Compose tasks into directed, acyclic workflows by passing one task as the argument of another, like:
 

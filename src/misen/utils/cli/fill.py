@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import fnmatch
 import os
 import secrets
@@ -40,6 +39,8 @@ EXCLUDED_DIRECTORY_NAMES = {
 DEFAULT_ROOT = Path.cwd()
 DEFAULT_MODULE_ROOT = "src"
 DEFAULT_SOURCE_EXCLUDES = ["__pycache__", "*.pyc", "*.pyo"]
+TASK_ID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz"
+TASK_ID_LENGTH = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +69,7 @@ class BuildSelectionConfig:
 
 
 class TaskIdFiller(cst.CSTTransformer):
-    """Insert UUID ``id=...`` values into ``@meta`` decorators."""
+    """Insert random ``id=...`` values into ``@meta`` decorators."""
 
     def __init__(self, uuid_factory: Callable[[], str] | None = None) -> None:
         """Initialize rewrite counters."""
@@ -433,7 +434,7 @@ def _make_id_string(value: str) -> cst.SimpleString:
 
 
 def _default_uuid_factory() -> str:
-    return base64.b32encode(secrets.token_bytes(6)).decode("ascii").rstrip("=")
+    return "".join(secrets.choice(TASK_ID_ALPHABET) for _ in range(TASK_ID_LENGTH))
 
 
 def _id_assign_equal() -> cst.AssignEqual:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import misen.utils.cli.fill as fill_module
 from misen import Task, meta
 from misen.utils.cli.fill import fill_paths_task_ids, fill_task_ids_in_source
 
@@ -26,6 +27,23 @@ def test_fill_inserts_missing_id() -> None:
     updated, replacements = fill_task_ids_in_source(source, uuid_factory=_fixed_uuid)
     assert replacements == 1
     assert updated == '@meta(id="FILLEDID00", cache=True)\ndef f():\n    pass\n'
+
+
+def test_fill_generates_twelve_character_mixed_case_crockford_style_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZabcdefghjkmnpqrstvwxyz"
+    generated_characters = iter("0AaZz9KkPpXx")
+
+    def deterministic_choice(alphabet: str) -> str:
+        assert alphabet == expected_alphabet
+        return next(generated_characters)
+
+    monkeypatch.setattr(fill_module.secrets, "choice", deterministic_choice)
+    updated, replacements = fill_task_ids_in_source("@meta(cache=True)\ndef f():\n    pass\n")
+
+    assert replacements == 1
+    assert updated == '@meta(id="0AaZz9KkPpXx", cache=True)\ndef f():\n    pass\n'
 
 
 def test_fill_reports_write_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
