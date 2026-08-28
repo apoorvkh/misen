@@ -44,7 +44,7 @@ def test_dependency_gate_waits_then_publishes_success(tmp_path: Path, monkeypatc
         workspace=workspace,
         submission_id="submission",
         job_id="child",
-        dependencies=(("parent", "parent task"),),
+        dependencies=((("submission", "parent"), "parent task"),),
     )
 
     assert executions == ["child"]
@@ -63,7 +63,7 @@ def test_dependency_failure_cascades_without_running_user_code(tmp_path: Path) -
             workspace=workspace,
             submission_id="submission",
             job_id="child",
-            dependencies=(("parent", "parent task"),),
+            dependencies=((("submission", "parent"), "parent task"),),
         )
 
     assert executions == []
@@ -81,7 +81,7 @@ def test_invalid_dependency_marker_fails_instead_of_waiting_forever(tmp_path: Pa
             workspace=workspace,
             submission_id="submission",
             job_id="child",
-            dependencies=(("parent", "parent task"),),
+            dependencies=((("submission", "parent"), "parent task"),),
         )
 
     assert executions == []
@@ -98,7 +98,7 @@ def test_completed_attempt_is_idempotent(tmp_path: Path) -> None:
         workspace=workspace,
         submission_id="submission",
         job_id="child",
-        dependencies=(("missing-parent", "parent task"),),
+        dependencies=((("submission", "missing-parent"), "parent task"),),
     )
 
     assert executions == []
@@ -127,14 +127,14 @@ def test_work_unit_payload_serializes_dependency_gate(tmp_path: Path) -> None:
     workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
     parent = WorkUnit(root=Task(_write_probe, path=str(tmp_path / "unused")), dependencies=set())
     child = WorkUnit(root=Task(_write_probe, path=str(tmp_path / "probe")), dependencies={parent})
-    workspace.put_job_file("submission", dependency_state_name("parent-job"), b"done")
+    workspace.put_job_file("parent-submission", dependency_state_name("parent-job"), b"done")
 
     payload = cloudpickle.loads(
         child.as_payload(
             workspace,
             "child-job",
             submission_id="submission",
-            dependency_jobs={parent: "parent-job"},
+            dependency_jobs={parent: ("parent-submission", "parent-job")},
         )
     )
     execute = cast("Callable[[], None]", payload["fn"])

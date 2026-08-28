@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, ClassVar, Literal, TypeAlias, cast
 
 import msgspec
 
-from misen.exceptions import StatusQueryError, SubmissionError
-from misen.executor import Executor, Job, JobState
+from misen.exceptions import ExecutionError, StatusQueryError, SubmissionError
+from misen.executor import Executor, Job, JobState, _JobRecord
 from misen.utils.dask_runtime import DEFAULT_DASK_STARTUP_TIMEOUT, managed_cluster_script
 from misen.utils.resource_env import resource_environment
 from misen.utils.runtime_events import work_unit_label
@@ -64,6 +64,27 @@ class SlurmJob(Job):
         """Return the current SLURM state, normalized to a misen job state."""
         return type(self).bulk_state([self]).get(self, "unknown")
 
+    def cancel(self) -> None:
+        """Ask SLURM to cancel this job."""
+        try:
+            _run_slurm_command("scancel", [self.slurm_job_id])
+        except StatusQueryError as exc:
+            msg = f"Could not cancel SLURM job {self.slurm_job_id}: {exc}"
+            raise ExecutionError(msg) from exc
+
+    @classmethod
+    def _from_record(cls, work_unit: WorkUnit, workspace: Workspace, record: _JobRecord) -> SlurmJob:
+        return cls(
+            work_unit,
+            record.job_id,
+            str(record.native_id),
+            workspace.get_job_log(record.job_id, work_unit),
+            workspace,
+        )
+
+    def _record(self) -> _JobRecord:
+        return _JobRecord(cast("str", self.job_id), self.slurm_job_id)
+
     @classmethod
     def bulk_state(cls, jobs: Sequence[Job]) -> dict[Job, JobState]:
         """Return states for many SLURM jobs using one ``squeue`` + one ``sacct`` call.
@@ -92,7 +113,7 @@ class SlurmJob(Job):
         remaining = set(by_id)
 
         def collect(command: str, args: list[str], *, in_queue: bool) -> None:
-            for sid, raw in _parse_id_state_rows(_run_slurm_query(command, args)):
+            for sid, raw in _parse_id_state_rows(_run_slurm_command(command, args)):
                 if sid in by_id:
                     state = _normalize_slurm_state(raw, in_queue=in_queue)
                     states[sid] = state
@@ -165,6 +186,7 @@ class SlurmExecutor(Executor[SlurmJob]):
     dask_startup_timeout: int = DEFAULT_DASK_STARTUP_TIMEOUT
     default_flags: dict[str, _SetValue] = msgspec.field(default_factory=dict)
     rules: list[_SlurmRule] = msgspec.field(default_factory=list)
+    _job_class: ClassVar[type[Job] | None] = SlurmJob
     _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
 
     def __post_init__(self) -> None:
@@ -182,6 +204,7 @@ class SlurmExecutor(Executor[SlurmJob]):
         if reserved := sorted(_EXECUTOR_OWNED_SBATCH_FLAGS & configured_flags):
             msg = f"Slurm flags {reserved} are controlled by SlurmExecutor and cannot be overridden."
             raise ValueError(msg)
+
         if (
             isinstance(self.dask_startup_timeout, bool)
             or not isinstance(self.dask_startup_timeout, int)
@@ -267,6 +290,8 @@ class SlurmExecutor(Executor[SlurmJob]):
             f"{resources['memory']}G",
             "--time",
             str(resources["time"]),
+            "--requeue",
+            "--open-mode=append",
         ]
         for flag in sorted(flags):
             value = flags[flag]
@@ -382,8 +407,9 @@ _EXECUTOR_OWNED_SBATCH_FLAGS = frozenset(
     """
     cpus-per-gpu cpus-per-task cpus-per-tres dependency export gpus gpus-per-node
     gpus-per-socket gpus-per-task gres job-name kill-on-invalid-dep mem mem-per-cpu
-    mem-per-gpu mem-per-tres nodes ntasks ntasks-per-gpu ntasks-per-node output
-    parsable time tres-per-job tres-per-node tres-per-socket tres-per-task wrap
+    mem-per-gpu mem-per-tres no-requeue nodes ntasks ntasks-per-gpu ntasks-per-node
+    open-mode output parsable requeue time tres-per-job tres-per-node tres-per-socket
+    tres-per-task wrap
     """.split()  # noqa: SIM905
 )
 
@@ -479,8 +505,8 @@ def _resolve_slurm_cmd(name: str) -> str:
     return path
 
 
-def _run_slurm_query(command: str, args: list[str]) -> str:
-    """Invoke a SLURM CLI query or raise a stable status error."""
+def _run_slurm_command(command: str, args: list[str]) -> str:
+    """Invoke a SLURM CLI command or raise a stable status error."""
     try:
         command_path = _resolve_slurm_cmd(command)
     except FileNotFoundError as exc:

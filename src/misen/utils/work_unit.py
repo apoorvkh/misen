@@ -157,7 +157,7 @@ class WorkUnit:
         job_id: str,
         *,
         submission_id: str | None = None,
-        dependency_jobs: Mapping[WorkUnit, str] | None = None,
+        dependency_jobs: Mapping[WorkUnit, tuple[str, str]] | None = None,
     ) -> bytes:
         """Serialize executable payload for backend dispatch.
 
@@ -170,8 +170,8 @@ class WorkUnit:
                 streaming-log context.
             job_id: Job id captured for logging.
             submission_id: Submission namespace for dependency markers.
-            dependency_jobs: Prerequisite work units mapped to their Misen
-                job ids. ``None`` disables the dependency gate.
+            dependency_jobs: Prerequisite work units mapped to
+                ``(submission_id, job_id)``. ``None`` disables the gate.
 
         Returns:
             Cloudpickle payload bytes containing ``{"workspace": ..., "fn": ...}``
@@ -197,8 +197,8 @@ class WorkUnit:
                 submission_id=submission_id,
                 job_id=job_id,
                 dependencies=tuple(
-                    (dependency_id, work_unit_label(dependency))
-                    for dependency, dependency_id in dependency_jobs.items()
+                    (dependency_ref, work_unit_label(dependency))
+                    for dependency, dependency_ref in dependency_jobs.items()
                 ),
             )
         return cloudpickle.dumps(

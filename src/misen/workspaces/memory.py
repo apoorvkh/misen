@@ -205,7 +205,7 @@ class InMemoryWorkspace(_PathWorkspace):
             self._finalizer.detach()
             self._owns_directory = False
 
-    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
+    def lock(self, namespace: Literal["task", "result", "job"], key: str) -> LockLike:
         """Return per-(namespace, key) in-process lock."""
         with self._locks_table_lock:
             return self._locks.setdefault((namespace, key), _ThreadLock())

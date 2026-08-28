@@ -261,8 +261,7 @@ class.
 1. **Harden the SkyPilot MVP.** Exercise representative elastic-cloud and
    attached-cluster targets end to end, including AWS/GCP, Kubernetes,
    SSH/Slurm, and a single-node GPU provider; document provider identity
-   setup; add native cancellation, log UX, failure diagnostics, and durable
-   submission metadata for reattachment.
+   setup; finish log UX and failure diagnostics.
 2. **Harden dependency orchestration.** Persist attachable submission
    manifests, make pre-worker infrastructure failures propagate without a live
    status observer, and reduce the cost of descendants provisioning while

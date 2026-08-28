@@ -387,12 +387,10 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         )
 
         # Fast path: return cached payload for cacheable tasks.
-        dangling_result = False
         if self.meta.cache:
             try:
                 result = workspace.results[self]
-            except KeyError as exc:
-                dangling_result = not isinstance(exc.__cause__, CacheError)
+            except KeyError:
                 logger.log(TRACE_LEVEL, "Cache miss for %s.", self)
             else:
                 logger.log(TRACE_LEVEL, "Cache hit for %s.", self)
@@ -427,7 +425,7 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         }
 
         runtime_lock = self._runtime_lock(workspace=workspace) if self.meta.cache else None
-        lock_context = runtime_lock.context(blocking=False) if runtime_lock is not None else nullcontext()
+        lock_context = runtime_lock.context() if runtime_lock is not None else nullcontext()
         check_lock = None if runtime_lock is None else lambda: _require_runtime_lock(runtime_lock, self)
 
         if self.meta.cache:
@@ -445,12 +443,13 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
         function_completed = False
         try:
             with lock_context:
-                if dangling_result:
+                if self.meta.cache:
                     try:
                         cached_result = workspace.results[self]
-                    except KeyError:
-                        # Heal a pointer whose payload disappeared out of band.
-                        workspace.clear_result_hash(self)
+                    except KeyError as exc:
+                        if not isinstance(exc.__cause__, CacheError):
+                            # Heal a pointer whose payload disappeared out of band.
+                            workspace.clear_result_hash(self)
                     else:
                         logger.log(TRACE_LEVEL, "Cache filled before %s acquired its runtime lock.", self)
                         return cached_result

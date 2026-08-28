@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import msgspec
 
-from misen.exceptions import ConfigError, MisenError, StatusQueryError, SubmissionError
-from misen.executor import Executor, Job, JobState
+from misen.exceptions import ConfigError, ExecutionError, MisenError, StatusQueryError, SubmissionError
+from misen.executor import Executor, Job, JobState, _JobRecord
 from misen.task_metadata import AcceleratorType
 from misen.utils.dask_runtime import (
     DEFAULT_DASK_SCHEDULER_PORT,
@@ -142,6 +142,30 @@ class SkyPilotJob(Job):
     def state(self) -> JobState:
         """Return this managed job's normalized SkyPilot state."""
         return type(self).bulk_state([self]).get(self, "unknown")
+
+    def cancel(self) -> None:
+        """Ask SkyPilot to cancel this managed job."""
+        sky = _load_skypilot()
+        try:
+            sky.get(sky.jobs.cancel(job_ids=[self.managed_job_id]))
+        except Exception as exc:
+            msg = f"Could not cancel SkyPilot managed job {self.managed_job_id}: {exc}"
+            raise ExecutionError(msg) from exc
+
+    @classmethod
+    def _from_record(cls, work_unit: WorkUnit, workspace: Workspace, record: _JobRecord) -> SkyPilotJob:
+        return cls(
+            work_unit=work_unit,
+            job_id=record.job_id,
+            managed_job_id=int(record.native_id),
+            submission_id=record.submission_id,
+            deadline_minutes=record.deadline_minutes,
+            log_path=workspace.get_job_log(record.job_id, work_unit),
+            workspace=workspace,
+        )
+
+    def _record(self) -> _JobRecord:
+        return _JobRecord(cast("str", self.job_id), self.managed_job_id, self.submission_id, self.deadline_minutes)
 
     @classmethod
     def bulk_state(cls, jobs: Sequence[Job]) -> dict[Job, JobState]:
@@ -282,6 +306,7 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
     dask_startup_timeout: int = DEFAULT_DASK_STARTUP_TIMEOUT
     dask_scheduler_port: int = DEFAULT_DASK_SCHEDULER_PORT
     name_prefix: str = "misen"
+    _job_class: ClassVar[type[Job] | None] = SkyPilotJob
     _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
 
     def __post_init__(self) -> None:
@@ -505,7 +530,10 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
             raise SubmissionError(msg)
 
         resources = work_unit.resources
-        dependency_jobs = {dependency.work_unit: cast("str", dependency.job_id) for dependency in dependencies}
+        dependency_jobs = {
+            dependency.work_unit: (dependency.submission_id, cast("str", dependency.job_id))
+            for dependency in dependencies
+        }
         job_id, argv, env, log_path = snapshot.prepare_job(
             work_unit=work_unit,
             workspace=workspace,

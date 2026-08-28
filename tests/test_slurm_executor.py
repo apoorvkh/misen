@@ -19,6 +19,7 @@ from misen.executor import raise_for_failed_jobs
 from misen.executors.slurm import SlurmExecutor, SlurmJob
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
+from misen.workspaces.memory import InMemoryWorkspace
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -132,6 +133,41 @@ def test_slurm_bulk_state_runs_one_squeue_call_for_many_jobs(monkeypatch) -> Non
     assert joined_ids in recorder.calls[0]
     # Every job got the expected state.
     assert all(states[job] == "running" for job in jobs)
+
+
+def test_slurm_job_cancel_uses_native_job_id(monkeypatch) -> None:
+    job = _make_slurm_job(slurm_id="42", x=0)
+    recorder = _RunRecorder({"scancel": ""})
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
+
+    job.cancel()
+
+    assert recorder.calls == [["/usr/bin/scancel", "42"]]
+
+
+def test_slurm_submit_reattaches_recorded_live_job(monkeypatch, tmp_path) -> None:
+    work_unit = WorkUnit(root=Task(_slurm_test_task), dependencies=set())
+    workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
+    snapshot = MagicMock(snapshot_key="SNAPSHOT")
+    snapshot.prepare_job.return_value = ("misen-job", ["python", "worker.py"], {}, tmp_path / "job.log")
+    recorder = _RunRecorder({"sbatch": "42\n", "squeue": "42 RUNNING\n"})
+    monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(slurm_module.subprocess, "run", recorder)
+    executor = SlurmExecutor()
+
+    first: dict[Any, Any] = {}
+    executor._dispatch_work_graph(  # noqa: SLF001
+        pending_work_units=[work_unit], jobs=first, workspace=workspace, snapshot=snapshot, progress=MagicMock()
+    )
+    second: dict[Any, Any] = {}
+    executor._dispatch_work_graph(  # noqa: SLF001
+        pending_work_units=[work_unit], jobs=second, workspace=workspace, snapshot=snapshot, progress=MagicMock()
+    )
+
+    assert cast("SlurmJob", second[work_unit]).slurm_job_id == "42"
+    assert [call[0].rsplit("/", 1)[-1] for call in recorder.calls] == ["sbatch", "squeue"]
+    snapshot.prepare_job.assert_called_once()
 
 
 def test_slurm_bulk_state_falls_back_to_sacct_for_jobs_squeue_doesnt_know(monkeypatch) -> None:
@@ -265,7 +301,7 @@ def test_slurm_query_timeout_is_bounded(monkeypatch) -> None:
     monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
 
     def timeout(*_args: object, **_kwargs: object) -> None:
-        raise subprocess.TimeoutExpired("squeue", slurm_module._SLURM_QUERY_TIMEOUT_S)  # noqa: SLF001
+        raise subprocess.TimeoutExpired("squeue", slurm_module._SLURM_QUERY_TIMEOUT_S)  # noqa: EM101, SLF001
 
     monkeypatch.setattr(slurm_module.subprocess, "run", timeout)
 
@@ -307,7 +343,7 @@ def test_slurm_dispatch_timeout_is_bounded(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(slurm_module, "_resolve_slurm_cmd", lambda name: f"/usr/bin/{name}")
 
     def timeout(*_args: object, **_kwargs: object) -> None:
-        raise subprocess.TimeoutExpired("sbatch", slurm_module._SLURM_SUBMIT_TIMEOUT_S)  # noqa: SLF001
+        raise subprocess.TimeoutExpired("sbatch", slurm_module._SLURM_SUBMIT_TIMEOUT_S)  # noqa: EM101, SLF001
 
     monkeypatch.setattr(slurm_module.subprocess, "run", timeout)
 
@@ -404,6 +440,13 @@ def test_slurm_dispatch_maps_plain_gpu_count_directly(monkeypatch, tmp_path) -> 
     assert "--gpus-per-node=2" in command
 
 
+def test_slurm_dispatch_requeues_with_append_only_logs(monkeypatch, tmp_path) -> None:
+    command, _ = _dispatch_task(Task(_slurm_test_task), SlurmExecutor(), monkeypatch, tmp_path)
+
+    assert "--requeue" in command
+    assert "--open-mode=append" in command
+
+
 def test_slurm_dispatch_requests_task_nodes(monkeypatch, tmp_path) -> None:
     command, _ = _dispatch_task(Task(_slurm_multinode_test_task), SlurmExecutor(), monkeypatch, tmp_path)
 
@@ -448,15 +491,18 @@ def test_slurm_dask_dispatch_bootstraps_one_private_worker_per_node(monkeypatch,
         "gpus-per-socket",
         "gres",
         "mem-per-tres",
+        "no-requeue",
         "nodes",
         "ntasks-per-gpu",
+        "open-mode",
+        "requeue",
         "tres-per-job",
         "tres-per-node",
         "tres-per-socket",
         "tres-per-task",
     ],
 )
-def test_slurm_rejects_flags_controlled_by_the_executor(flag, monkeypatch, tmp_path) -> None:
+def test_slurm_rejects_flags_controlled_by_the_executor(flag) -> None:
     with pytest.raises(ValueError, match="controlled by SlurmExecutor"):
         SlurmExecutor(default_flags={flag: "conflict"})
 

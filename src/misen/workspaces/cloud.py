@@ -862,7 +862,7 @@ class CloudWorkspace(Workspace):
     def _under(self, *parts: str) -> str:
         return _join_prefix(self._cloud_prefix, *parts)
 
-    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
+    def lock(self, namespace: Literal["task", "result", "job"], key: str) -> LockLike:
         return ObjectStoreLock(
             store=self._store,
             key=self._under("locks", namespace, key),

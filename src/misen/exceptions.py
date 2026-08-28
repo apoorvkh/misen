@@ -125,6 +125,10 @@ class SubmittedJob(Protocol):
         """Wait until this job reaches a terminal state."""
         ...
 
+    def cancel(self) -> None:
+        """Request backend cancellation when supported."""
+        ...
+
 
 class SubmissionError(ExecutionError, code=ErrorCode.SUBMISSION):
     """Raised when submission fails, retaining any already-accepted jobs."""

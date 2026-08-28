@@ -269,7 +269,7 @@ class ProjectSnapshot:
         work_unit: WorkUnit,
         workspace: Workspace,
         *,
-        dependency_jobs: Mapping[WorkUnit, str] | None = None,
+        dependency_jobs: Mapping[WorkUnit, tuple[str, str]] | None = None,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute one work unit.
 
@@ -282,8 +282,8 @@ class ProjectSnapshot:
         Args:
             work_unit: Work unit to execute.
             workspace: Workspace for payload/log storage.
-            dependency_jobs: Prerequisite work units mapped to their Misen
-                job ids, or ``None`` when the backend supplies dependencies.
+            dependency_jobs: Prerequisite work units mapped to their
+                ``(submission_id, job_id)``, or ``None`` for native dependencies.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.

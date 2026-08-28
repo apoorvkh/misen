@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import traceback
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -26,7 +27,7 @@ class _CleanupFailure(RuntimeError):
 
 @meta(id="test_failure_handling_raises", cache=True)
 def _raises_task_error() -> None:
-    print("before failure")
+    print("before failure")  # noqa: T201 -- exercise captured output on failure
     raise _TaskFailure("task exploded")
 
 
@@ -259,8 +260,6 @@ def test_task_does_not_commit_after_losing_runtime_lock(tmp_path: Path, monkeypa
     class _LostLock:
         def context(self, *, blocking: bool = True, timeout: int | None = None) -> object:
             del blocking, timeout
-            from contextlib import nullcontext
-
             return nullcontext(self)
 
         def is_locked(self) -> bool:
@@ -277,3 +276,24 @@ def test_task_does_not_commit_after_losing_runtime_lock(tmp_path: Path, monkeypa
     with pytest.raises(CacheError):
         workspace.get_result_hash(task)
     assert not workspace.results.result_store
+
+
+def test_task_waits_for_runtime_lock_and_rechecks_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
+    task = Task(_successful_task)
+    real_lock = workspace.lock
+    cached_result = 41
+
+    class _CacheFillingLock:
+        def context(self, *, blocking: bool = True, timeout: int | None = None) -> object:
+            assert blocking
+            assert timeout is None
+            tasks_module.save_task_result(task, cached_result, workspace)
+            return nullcontext()
+
+    def lock(namespace: str, key: str) -> object:
+        return _CacheFillingLock() if namespace == "task" else real_lock(namespace=namespace, key=key)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(workspace, "lock", lock)
+
+    assert task.result(workspace=workspace, compute_if_uncached=True) == cached_result

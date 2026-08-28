@@ -24,6 +24,7 @@ from misen.executors.skypilot import SkyPilotExecutor, SkyPilotJob
 from misen.utils.graph import DependencyGraph
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
+from misen.workspaces.memory import InMemoryWorkspace
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -99,11 +100,14 @@ def _fake_sky(
         return request_id
 
     jobs = SimpleNamespace(
+        cancel=MagicMock(return_value="cancel-request"),
         launch=MagicMock(side_effect=launch),
         queue_v2=MagicMock(return_value="queue-request"),
     )
 
     def get(request_id: str) -> object:
+        if request_id == "cancel-request":
+            return None
         if request_id == "queue-request":
             return (list(queue_records), "ignored-metadata")
         if request_id in requests:
@@ -134,6 +138,25 @@ def _work_unit(task: Task[Any]) -> WorkUnit:
     return WorkUnit(root=task, dependencies=set())
 
 
+def test_skypilot_job_cancel_waits_for_native_request(tmp_path, monkeypatch) -> None:
+    fake_sky = _fake_sky()
+    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
+    job = SkyPilotJob(
+        work_unit=_work_unit(Task(_chain_task, value=1)),
+        job_id="local-1",
+        managed_job_id=42,
+        submission_id="STATUSABC",
+        deadline_minutes=60,
+        log_path=tmp_path / "job.log",
+        workspace=cast("Workspace", _remote_workspace()),
+    )
+
+    job.cancel()
+
+    fake_sky.jobs.cancel.assert_called_once_with(job_ids=[42])
+    fake_sky.get.assert_called_once_with("cancel-request")
+
+
 def _diamond_graph() -> tuple[DependencyGraph[WorkUnit], tuple[WorkUnit, WorkUnit, WorkUnit, WorkUnit]]:
     base = _work_unit(Task(_chain_task, value=1))
     left = WorkUnit(root=Task(_chain_task, value=2), dependencies={base})
@@ -158,7 +181,7 @@ def test_submit_accepts_diamond_dag_and_launches_one_managed_job_per_work_unit(m
     fake_sky = _fake_sky(
         launch_results=tuple(([managed_id], {"name": "ignored"}) for managed_id in (311, 312, 313, 314))
     )
-    prepared: list[tuple[WorkUnit, dict[WorkUnit, str]]] = []
+    prepared: list[tuple[WorkUnit, dict[WorkUnit, tuple[str, str]]]] = []
 
     class _FakeSnapshot:
         submission_id = "SUBMISSIONABC"
@@ -171,7 +194,7 @@ def test_submit_accepts_diamond_dag_and_launches_one_managed_job_per_work_unit(m
             *,
             work_unit: WorkUnit,
             workspace: Workspace,
-            dependency_jobs: dict[WorkUnit, str],
+            dependency_jobs: dict[WorkUnit, tuple[str, str]],
         ) -> tuple[str, list[str], dict[str, str], Path]:
             del workspace
             prepared.append((work_unit, dependency_jobs))
@@ -200,9 +223,9 @@ def test_submit_accepts_diamond_dag_and_launches_one_managed_job_per_work_unit(m
 
     assert prepared == [
         (base, {}),
-        (left, {base: "misen-job-1"}),
-        (right, {base: "misen-job-1"}),
-        (root, {left: "misen-job-2", right: "misen-job-3"}),
+        (left, {base: ("SUBMISSIONABC", "misen-job-1")}),
+        (right, {base: ("SUBMISSIONABC", "misen-job-1")}),
+        (root, {left: ("SUBMISSIONABC", "misen-job-2"), right: ("SUBMISSIONABC", "misen-job-3")}),
     ]
     launch_calls = fake_sky.jobs.launch.call_args_list
     assert len(launch_calls) == 4
@@ -264,6 +287,40 @@ def test_independent_work_launches_without_dependency_gates(monkeypatch, tmp_pat
     assert [item.kwargs["dependency_jobs"] for item in snapshot.prepare_job.call_args_list] == [{}, {}]
     assert len(fake_sky.jobs.launch.call_args_list) == 2
     assert set(jobs) == {first, second}
+
+
+def test_submit_reattaches_live_parent_across_submission_namespaces(monkeypatch, tmp_path) -> None:
+    parent = _work_unit(Task(_chain_task, value=1))
+    child = WorkUnit(root=Task(_chain_task, value=2), dependencies={parent})
+    workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
+    fake_sky = _fake_sky(
+        launch_results=(([41], None), ([42], None)),
+        queue_records=({"job_id": 41, "task_id": 0, "status": "RUNNING"},),
+    )
+    old_snapshot = SimpleNamespace(
+        submission_id="OLD",
+        snapshot_key="SNAPSHOT",
+        prepare_job=MagicMock(return_value=("parent-job", ["python", "worker.py"], {}, tmp_path / "parent.log")),
+    )
+    new_snapshot = SimpleNamespace(
+        submission_id="NEW",
+        snapshot_key="SNAPSHOT",
+        prepare_job=MagicMock(return_value=("child-job", ["python", "worker.py"], {}, tmp_path / "child.log")),
+    )
+    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
+    executor = SkyPilotExecutor()
+
+    executor._dispatch_work_graph(
+        pending_work_units=[parent], jobs={}, workspace=workspace, snapshot=old_snapshot, progress=MagicMock()
+    )
+    jobs: dict[Any, Any] = {}
+    executor._dispatch_work_graph(
+        pending_work_units=[parent, child], jobs=jobs, workspace=workspace, snapshot=new_snapshot, progress=MagicMock()
+    )
+
+    assert cast("SkyPilotJob", jobs[parent]).managed_job_id == 41
+    assert new_snapshot.prepare_job.call_args.kwargs["dependency_jobs"] == {parent: ("OLD", "parent-job")}
+    assert fake_sky.jobs.launch.call_count == 2
 
 
 def test_partial_launch_error_reports_already_accepted_managed_jobs(monkeypatch, tmp_path) -> None:

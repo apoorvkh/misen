@@ -266,16 +266,117 @@ Compatibility (validated at submit, failing early with a clear error):
 | SSH | ✓ (if mounted) | ✗ | ✓ | ✗ |
 | SkyPilot (current) | ✗ | ✗ | ✓ | ✗ |
 
-## Lifecycle
+## Lifecycle (phase 5 TODO)
 
-Content-addressing makes the age-based prune (deferred since the env
-store) mandatory rather than optional. One policy, several stores:
-snapshot entries, env entries (deps/overlay/conda), job blobs. Reuse
-already touches entry markers; dispatch additionally touches the
-referenced snapshot marker so long-queued jobs hold their entries fresh.
-Prune = delete entries whose marker mtime exceeds a generous TTL (weeks),
-exposed as a `misen` maintenance command. Deleting a whole store remains
-safe when nothing is queued or running.
+Content-addressing makes garbage collection mandatory rather than optional,
+but age alone is not a safe deletion rule. A queued or retryable scheduler job
+may still need an old snapshot, environment, or submission payload. An
+artifact is eligible for automatic deletion only when all three conditions
+hold:
+
+1. no open submission or running/retryable job references it;
+2. its storage-authoritative last-use timestamp is older than the configured
+   retention cutoff; and
+3. the exact immutable generation has first been retired, so a stale pruner
+   cannot delete a replacement published under the same stable key.
+
+Age selects candidates, durable references establish liveness, and generation
+retirement fences deletion races. If Misen cannot prove an artifact is dead,
+it retains it. Deleting a whole store remains safe when the user knows that no
+jobs are queued or running.
+
+### Correctness foundations
+
+- [ ] Make result invalidation pointer-first and alias-aware.
+  `ResultMap.__delitem__` must clear only the selected task's
+  `ResolvedTaskHash -> ResultHash` pointer. A later coordinated mark-and-sweep
+  may delete a result payload only when no pointer references that content
+  hash; equal results can share one payload.
+- [ ] Make canonical cloud state authoritative over local materialization
+  caches. A local result or snapshot directory must not by itself prove that
+  the corresponding remote commit still exists. Local caches need an
+  independent size/age policy and must be safe to discard.
+- [ ] Persist cleanup intent when a result commits but successful-task scratch
+  cleanup fails. A later cache hit or maintenance run should retry that cleanup
+  instead of leaving completed scratch state indefinitely.
+
+### Durable submission ownership
+
+- [ ] Add a versioned submission manifest plus independently updated job
+  records. Record the snapshot key, executor, Misen and backend job IDs,
+  referenced artifacts, and creation/submission/terminal timestamps.
+- [ ] Model `open -> sealed -> terminal`: create the submission before its
+  artifacts, register jobs as dispatch succeeds, seal it with the complete job
+  set, and mark it terminal only after every backend job is scheduler-terminal.
+  Worker attempt status is useful evidence but does not by itself prove that a
+  scheduler will not requeue the job.
+- [ ] Route live-mode payloads through the same submission-scoped job-file
+  lifecycle and preserve submission ownership in worker-side caches.
+- [ ] Keep open, unsealed, unknown, and nonterminal submissions indefinitely by
+  default. Provide a separate explicit `abandon_after` policy for users who
+  accept that abandoning an indefinitely queued job may make a later retry
+  fail.
+- [ ] Delete secret-bearing job files only after terminal state plus a
+  configurable slack period. Rename a disk submission into a unique trash path
+  and fsync before recursive deletion; tombstone a never-reused cloud prefix
+  before bulk deletion.
+
+### Maintenance interface
+
+- [ ] Add a top-level, experiment-independent `misen storage report` command.
+  Report managed entry counts, logical bytes, oldest/newest trustworthy use
+  times, eligible bytes, and protected or unrecognized entries without
+  printing job-file contents or secrets.
+- [ ] Add `misen storage prune`, dry-run by default and requiring `--apply` to
+  delete. Freeze one cutoff per run, acquire the relevant artifact lock, and
+  recheck identity, age, references, and retirement immediately before each
+  deletion.
+- [ ] Start with definite garbage: stale transaction/trash entries, expired
+  locks, unpublished generations, terminal submission files, completed scratch
+  cleanup intents, and bounded local cloud caches.
+- [ ] Treat legacy entries without trustworthy lifecycle metadata as protected.
+  They may be removed only through an explicit legacy/abandon operation or by
+  deleting a known-idle whole store.
+- [ ] Keep retention independent by category (`retention_age`, terminal slack,
+  trash grace, log retention, failed-scratch retention, and optional
+  `abandon_after`) rather than applying one TTL to every artifact.
+
+### Snapshot and environment reclamation
+
+- [ ] Combine snapshot publication with creation of a durable submission
+  reference, so pruning cannot run between publication and retention.
+- [ ] Store or retire an explicit immutable snapshot generation. Pruning must
+  detach the stable pointer, recheck references, and delete only the captured
+  generation or unique trash path, never an object that may have been
+  republished concurrently.
+- [ ] Add generation-specific job pins to dependency, overlay, and conda
+  environments. Materialization should pin and return the physical immutable
+  generation path rather than relying on a stable symlink for the job's
+  lifetime.
+- [ ] Retire an environment generation under its existing per-key build lock,
+  then recheck pins. A retired generation with active pins remains available to
+  its existing users while new jobs build or select another generation.
+- [ ] Record overlay-to-dependency/conda environment edges so a retained overlay
+  also retains everything it needs.
+
+### Deferred, opt-in reclamation
+
+- [ ] Add independent policies for task logs, job logs, failed-task scratch
+  checkpoints, and local read caches. Logs and failed scratch are user-visible
+  diagnostic/recovery data and should not be part of the first automatic GC
+  scope.
+- [ ] Add result-cache GC only after coordinated pointer/reference handling is
+  in place. Mark every `ResultHash` reachable from the result-hash index, then
+  sweep only unreferenced payload generations under write/GC coordination.
+- [ ] Clean orphaned result-index and resolved-hash-index entries only as an
+  explicit later phase with defined cascading semantics.
+
+No new dependency is required for this work. Reuse `msgspec` for versioned
+lifecycle records, `obstore` for cloud metadata/list/delete operations, Tyro
+for the maintenance CLI, and the existing filesystem atomics, trash patterns,
+and NFS/object-store locks. Generic cache libraries do not model scheduler
+liveness, shared result references, or generation-safe deletion and would not
+remove the domain-specific lifecycle code.
 
 ## Resolved decisions
 
@@ -323,5 +424,7 @@ safe when nothing is queued or running.
    and a managed multi-node `DASK_CLIENT` runtime. Direct SSH, remote Slurm,
    Kubernetes, Modal, and provider Batch adapters remain on the roadmap; see
    `design_remote_executors.md`.
-5. **Prune** (pending): age-based GC across snapshot/env/job stores +
-   dispatch-time marker touches.
+5. **Storage lifecycle** (pending): repair result/cache cleanup invariants;
+   add durable submission ownership; expose report and dry-run-first prune
+   commands; then add reference- and generation-safe GC for snapshots,
+   environments, and job files as detailed in [Lifecycle](#lifecycle-phase-5-todo).

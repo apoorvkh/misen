@@ -246,11 +246,11 @@ class Workspace(Configurable):
         return self._result_map
 
     @abstractmethod
-    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
-        """Return a lock object for task/result namespaces.
+    def lock(self, namespace: Literal["task", "result", "job"], key: str) -> LockLike:
+        """Return a lock object for task/result/job namespaces.
 
         Args:
-            namespace: Lock namespace (task runtime or result materialization).
+            namespace: Lock namespace (task runtime, result materialization, or job submission).
             key: Lock key unique within the namespace.
 
         Returns:

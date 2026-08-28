@@ -48,13 +48,12 @@ def _publish(workspace: Workspace, submission_id: str, job_id: str, state: bytes
 
 def _await_dependencies(
     workspace: Workspace,
-    submission_id: str,
-    dependencies: Sequence[tuple[str, str]],
+    dependencies: Sequence[tuple[tuple[str, str], str]],
 ) -> None:
     """Block until every dependency succeeds or one fails."""
     pending = dict(dependencies)
     while pending:
-        for dependency_id, label in tuple(pending.items()):
+        for (submission_id, dependency_id), label in tuple(pending.items()):
             try:
                 state = _read(workspace, submission_id, dependency_id)
             except FileNotFoundError:
@@ -65,7 +64,7 @@ def _await_dependencies(
             if state != _DONE:
                 msg = f"Dependency {label} (job_id={dependency_id}) published an invalid state marker."
                 raise ExecutionError(msg)
-            pending.pop(dependency_id)
+            pending.pop((submission_id, dependency_id))
         if pending:
             time.sleep(_POLL_SECONDS)
 
@@ -76,7 +75,7 @@ def run_with_dependencies(
     workspace: Workspace,
     submission_id: str,
     job_id: str,
-    dependencies: Sequence[tuple[str, str]],
+    dependencies: Sequence[tuple[tuple[str, str], str]],
 ) -> None:
     """Wait for dependency markers, run once, and publish a terminal marker.
 
@@ -96,7 +95,7 @@ def run_with_dependencies(
                 raise ExecutionError(msg)
         except FileNotFoundError:
             pass
-        _await_dependencies(workspace, submission_id, dependencies)
+        _await_dependencies(workspace, dependencies)
         execute()
         completed = True
         _publish(workspace, submission_id, job_id, _DONE)

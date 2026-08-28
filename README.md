@@ -264,6 +264,10 @@ accept only single-node requests; `SlurmExecutor` and `SkyPilotExecutor` map
 - `SlurmExecutor` — submits each work unit as a SLURM job
 - `SkyPilotExecutor` — optional execution on SkyPilot-supported clouds and clusters, with one durable managed job per work unit
 
+Both remote executors persist the minimal native handle needed to reattach a
+matching live job on a later submission. Their returned jobs support
+`job.cancel()` through `scancel` or SkyPilot's managed-jobs API.
+
 For a multi-node Slurm or SkyPilot allocation, the task body still runs exactly
 once on the first node. Bind `DASK_CLIENT` to use Misen's managed worker group,
 with one Dask worker per allocated node, or omit it when the task intentionally
@@ -503,7 +507,9 @@ reachable from every allocated node. For Slurm, set cluster-specific fields in
 Executor `rules` match the resource fields directly, then set local flags such
 as `gpu-type`, `partition`, or `constraint`. Allocation-shaping flags such as
 `nodes`, `cpus-per-task`, `mem`, `time`, and `gpus-per-node` are owned by Misen
-and cannot be overridden this way. For example, this site declares how to
+and cannot be overridden this way. Slurm jobs are requeue-eligible and append
+scheduler output across attempts, so their requeue and open-mode flags are also
+executor-owned. For example, this site declares how to
 satisfy Project B's request above:
 
 ```toml
@@ -538,7 +544,7 @@ Notes:
 - Snapshot, environment, and submission job-file stores are not pruned automatically (a reused environment entry's `.complete` marker mtime is touched, so age-based pruning can be added later). It is safe to delete an env store — or the workspace's `snapshots/` — whenever no jobs are queued or running; the next submission republishes and rebuilds. Running `uv cache prune` is also safe: envs hold hardlinks, so their files survive cache pruning.
 - Multi-user stores on a shared filesystem need group-writable directories *without* the sticky bit (stale-lock recovery must be able to remove another user's lock files).
 
-The **Workspace** (default: `DiskWorkspace` under `.misen/`) stores cached results, task/job logs, and runtime locks. Cacheable tasks with the same identity are mutually exclusive per Workspace — a concurrent duplicate submission fails fast rather than running twice, and any later submission returns the cached result. A few `Task` methods are useful for scripting around the Workspace: `task.is_cached(...)`, `task.done(...)`, `task.is_running(...)`, and `task.scratch_dir(...)`.
+The **Workspace** (default: `DiskWorkspace` under `.misen/`) stores cached results, task/job logs, and runtime locks. Cacheable tasks with the same identity are mutually exclusive per Workspace — a duplicate waits for the renewable lease (or its stale expiry), then returns the cached result if the first attempt committed. A few `Task` methods are useful for scripting around the Workspace: `task.is_cached(...)`, `task.done(...)`, `task.is_running(...)`, and `task.scratch_dir(...)`.
 
 ## Configuration
 

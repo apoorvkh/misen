@@ -19,7 +19,10 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar, cast
 
+import msgspec
+
 from misen.exceptions import JobFailedError, JobFailure, StatusQueryError, StorageError, SubmissionError
+from misen.utils.hashing import TaskHash
 from misen.utils.runtime_events import runtime_activity, runtime_event, runtime_progress, task_label, work_unit_label
 from misen.utils.settings import Configurable
 from misen.utils.work_unit import build_work_graph
@@ -44,6 +47,14 @@ JobT = TypeVar("JobT", bound="Job")
 logger = logging.getLogger(__name__)
 
 
+class _JobRecord(msgspec.Struct):
+    job_id: str
+    native_id: str | int
+    submission_id: str = ""
+    deadline_minutes: int = 0
+    version: Literal[1] = 1
+
+
 class Executor(Configurable, Generic[JobT]):
     """Abstract execution backend interface.
 
@@ -64,6 +75,7 @@ class Executor(Configurable, Generic[JobT]):
     snapshot: bool = True
     env_store_dir: str | None = None
     prewarm_envs: bool = False
+    _job_class: ClassVar[type[Job] | None] = None
 
     def submit(
         self,
@@ -241,11 +253,8 @@ class Executor(Configurable, Generic[JobT]):
                     work_unit_label(work_unit),
                     len(dependencies),
                 )
-                dispatched_job = self._dispatch(
-                    work_unit=work_unit,
-                    dependencies=cast("set[JobT]", dependencies),
-                    workspace=workspace,
-                    snapshot=snapshot,
+                dispatched_job = self._dispatch_or_reattach(
+                    work_unit, cast("set[JobT]", dependencies), workspace, snapshot
                 )
                 jobs[work_unit] = dispatched_job
                 logger.debug(
@@ -283,6 +292,49 @@ class Executor(Configurable, Generic[JobT]):
                     exc.add_note(f"Already submitted jobs: {labels}.")
                 raise
             progress(1)
+
+    def _dispatch_or_reattach(
+        self,
+        work_unit: WorkUnit,
+        dependencies: set[JobT],
+        workspace: Workspace,
+        snapshot: ProjectSnapshot | None,
+    ) -> JobT:
+        """Reuse a live durable job, or atomically submit and record one."""
+        if self._job_class is None:
+            return self._dispatch(work_unit, dependencies, workspace, snapshot)
+        snapshot_key = getattr(snapshot, "snapshot_key", None)
+        key = TaskHash.from_object((self, work_unit.root.task_hash(), work_unit.resources, snapshot_key)).b32()
+        with workspace.lock("job", key).context():
+            if (job := self._restore_job(work_unit, workspace, key)) is not None and job.state() not in (
+                "done",
+                "failed",
+            ):
+                logger.info("Reattached %s (job_id=%s).", work_unit_label(work_unit), job.job_id)
+                return job
+            job = self._dispatch(work_unit, dependencies, workspace, snapshot)
+            try:
+                self._record_job(job, workspace, key)
+            except Exception as exc:
+                msg = f"Accepted {job.label}, but could not persist its durable job record: {exc}"
+                raise SubmissionError(msg, submitted_jobs=(job,)) from exc
+            return job
+
+    def _restore_job(self, work_unit: WorkUnit, workspace: Workspace, key: str) -> JobT | None:
+        """Restore a backend job record, or return ``None`` when absent."""
+        try:
+            record = msgspec.json.decode(workspace.read_job_file("jobs", f"{key}.json"), type=_JobRecord)
+        except FileNotFoundError:
+            return None
+        except msgspec.DecodeError as exc:
+            msg = f"Invalid durable job record {key}: {exc}"
+            raise StorageError(msg) from exc
+        job_class = cast("type[Job]", self._job_class)
+        return cast("JobT", job_class._from_record(work_unit, workspace, record))  # noqa: SLF001
+
+    def _record_job(self, job: JobT, workspace: Workspace, key: str) -> None:
+        """Persist the backend fields required to restore ``job``."""
+        workspace.put_job_file("jobs", f"{key}.json", msgspec.json.encode(job._record()))  # noqa: SLF001
 
     @abstractmethod
     def _dispatch(
@@ -440,6 +492,21 @@ class Job(ABC):
         """
         resolved_state = bulk_job_states([self])[self] if state is None else state
         raise_for_failed_jobs({self: resolved_state})
+
+    def cancel(self) -> None:
+        """Cancel this job when its backend supports native cancellation."""
+        msg = f"{type(self).__name__} does not support cancellation."
+        raise NotImplementedError(msg)
+
+    @classmethod
+    def _from_record(cls, work_unit: WorkUnit, workspace: Workspace, record: _JobRecord) -> Job:
+        del work_unit, workspace, record
+        msg = f"{cls.__name__} does not support durable reattachment."
+        raise NotImplementedError(msg)
+
+    def _record(self) -> _JobRecord:
+        msg = f"{type(self).__name__} does not support durable reattachment."
+        raise NotImplementedError(msg)
 
 
 def bulk_job_states(jobs: Iterable[Job]) -> dict[Job, JobState]:

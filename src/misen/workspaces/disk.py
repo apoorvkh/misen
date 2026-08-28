@@ -362,6 +362,7 @@ class DiskWorkspace(_PathWorkspace):
             (self._directory_path / "job_logs").mkdir(parents=True, exist_ok=True)
             (self.get_temp_dir() / "task_locks").mkdir(parents=True, exist_ok=True)
             (self.get_temp_dir() / "result_locks").mkdir(parents=True, exist_ok=True)
+            (self.get_temp_dir() / "job_locks").mkdir(parents=True, exist_ok=True)
 
         super()._post_init(
             resolved_hash_cache=FileKVMapping[TaskHash, ResolvedTaskHash](self._directory_path / "resolved_hash_cache"),
@@ -381,8 +382,8 @@ class DiskWorkspace(_PathWorkspace):
         within the process.
         """
 
-    def lock(self, namespace: Literal["task", "result"], key: str) -> LockLike:
-        """Return NFS-backed lock for task/result namespaces.
+    def lock(self, namespace: Literal["task", "result", "job"], key: str) -> LockLike:
+        """Return an NFS-backed workspace lock.
 
         Args:
             namespace: Lock namespace.
