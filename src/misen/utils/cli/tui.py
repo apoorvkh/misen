@@ -153,10 +153,11 @@ class _TaskTreeNode:
 
 @dataclass
 class _JobStateIndex:
-    """Map work units and cacheable root tasks to the backing ``Job``."""
+    """Index jobs by work unit, root task, and downstream dependency edges."""
 
     wu_to_job: dict[WorkUnit, Job] = field(default_factory=dict)
     wu_by_root: dict[Task[Any], WorkUnit] = field(default_factory=dict)
+    dependents: dict[Job, list[Job]] = field(default_factory=dict)
 
     @classmethod
     def build(cls, job_graph: DependencyGraph[Job]) -> _JobStateIndex:
@@ -165,6 +166,10 @@ class _JobStateIndex:
             wu = job.work_unit
             index.wu_to_job[wu] = job
             index.wu_by_root[wu.root] = wu
+        for node_index in job_graph.node_indices():
+            dependent = job_graph[node_index]
+            for dependency in job_graph.successors(node_index):
+                index.dependents.setdefault(dependency, []).append(dependent)
         return index
 
     def job_for_work_unit(self, wu: WorkUnit | None) -> Job | None:
@@ -172,6 +177,20 @@ class _JobStateIndex:
 
     def work_unit_of_root(self, task: Task[Any]) -> WorkUnit | None:
         return self.wu_by_root.get(task)
+
+    def job_and_dependents(self, job: Job) -> list[Job]:
+        """Return ``job`` followed by its transitive dependents."""
+        jobs = [job]
+        seen = {job}
+        cursor = 0
+        while cursor < len(jobs):
+            current = jobs[cursor]
+            cursor += 1
+            for dependent in self.dependents.get(current, ()):
+                if dependent not in seen:
+                    seen.add(dependent)
+                    jobs.append(dependent)
+        return jobs
 
 
 def _canonical_parent_edges(
@@ -581,25 +600,25 @@ def _run_textual_task_monitor(
     class _TaskMonitorApp(App[None]):
         TITLE = "misen run"
         ENABLE_COMMAND_PALETTE = False
-        # Quit bindings stay declared but are gated by ``check_action`` so they
-        # only light up after every job reaches a terminal state. During a run
-        # Ctrl+C is the only way out — it raises KeyboardInterrupt in the
-        # parent Python process so callers can decide how to handle it.
+        # Quit and cancellation bindings stay declared but are gated by
+        # ``check_action`` so the footer only advertises actions that are
+        # currently available. Ctrl+C remains a detach-style interrupt: it
+        # closes the monitor without changing any backend job state.
         # Copy is hidden from the global footer (``show=False``); the log pane
         # carries its own ``Copy`` label so the affordance lives where the
         # selectable text does.
         BINDINGS = (
-            Binding("escape", "quit_when_done", "Quit"),
-            Binding("q", "quit_when_done", "Quit"),
+            Binding("escape", "quit_when_idle", "Quit"),
+            Binding("q", "quit_when_idle", "Quit"),
+            Binding("c", "cancel_selected_job", "Cancel job", priority=True),
             Binding("tab", "toggle_mode", "Toggle task/job log", priority=True),
             # ``priority=True`` so this beats Textual's defaults
             # (Screen's ``ctrl+c,super+c`` → screen.copy_text and App's
             # ``ctrl+c`` → help_quit) and Ctrl+C always interrupts.
             Binding("ctrl+c", "interrupt", "Interrupt", priority=True, show=False),
             Binding("super+c,ctrl+shift+c", "screen.copy_text", "Copy", show=False),
-            # Suppress Textual's default Ctrl+Q quit binding — exiting mid-run
-            # would orphan the submitted Jobs. Ctrl+C remains as the deliberate
-            # interrupt path.
+            # Suppress Textual's default Ctrl+Q quit binding so detaching from
+            # a live run remains the deliberate Ctrl+C interrupt path.
             Binding("ctrl+q", "noop", show=False, priority=True),
         )
         POST_RUN_IDLE_TIMEOUT_S = 60.0
@@ -645,6 +664,8 @@ def _run_textual_task_monitor(
             self._state_poll_pending: bool = False
             """Set while a backgrounded state poll is in flight to prevent
             two overlapping polls when the controller is slow."""
+            self._cancellation_pending: bool = False
+            """Set while cancellation requests are running off the UI loop."""
             self._job_started_at: dict[Job, float] = {}
             self._job_ended_at: dict[Job, float] = {}
             """Per-job runtime bookkeeping. Recorded the first time we observe
@@ -687,6 +708,7 @@ def _run_textual_task_monitor(
                 self.exit()
                 return
             self._apply_states(states)
+            self._update_completion_state()
             self._repaint_tree()
             self._render_summary_widget()
             self._update_log_title()
@@ -869,6 +891,23 @@ def _run_textual_task_monitor(
         def _all_jobs_terminal(self) -> bool:
             return all(self._job_states.get(job, "unknown") in _TERMINAL_STATES for job in job_graph.nodes())
 
+        def _active_jobs(self) -> list[Job]:
+            """Return jobs known to be queued or executing.
+
+            An ``unknown`` backend state is intentionally not included. It
+            remains visible in the summary, but it must not trap users in the
+            monitor when no job is reported as pending or running.
+            """
+            return [job for job, state in self._job_states.items() if state in {"pending", "running"}]
+
+        def _selected_active_job(self) -> Job | None:
+            """Return the selected row's job when it is pending or running."""
+            entry = self._cursor_entry
+            job = index.job_for_work_unit(entry.work_unit) if entry is not None else None
+            if job is None or self._job_states.get(job, "unknown") not in {"pending", "running"}:
+                return None
+            return job
+
         def _update_completion_state(self) -> None:
             all_done = self._all_jobs_terminal()
             if all_done and not self._all_done:
@@ -876,8 +915,11 @@ def _run_textual_task_monitor(
                 # Reset the activity clock at the moment of completion so the
                 # idle countdown starts fresh regardless of prior scrolling.
                 self._last_activity_at = time.monotonic()
-                # Re-evaluate bindings: the gated quit actions just turned on.
-                self.refresh_bindings()
+            # Re-evaluate the state-gated quit and cancellation actions after
+            # every poll. In particular, Escape becomes available when the
+            # last pending/running state disappears, even if another backend
+            # state is temporarily unknown.
+            self.refresh_bindings()
             if self._all_done and (time.monotonic() - self._last_activity_at >= self.POST_RUN_IDLE_TIMEOUT_S):
                 self.exit()
 
@@ -889,18 +931,52 @@ def _run_textual_task_monitor(
             action: str,
             parameters: tuple[object, ...],  # noqa: ARG002
         ) -> bool | None:
-            if action == "quit_when_done":
-                # Hide the binding in the footer and block its action while
-                # jobs are still running.
-                return self._all_done
+            if action == "quit_when_idle":
+                # Hide the binding in the footer and block its action while a
+                # job is known to be queued or executing.
+                return not self._active_jobs()
+            if action == "cancel_selected_job":
+                return not self._cancellation_pending and self._selected_active_job() is not None
             return True
 
-        def action_quit_when_done(self) -> None:
-            if self._all_done:
+        def action_quit_when_idle(self) -> None:
+            if not self._active_jobs():
                 self.exit()
 
+        async def action_cancel_selected_job(self) -> None:
+            """Cancel the highlighted job and every nonterminal dependent."""
+            job = self._selected_active_job()
+            if job is None:
+                return
+            jobs = [
+                candidate
+                for candidate in index.job_and_dependents(job)
+                if self._job_states.get(candidate, "unknown") not in _TERMINAL_STATES
+            ]
+            self._cancellation_pending = True
+            self.refresh_bindings()
+            try:
+                results = await asyncio.gather(
+                    *(asyncio.to_thread(candidate.cancel) for candidate in jobs),
+                    return_exceptions=True,
+                )
+            finally:
+                self._cancellation_pending = False
+                self.refresh_bindings()
+
+            errors = [result for result in results if isinstance(result, BaseException)]
+            if not errors:
+                return
+            first = errors[0]
+            if not isinstance(first, Exception):
+                first = RuntimeError(f"Job cancellation failed: {first}")
+            for error in errors[1:]:
+                first.add_note(f"Additionally, cancelling a dependent job failed: {error}")
+            self._monitor_error = first
+            self.exit()
+
         def action_interrupt(self) -> None:
-            """Tear down the TUI and signal a user interrupt to the caller."""
+            """Leave backend jobs untouched and signal an interrupt to the caller."""
             self._user_interrupted = True
             self.exit()
 
@@ -929,6 +1005,7 @@ def _run_textual_task_monitor(
             if entry is None or entry is self._cursor_entry:
                 return
             self._cursor_entry = entry
+            self.refresh_bindings()
             self._reset_log()
             self._repaint_tree()
             self._render_resources_line()
@@ -956,6 +1033,7 @@ def _run_textual_task_monitor(
                 tree = self.query_one("#task-tree", _FilteredTree)
                 tree.cursor_line = target.tree_node.line
                 tree.scroll_to_line(target.tree_node.line, animate=False)
+            self.refresh_bindings()
 
         def _reset_log(self) -> None:
             self._log_key = None

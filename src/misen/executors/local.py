@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_KILL_GRACE_S = 5.0
 _SHUTDOWN_TERM_GRACE_S = 2.0
 _SIGTERM_CLEANUP_TIMEOUT_S = 5.0
+_USER_CANCEL_REASON = "Canceled by user."
 
 
 def _inherited_cpu_indices() -> list[int]:
@@ -70,6 +71,7 @@ class LocalJob(Job):
         "_cached_state",
         "_lock",
         "_process",
+        "_scheduler",
         "assigned_accelerator_indices",
         "assigned_cpu_indices",
         "dependencies",
@@ -92,6 +94,7 @@ class LocalJob(Job):
         self.assigned_cpu_indices: list[int] = []
         self.assigned_accelerator_indices: list[int] = []
         self._process: SupervisionSession | None = None
+        self._scheduler: _LocalScheduler | None = None
         self._cached_state: _JobState = "pending"
         self._lock = threading.Lock()
 
@@ -179,6 +182,25 @@ class LocalJob(Job):
                 self._record_failure(reason)
             self._cached_state = "failed"
             logger.error("Local job %s for %s marked failed.", self.job_id or "n/a", self.label)
+
+    def cancel(self) -> None:
+        """Cancel this job without allowing queued work to launch later."""
+        state = self.state()
+        if state in {"done", "failed"}:
+            return
+        with self._lock:
+            scheduler = self._scheduler
+        if scheduler is not None:
+            scheduler.cancel(self)
+        elif state == "running":
+            self.stop(grace_seconds=_SHUTDOWN_TERM_GRACE_S, reason=_USER_CANCEL_REASON)
+        else:
+            self.mark_failed(reason=_USER_CANCEL_REASON)
+
+    def _associate_scheduler(self, scheduler: _LocalScheduler) -> None:
+        """Attach the scheduler that owns this job's queue bookkeeping."""
+        with self._lock:
+            self._scheduler = scheduler
 
     def stop(self, *, grace_seconds: float, reason: str | None = None) -> bool:
         """Stop and reap the supervised process tree within a grace window."""
@@ -488,6 +510,7 @@ class _LocalScheduler:
             if self._fatal_error is not None:
                 msg = f"Local scheduler is unavailable after {type(self._fatal_error).__name__}: {self._fatal_error}"
                 raise ExecutionError(msg) from self._fatal_error
+            job._associate_scheduler(self)  # noqa: SLF001
             dependencies = [(dependency, dependency.state()) for dependency in job.dependencies]
             waiting = [dependency for dependency, state in dependencies if state != "done"]
             if any(state == "failed" for _, state in dependencies):
@@ -505,6 +528,62 @@ class _LocalScheduler:
                 len(self._running),
             )
             self._condition.notify_all()
+
+    def cancel(self, job: LocalJob) -> None:
+        """Cancel one tracked job and reconcile its scheduler bookkeeping."""
+        with self._condition:
+            if job.state() in {"done", "failed"}:
+                return
+            if job in self._running:
+                running = True
+            elif self._discard_pending_locked(job):
+                self._mark_failed_locked(job, reason=_USER_CANCEL_REASON)
+                self._condition.notify_all()
+                return
+            else:
+                return
+
+        try:
+            job.stop(grace_seconds=_SHUTDOWN_TERM_GRACE_S, reason=_USER_CANCEL_REASON)
+        finally:
+            # Stopping a process may wait through the grace period, so it must
+            # happen without holding the scheduler condition. Reconcile after
+            # re-entering the critical section; the scheduler thread may have
+            # collected the job already in the meantime.
+            with self._condition:
+                if running and job in self._running:
+                    finished = self._collect_finished_locked()
+                    if finished and not self._shutting_down:
+                        self._retry_blocked_locked()
+                    if not self._shutting_down:
+                        self._start_ready_jobs_locked()
+                self._condition.notify_all()
+
+    def _discard_pending_locked(self, job: LocalJob) -> bool:
+        """Remove a pending job from every queue and reverse dependency edge."""
+        removed = False
+        for queue in (self._ready, self._blocked):
+            while True:
+                try:
+                    queue.remove(job)
+                except ValueError:
+                    break
+                removed = True
+        if job in self._waiting:
+            del self._waiting[job]
+            removed = True
+
+        # A waiting job is indexed under each unfinished dependency. Remove
+        # those reverse edges now so a later dependency completion cannot
+        # requeue the canceled job. Keep the job's own dependent list intact;
+        # _mark_failed_locked consumes it to fail descendants transitively.
+        for dependency, dependents in tuple(self._dependents.items()):
+            if dependency is job or job not in dependents:
+                continue
+            self._dependents[dependency] = [dependent for dependent in dependents if dependent is not job]
+            if not self._dependents[dependency]:
+                del self._dependents[dependency]
+        return removed
 
     def _run(self) -> None:
         while True:

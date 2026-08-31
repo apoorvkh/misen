@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 
@@ -17,6 +18,7 @@ from misen.utils.work_unit import WorkUnit
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from pathlib import Path
+    from typing import Any
 
     from misen.task_metadata import Resources
     from misen.workspace import Workspace
@@ -171,6 +173,138 @@ def test_failed_job_transitively_fails_dependents(monkeypatch: pytest.MonkeyPatc
     assert launched == [parent]
     assert child.state() == grandchild.state() == "failed"
     assert not scheduler._waiting
+
+
+def test_cancel_ready_job_removes_it_and_fails_descendants(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = _scheduler(monkeypatch)
+    launched = _record_launches(scheduler, monkeypatch)
+    parent = _job(0)
+    child = _job(1, dependencies=[parent])
+    grandchild = _job(2, dependencies=[child])
+
+    for job in (parent, child, grandchild):
+        scheduler.submit(job)
+    parent.cancel()
+    parent.cancel()
+    with scheduler._condition:
+        scheduler._tick_locked()
+
+    assert launched == []
+    assert parent.state() == child.state() == grandchild.state() == "failed"
+    assert parent.failure.reason == "Canceled by user."
+    assert child.failure.reason == grandchild.failure.reason == "A dependency failed."
+    assert parent not in scheduler._ready
+    assert not scheduler._waiting
+    assert not scheduler._dependents
+
+
+def test_cancel_blocked_job_prevents_later_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = _scheduler(monkeypatch, cpus=2)
+    launched = _record_launches(scheduler, monkeypatch)
+    running = _job(0)
+    blocked = _job(1, cpus=2)
+
+    scheduler.submit(running)
+    with scheduler._condition:
+        scheduler._tick_locked()
+    scheduler.submit(blocked)
+    with scheduler._condition:
+        scheduler._tick_locked()
+        assert blocked in scheduler._blocked
+
+    blocked.cancel()
+    running._cached_state = "done"
+    with scheduler._condition:
+        scheduler._tick_locked()
+
+    assert launched == [running]
+    assert blocked.state() == "failed"
+    assert blocked.failure.reason == "Canceled by user."
+    assert blocked not in scheduler._blocked
+
+
+def test_cancel_waiting_job_detaches_it_from_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = _scheduler(monkeypatch)
+    launched = _record_launches(scheduler, monkeypatch)
+    parent = _job(0)
+    canceled = _job(1, dependencies=[parent])
+    descendant = _job(2, dependencies=[canceled])
+
+    for job in (parent, canceled, descendant):
+        scheduler.submit(job)
+    canceled.cancel()
+    with scheduler._condition:
+        scheduler._tick_locked()
+        parent._cached_state = "done"
+        scheduler._tick_locked()
+
+    assert launched == [parent]
+    assert canceled.state() == descendant.state() == "failed"
+    assert canceled.failure.reason == "Canceled by user."
+    assert descendant.failure.reason == "A dependency failed."
+    assert canceled not in scheduler._waiting
+    assert canceled not in scheduler._dependents.get(parent, ())
+
+
+def test_cancel_running_job_stops_outside_condition_and_reclaims_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = _scheduler(monkeypatch, cpus=1)
+    parent = _job(0)
+    child = _job(1, dependencies=[parent])
+    process = MagicMock()
+    process.status.pid = 12345
+    process.status.is_active = True
+    stopped = SimpleNamespace(final_result=SimpleNamespace(is_success=False, code=None, signal=15, timed_out=False))
+
+    def stop(grace_seconds: float) -> object:
+        assert not cast("Any", scheduler._condition)._is_owned()
+        assert grace_seconds == local_module._SHUTDOWN_TERM_GRACE_S
+        process.status.is_active = False
+        return stopped
+
+    process.stop.side_effect = stop
+
+    def launch(
+        _: local_module._LocalScheduler,
+        job: LocalJob,
+        *,
+        cpu_indices: list[int],
+        accelerator_indices: list[int],
+    ) -> None:
+        job.set_process(process, cpu_indices=cpu_indices, accelerator_indices=accelerator_indices)
+
+    monkeypatch.setattr(type(scheduler), "_launch_job", launch)
+    scheduler.submit(parent)
+    scheduler.submit(child)
+    with scheduler._condition:
+        scheduler._tick_locked()
+
+    parent.cancel()
+    parent.cancel()
+
+    process.stop.assert_called_once_with(local_module._SHUTDOWN_TERM_GRACE_S)
+    assert parent.state() == child.state() == "failed"
+    assert parent.failure.reason == "Canceled by user."
+    assert child.failure.reason == "A dependency failed."
+    assert parent not in scheduler._running
+    assert scheduler.available_budget.cpus == 1
+    assert scheduler.available_cpu_indices == [0]
+
+
+def test_cancel_terminal_job_is_a_noop() -> None:
+    done = _job(0)
+    failed = _job(1)
+    done._cached_state = "done"
+    failed.mark_failed(reason="original failure")
+
+    done.cancel()
+    failed.cancel()
+
+    assert done.state() == "done"
+    assert done.failure.reason is None
+    assert failed.state() == "failed"
+    assert failed.failure.reason == "original failure"
 
 
 def test_log_finalization_failure_only_fails_affected_job(
