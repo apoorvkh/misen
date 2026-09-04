@@ -92,7 +92,9 @@ scheduler and coordinator, and every rank hosts one worker. `LocalExecutor`
 and `InProcessExecutor` intentionally remain single-node executors.
 This is intra-work-unit parallelism: the executor still schedules the Misen
 DAG as separate work units, and each Dask-backed work unit owns an isolated
-temporary cluster rather than sharing a global worker pool.
+temporary runtime. When `SkyPilotExecutor.pool` is configured, SkyPilot may
+reuse the underlying worker cluster after one work unit exits; live Dask
+runtimes are never shared between work units.
 
 To discover the resources allotted to a task at runtime, read what the
 runtime sees: `os.sched_getaffinity(0)` for CPU cores and the accelerator's

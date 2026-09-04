@@ -291,6 +291,8 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
             "gcp/us-central1",
             "--executor.name-prefix",
             "research",
+            "--executor.pool",
+            "misen-dev",
             "list",
         ],
     )
@@ -299,6 +301,7 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
     assert isinstance(executor, SkyPilotExecutor)
     assert executor.infra == "gcp/us-central1"
     assert executor.name_prefix == "research"
+    assert executor.pool == "misen-dev"
 
 
 def test_resolve_experiment_reference_accepts_instance(monkeypatch, tmp_path) -> None:

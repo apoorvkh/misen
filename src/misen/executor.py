@@ -53,6 +53,8 @@ class _JobRecord(msgspec.Struct):
     submission_id: str = ""
     deadline_minutes: int = 0
     version: Literal[1] = 1
+    request_id: str | None = None
+    native_name: str | None = None
 
 
 class Executor(Configurable, Generic[JobT]):
@@ -304,12 +306,25 @@ class Executor(Configurable, Generic[JobT]):
         if self._job_class is None:
             return self._dispatch(work_unit, dependencies, workspace, snapshot)
         snapshot_key = getattr(snapshot, "snapshot_key", None)
-        key = TaskHash.from_object((self, work_unit.root.task_hash(), work_unit.resources, snapshot_key)).b32()
+        key = TaskHash.from_object(
+            (self._job_key_identity(), work_unit.root.task_hash(), work_unit.resources, snapshot_key)
+        ).b32()
         with workspace.lock("job", key).context():
-            if (job := self._restore_job(work_unit, workspace, key)) is not None and job.state() not in (
-                "done",
-                "failed",
-            ):
+            job = self._restore_job(work_unit, workspace, key)
+            if job is not None:
+                previous_record = job._record()  # noqa: SLF001
+                try:
+                    restored_state = job.state()
+                finally:
+                    # A backend may resolve a provisional native identity
+                    # before a later part of its status query fails. Preserve
+                    # only an actual transition while the record lock is held.
+                    if job._record() != previous_record:  # noqa: SLF001
+                        self._record_job(job, workspace, key)
+            else:
+                restored_state = None
+            if job is not None and restored_state not in ("done", "failed"):
+                job._bind_record(workspace, key)  # noqa: SLF001
                 logger.info("Reattached %s (job_id=%s).", work_unit_label(work_unit), job.job_id)
                 return job
             job = self._dispatch(work_unit, dependencies, workspace, snapshot)
@@ -318,7 +333,12 @@ class Executor(Configurable, Generic[JobT]):
             except Exception as exc:
                 msg = f"Accepted {job.label}, but could not persist its durable job record: {exc}"
                 raise SubmissionError(msg, submitted_jobs=(job,)) from exc
+            job._bind_record(workspace, key)  # noqa: SLF001
             return job
+
+    def _job_key_identity(self) -> object:
+        """Return the executor identity used by durable reattachment keys."""
+        return self
 
     def _restore_job(self, work_unit: WorkUnit, workspace: Workspace, key: str) -> JobT | None:
         """Restore a backend job record, or return ``None`` when absent."""
@@ -360,7 +380,16 @@ class Job(ABC):
     bounded polling, failure diagnostics, and terminal log finalization.
     """
 
-    __slots__ = ("_failure_reason", "_log_finalized", "_unknown_since", "job_id", "log_path", "work_unit")
+    __slots__ = (
+        "_failure_reason",
+        "_log_finalized",
+        "_record_key",
+        "_record_workspace",
+        "_unknown_since",
+        "job_id",
+        "log_path",
+        "work_unit",
+    )
 
     unknown_state_timeout_s: ClassVar[float] = 60.0
 
@@ -381,7 +410,38 @@ class Job(ABC):
         self.log_path = log_path
         self._failure_reason: str | None = None
         self._log_finalized = False
+        self._record_key: str | None = None
+        self._record_workspace: Workspace | None = None
         self._unknown_since: float | None = None
+
+    def _bind_record(self, workspace: Workspace, key: str) -> None:
+        """Remember where this durable job handle is persisted."""
+        self._record_workspace = workspace
+        self._record_key = key
+
+    def _refresh_record(self) -> None:
+        """Persist a native-identity transition without clobbering a replacement."""
+        if self._record_workspace is None or self._record_key is None:
+            return
+        workspace = self._record_workspace
+        name = f"{self._record_key}.json"
+        with workspace.lock("job", self._record_key).context():
+            try:
+                current = msgspec.json.decode(workspace.read_job_file("jobs", name), type=_JobRecord)
+            except FileNotFoundError as exc:
+                msg = f"Durable job record {self._record_key!r} disappeared during an identity transition."
+                raise StorageError(msg) from exc
+            except msgspec.DecodeError as exc:
+                msg = f"Invalid durable job record {self._record_key}: {exc}"
+                raise StorageError(msg) from exc
+            if current.job_id != self.job_id:
+                logger.info(
+                    "Skipped stale durable-record refresh for job_id=%s; current job_id=%s.",
+                    self.job_id,
+                    current.job_id,
+                )
+                return
+            workspace.put_job_file("jobs", name, msgspec.json.encode(self._record()))
 
     @property
     def root(self) -> Task:

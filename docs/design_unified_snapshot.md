@@ -239,14 +239,16 @@ package).
 - **SkyPilotExecutor (implemented first adapter)**: SkyPilot provisions or
   selects compute on its supported clouds and clusters and owns the durable
   managed-job lifecycle; Misen's
-  workspace remains the data plane. The adapter eagerly submits one managed
-  job per pending work unit and implements arbitrary DAG dependencies with
-  durable workspace state files; independent branches run concurrently, while
-  descendants may provision before their gates open. Multi-node requests use
-  SkyPilot `num_nodes`. Work units that bind `DASK_CLIENT` receive one private
-  Dask worker per node, with the scheduler and task coordinator on rank 0;
-  without that sentinel, the Misen payload runs only on rank 0 and user code
-  orchestrates the other nodes. The Dask scheduler uses the first
+  workspace remains the data plane. Without a pool, the adapter eagerly submits
+  one managed job per pending work unit and implements arbitrary DAG
+  dependencies with durable workspace state files; independent branches run
+  concurrently, while descendants may provision before their gates open. With
+  a pool, pending work units must be dependency-independent so an exclusive
+  worker cannot be occupied by a descendant waiting for its parent. Multi-node
+  requests use SkyPilot `num_nodes`. Work units that bind `DASK_CLIENT` receive
+  one private Dask worker per node, with the scheduler and task coordinator on
+  rank 0; without that sentinel, the Misen payload runs only on rank 0 and user
+  code orchestrates the other nodes. The Dask scheduler uses the first
   `SKYPILOT_NODE_IPS` address and configurable `dask_scheduler_port` on the
   allocation's trusted private network. The adapter
   requires `snapshot=true`, `prewarm_envs=false`, a non-path workspace

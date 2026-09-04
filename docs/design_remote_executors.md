@@ -30,25 +30,25 @@ logged-in remote SkyPilot API server owns its provider packages and
 configuration, and its Misen clients need only `misen[skypilot]`:
 
 ```bash
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13"
 # Or select a different set:
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
-uv pip install "misen[skypilot]" "skypilot[oci,lambda,runpod]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13"
+uv pip install "misen[skypilot]" "skypilot[oci,lambda,runpod]>=0.13"
 
 # Azure currently needs SkyPilot's documented uv prerequisite:
 uv pip install --prerelease allow "azure-cli<2.87.0"
-uv pip install "misen[skypilot]" "skypilot[azure]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[azure]>=0.13"
 
 sky check
 
 # From a Misen source checkout:
 uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[runpod]>=0.12.1" sky check runpod
+uv run --extra skypilot --with "skypilot[runpod]>=0.13" sky check runpod
 ```
 
 The SDK must be installed in the same environment that runs Misen, not only
 as an isolated `uv tool`, because the executor loads `sky` in-process.
-The integration requires SkyPilot 0.12.1 or newer. Misen supports Python
+The integration requires SkyPilot 0.13 or newer. Misen supports Python
 3.11–3.14; individual SkyPilot releases and provider extras may impose
 additional constraints. `misen[skypilot]` includes the provider-neutral SDK,
 but no provider clients.
@@ -129,27 +129,40 @@ reattachment, and command/log wrapping are likely candidates.
 ## SkyPilot MVP contract
 
 The current `SkyPilotExecutor` uses SkyPilot Python SDK interfaces available
-since version 0.12.1:
+in version 0.13 and newer:
 
 - Each pending Misen work unit becomes its own SkyPilot managed job. Misen
-  submits them eagerly, without waiting for parent jobs to finish, so arbitrary
-  DAG shapes are supported and independent branches provision and execute in
-  parallel.
+  submits its asynchronous launch request eagerly, without waiting for
+  managed-job ID assignment or for parent jobs to finish. Without a pool,
+  arbitrary DAG shapes are supported and independent branches can provision
+  and execute in parallel when backend capacity permits. Request IDs are persisted
+  first; polling resolves and durably records managed IDs. The generated launch
+  name provides a recovery path if SkyPilot has already expired the request
+  metadata.
+- An optional `pool` sends those jobs to an existing SkyPilot worker pool.
+  Reusing a worker preserves its node-local Misen environment store and avoids
+  repeated provisioning after warm-up. The pool remains SkyPilot-owned: Misen
+  neither creates nor tears it down, and each work unit's resource request must
+  fit the pool worker shape. Pending work units must be dependency-independent
+  because a descendant admitted first could occupy an exclusive worker while
+  its parent waits for pool capacity; already-cached parents are fine. SkyPilot
+  currently labels pools beta and its pool CLI experimental.
 - Managed Dask is an orthogonal, intra-work-unit layer. Each Dask-backed work
   unit owns a temporary cluster inside its one SkyPilot allocation; Dask does
-  not schedule Misen's work-unit DAG, and ready work units do not share a
-  worker pool.
-- Dependencies are submission-scoped state files in the workspace. A worker
-  waits for every parent to publish `done` before entering user code and
-  publishes its own terminal state on exit. Once the jobs are accepted, these
-  gates remain usable after the submitter exits; no long-lived Misen DAG
-  controller is required for ordinary user-code success or failure.
-- Eager submission has a cost tradeoff: a descendant can provision while its
-  worker is blocked on dependency markers. An infrastructure or bootstrap
-  failure before the parent worker starts cannot publish a marker itself.
-  Misen publishes one when the submitting process observes the terminal
-  SkyPilot status; without that observation, descendants wait until their
-  cumulative command timeout.
+  not schedule Misen's work-unit DAG, and work units never share a live Dask
+  runtime. SkyPilot may reuse the underlying worker cluster serially when
+  `pool` is configured.
+- For non-pooled DAGs, dependencies are submission-scoped state files in the
+  workspace. A worker waits for every parent to publish `done` before entering
+  user code and publishes its own terminal state on exit. Once the jobs are
+  accepted, these gates remain usable after the submitter exits; no long-lived
+  Misen DAG controller is required for ordinary user-code success or failure.
+- For non-pooled dependent DAGs, eager submission has a cost tradeoff: a
+  descendant can provision while its worker is blocked on dependency markers.
+  An infrastructure or bootstrap failure before the parent worker starts cannot
+  publish a marker itself. Misen publishes one when the submitting process
+  observes the terminal SkyPilot status; without that observation, descendants
+  wait until their cumulative command timeout.
 - Multi-node requests are passed to SkyPilot as `num_nodes`. A work unit that
   binds `DASK_CLIENT` runs a ranked wrapper on every node. It branches on
   `SKYPILOT_NODE_RANK`: rank 0 hosts the scheduler and sole Misen task
@@ -176,8 +189,9 @@ since version 0.12.1:
   releases the remote workers, and a role failure on any rank fails the
   SkyPilot task. Non-head diagnostics may be available primarily in
   SkyPilot's managed-job logs rather than Misen's rank-0 job log.
-- `snapshot=true` and `prewarm_envs=false` are required. Ephemeral workers
-  fetch and materialize the submitted snapshot themselves.
+- `snapshot=true` and `prewarm_envs=false` are required. Workers fetch and
+  materialize the submitted snapshot themselves; a pooled worker can reuse its
+  content-keyed environment materialization across managed jobs.
 - Worker images must provide Bash and GNU `timeout`. Unless uv, Pixi (when
   needed), and dependency caches are pre-provisioned, bootstrap also requires
   outbound access to install tools and the project's locked dependencies.
@@ -198,25 +212,34 @@ since version 0.12.1:
 - A Misen workspace job log reflects the current worker attempt. Prior-attempt,
   provisioning, early-bootstrap, and non-head diagnostics may remain only in
   SkyPilot's managed-job logs.
-- One bulk SkyPilot queue request maps managed-job states into Misen's
+- One direct request-status query resolves outstanding launch requests, then
+  one bulk SkyPilot queue request maps assigned managed jobs into Misen's
   `pending`, `running`, `done`, `failed`, and `unknown` lifecycle. Terminal
   observations are cached, and the workspace remains the success authority:
   a committed Misen result stays successful if SkyPilot reports the job as
   failed. Status queries refresh an autostopped managed-jobs controller and
   publish terminal markers for failures that never reached a worker.
+- Misen cancellation waits for an unresolved launch request to assign its
+  managed-job ID before cancelling that job. Raw SkyPilot API cancellation does
+  not guarantee that the launch handler has quiesced, so externally cancelled
+  requests receive a failed worker gate and a 60-second late-ID reconciliation
+  window; an exceptionally late worker may still provision before the gate
+  makes it exit.
 
-This decomposition preserves Misen's arbitrary DAG semantics without claiming
-that SkyPilot exposes a native arbitrary-DAG managed job. Its deliberate
-tradeoffs are eager descendant provisioning and the need for status observation
-to propagate failures that happen before Misen code starts.
+Without a pool, this decomposition preserves Misen's arbitrary DAG semantics
+without claiming that SkyPilot exposes a native arbitrary-DAG managed job. Its
+deliberate tradeoffs are eager descendant provisioning and the need for status
+observation to propagate failures that happen before Misen code starts.
 
 ## Authentication and trust
 
-There are two independent credential paths:
+There are several separate credential relationships:
 
-- The Misen process authenticates to SkyPilot; the local or remote SkyPilot
-  API server authenticates to each compute backend so it can provision and
-  query compute.
+- The Misen process authenticates to SkyPilot and to its configured workspace;
+  the local or remote SkyPilot API server authenticates to each compute backend
+  so it can provision and query compute. For an S3 workspace, credentials in
+  `~/.aws/credentials` can be loaded into the submitter environment with AWS
+  CLI v2: `eval "$(aws configure export-credentials --profile default --format env)"`.
 - The worker authenticates directly to the Misen workspace bucket so it can
   fetch snapshots and payloads and publish results and logs.
 

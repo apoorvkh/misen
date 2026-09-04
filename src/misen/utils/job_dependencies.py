@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
     from misen.workspace import Workspace
 
-__all__ = ["dependency_state_name", "run_with_dependencies"]
+__all__ = ["dependency_state_name", "publish_dependency_state", "run_with_dependencies"]
 
 _DONE = b"done"
 _FAILED = b"failed"
@@ -42,8 +42,36 @@ def _read(workspace: Workspace, submission_id: str, job_id: str) -> bytes:
     return _retry_storage(lambda: workspace.read_job_file(submission_id, dependency_state_name(job_id)))
 
 
-def _publish(workspace: Workspace, submission_id: str, job_id: str, state: bytes) -> None:
-    _retry_storage(lambda: workspace.put_job_file(submission_id, dependency_state_name(job_id), state))
+def publish_dependency_state(workspace: Workspace, submission_id: str, job_id: str, state: bytes) -> bytes:
+    """Publish a terminal dependency state while preserving committed success.
+
+    Workers and controller-side status recovery share this transition. The
+    workspace lock prevents their read/write windows from racing. Terminal
+    state is immutable once published, so no consumer can observe ``failed``
+    and later have the same dependency flip to ``done`` (or vice versa).
+
+    Returns:
+        The terminal state that remains authoritative after the transition.
+    """
+    if state not in {_DONE, _FAILED}:
+        msg = f"Invalid dependency state {state!r}."
+        raise ValueError(msg)
+    name = dependency_state_name(job_id)
+    lock_key = f"state-{submission_id}-{job_id}"
+    with workspace.lock("job", lock_key).context():
+        try:
+            current = _read(workspace, submission_id, job_id)
+        except FileNotFoundError:
+            current = None
+        if current in (_DONE, _FAILED):
+            return current
+        _retry_storage(lambda: workspace.put_job_file(submission_id, name, state))
+        return state
+
+
+def _raise_conflicting_completion(job_id: str) -> None:
+    msg = f"Job {job_id} completed after another attempt was recorded as failed."
+    raise ExecutionError(msg)
 
 
 def _await_dependencies(
@@ -90,7 +118,10 @@ def run_with_dependencies(
             previous_state = _read(workspace, submission_id, job_id)
             if previous_state == _DONE:
                 return
-            if previous_state != _FAILED:
+            if previous_state == _FAILED:
+                msg = f"Job {job_id} was already recorded as failed by another attempt."
+                raise ExecutionError(msg)
+            if previous_state not in (_DONE, _FAILED):
                 msg = f"Job {job_id} has an invalid persisted state marker."
                 raise ExecutionError(msg)
         except FileNotFoundError:
@@ -98,7 +129,9 @@ def run_with_dependencies(
         _await_dependencies(workspace, dependencies)
         execute()
         completed = True
-        _publish(workspace, submission_id, job_id, _DONE)
+        published = publish_dependency_state(workspace, submission_id, job_id, _DONE)
+        if published != _DONE:
+            _raise_conflicting_completion(job_id)
     except BaseException as exc:
         if completed:
             try:
@@ -106,8 +139,9 @@ def run_with_dependencies(
                     return
             except (FileNotFoundError, StorageError, OSError):
                 pass
-        try:
-            _publish(workspace, submission_id, job_id, _FAILED)
-        except Exception as marker_exc:  # noqa: BLE001 -- retain the original worker failure
-            exc.add_note(f"Additionally, publishing the failed dependency marker failed: {marker_exc}")
+        if not completed:
+            try:
+                publish_dependency_state(workspace, submission_id, job_id, _FAILED)
+            except Exception as marker_exc:  # noqa: BLE001 -- retain the original worker failure
+                exc.add_note(f"Additionally, publishing the failed dependency marker failed: {marker_exc}")
         raise

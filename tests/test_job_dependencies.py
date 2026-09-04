@@ -13,7 +13,7 @@ import pytest
 import misen.utils.job_dependencies as dependency_module
 from misen import Task, meta
 from misen.exceptions import ExecutionError, StorageError
-from misen.utils.job_dependencies import dependency_state_name, run_with_dependencies
+from misen.utils.job_dependencies import dependency_state_name, publish_dependency_state, run_with_dependencies
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.memory import InMemoryWorkspace
 
@@ -123,6 +123,18 @@ def test_user_failure_publishes_failure_marker(tmp_path: Path) -> None:
     assert workspace.read_job_file("submission", dependency_state_name("child")) == b"failed"
 
 
+def test_first_terminal_dependency_state_is_immutable(tmp_path: Path) -> None:
+    workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
+
+    assert publish_dependency_state(workspace, "submission", "job", b"failed") == b"failed"
+    assert publish_dependency_state(workspace, "submission", "job", b"done") == b"failed"
+    assert workspace.read_job_file("submission", dependency_state_name("job")) == b"failed"
+
+    assert publish_dependency_state(workspace, "submission", "other", b"done") == b"done"
+    assert publish_dependency_state(workspace, "submission", "other", b"failed") == b"done"
+    assert workspace.read_job_file("submission", dependency_state_name("other")) == b"done"
+
+
 def test_work_unit_payload_serializes_dependency_gate(tmp_path: Path) -> None:
     workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
     parent = WorkUnit(root=Task(_write_probe, path=str(tmp_path / "unused")), dependencies=set())
@@ -184,7 +196,7 @@ def test_coordination_io_retries_transient_storage_failures(tmp_path: Path, monk
     assert delegate.read_job_file("submission", dependency_state_name("child")) == b"done"
 
 
-def test_failed_success_marker_publishes_failure_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_failed_success_marker_does_not_publish_false_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     delegate = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
     workspace = MagicMock(spec=delegate, wraps=delegate)
 
@@ -206,7 +218,26 @@ def test_failed_success_marker_publishes_failure_state(tmp_path: Path, monkeypat
             dependencies=(),
         )
 
-    assert delegate.read_job_file("submission", dependency_state_name("child")) == b"failed"
+    with pytest.raises(FileNotFoundError):
+        delegate.read_job_file("submission", dependency_state_name("child"))
+
+
+def test_failed_attempt_cannot_rerun_and_flip_to_success(tmp_path: Path) -> None:
+    workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
+    workspace.put_job_file("submission", dependency_state_name("child"), b"failed")
+    executions: list[str] = []
+
+    with pytest.raises(ExecutionError, match="already recorded as failed"):
+        run_with_dependencies(
+            lambda: executions.append("child"),
+            workspace=workspace,
+            submission_id="submission",
+            job_id="child",
+            dependencies=(),
+        )
+
+    assert executions == []
+    assert workspace.read_job_file("submission", dependency_state_name("child")) == b"failed"
 
 
 def test_ambiguous_successful_write_preserves_done_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

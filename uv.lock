@@ -1512,7 +1512,7 @@ requires-dist = [
     { name = "processkit-py", specifier = ">=1.5.0,<2" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=13.7.0" },
-    { name = "skypilot", marker = "extra == 'skypilot'", specifier = ">=0.12.1" },
+    { name = "skypilot", marker = "extra == 'skypilot'", specifier = ">=0.13" },
     { name = "textual", specifier = ">=0.78.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "tyro", specifier = ">=1.0.0" },

@@ -117,19 +117,19 @@ Misen (rather than only as an isolated `uv tool`), compose it with the
 upstream extras for the compute backends used by a local SkyPilot API server,
 then verify provider access. A configured remote SkyPilot API server owns its
 provider dependencies, so its Misen clients need only the base extra. The
-integration declares `skypilot>=0.12.1` without an upper bound; compatibility
+integration declares `skypilot>=0.13` without an upper bound; compatibility
 CI tests both that minimum and the newest stable release on Python 3.14. Misen
 supports Python 3.11–3.14; individual SkyPilot releases and provider extras may
 impose additional constraints.
 
 ```bash
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13"
 # For example, instead target existing Kubernetes, SSH, and Slurm clusters:
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13"
 sky check
 # From a Misen source checkout:
 uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[kubernetes,ssh,slurm]>=0.12.1" sky check
+uv run --extra skypilot --with "skypilot[kubernetes,ssh,slurm]>=0.13" sky check
 ```
 
 `infra` accepts any compute infrastructure registered by the installed
@@ -141,12 +141,23 @@ for the provider matrix. Compute selection is independent of workspace
 storage: every worker may use any supported `CloudWorkspace` object store it
 can reach and authenticate to.
 
-The implementation eagerly submits one managed job per pending work unit and
-uses durable workspace markers to gate dependencies, so arbitrary DAGs are
-supported and independent branches run in parallel. Descendants may provision
-while waiting; failures before a worker can publish its marker propagate only
-when the submitting Misen process observes SkyPilot status, or at the
-dependent job's cumulative timeout. Multi-node requests use SkyPilot
+Set `pool` to the name of an existing [SkyPilot worker
+pool](https://docs.skypilot.ai/en/latest/examples/pools.html) to route every
+managed job through that pool. Reused workers preserve Misen's node-local
+environment store, reducing cold starts after the first job. Each requested
+resource shape must fit a pool worker, and fixed workers remain billable until
+the pool is terminated. Pooled pending work units must be
+dependency-independent (already-cached parents are fine), preventing a
+descendant from occupying an exclusive worker while its parent waits for
+capacity. SkyPilot currently labels pools beta and the CLI experimental.
+
+Without a pool, the implementation eagerly submits one managed job per pending
+work unit and uses durable workspace markers to gate dependencies, so arbitrary
+DAGs are supported and independent branches can run in parallel when backend
+capacity permits. Descendants may provision while waiting; failures before a
+worker can publish its marker propagate only when the submitting Misen process
+observes SkyPilot status, or at the dependent job's cumulative timeout.
+Multi-node requests use SkyPilot
 `num_nodes`. A work unit that binds `DASK_CLIENT` gets one private Dask
 scheduler on rank 0, one worker per node, and one rank-0 task coordinator;
 without the sentinel, the Misen payload runs only on rank 0 and user code may
@@ -161,6 +172,12 @@ environment must include `distributed`. The adapter requires worker-side snapsho
 `CloudWorkspace` with a relative `cache_dir`. See the
 [remote executor design](design_remote_executors.md) for the control/data-plane
 contract and planned adapters.
+
+Submission persists SkyPilot's asynchronous request ID without waiting for
+managed-job ID assignment. Polling batches unresolved request statuses and
+durably records managed IDs as requests complete. A server-side launch failure
+therefore appears as a failed job during polling; immediate client and transport
+failures still raise `SubmissionError`.
 
 ::: misen.executors.skypilot.SkyPilotExecutor
     options:

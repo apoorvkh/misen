@@ -285,27 +285,27 @@ provider extras needed by the SkyPilot environment that actually provisions
 compute. With SkyPilot's default local API server, that is Misen's environment;
 a logged-in remote API server owns its own provider packages and configuration,
 so the Misen client can use the base extra alone. The integration declares
-`skypilot>=0.12.1` without an upper bound; compatibility CI tests both that
+`skypilot>=0.13` without an upper bound; compatibility CI tests both that
 minimum and the newest stable release on Python 3.14. Misen supports Python
 3.11–3.14; individual SkyPilot releases and provider extras may impose
 additional constraints:
 
 ```bash
 # AWS and GCP
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13"
 
 # One or more other backends, selected independently
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13"
 
 # Azure currently needs SkyPilot's documented uv prerequisite
 uv pip install --prerelease allow "azure-cli<2.87.0"
-uv pip install "misen[skypilot]" "skypilot[azure]>=0.12.1"
+uv pip install "misen[skypilot]" "skypilot[azure]>=0.13"
 
 sky check
 
 # Developing this repository
 uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[runpod]>=0.12.1" sky check runpod
+uv run --extra skypilot --with "skypilot[runpod]>=0.13" sky check runpod
 ```
 
 Provider selection is passed through unchanged in `executor.infra`:
@@ -337,15 +337,15 @@ target with multi-node support. Some targets also cannot host SkyPilot's
 managed-jobs controller themselves, so SkyPilot may require another enabled,
 controller-capable infrastructure.
 
-Then pair the executor with a `CloudWorkspace`. For example, this provisions
-AWS compute while storing Misen's snapshots, payloads, results, locks, and logs
-in S3:
+Then pair the executor with a `CloudWorkspace`. For example, this uses an
+existing AWS pool while storing Misen's snapshots, payloads, results, locks,
+and logs in S3:
 
 ```toml
 [executor]
 type = "skypilot"
 infra = "aws/us-east-1"
-use_spot = true
+pool = "misen-dev"
 snapshot = true
 prewarm_envs = false
 dask_startup_timeout = 600
@@ -366,6 +366,60 @@ prefix = "experiments"
 cache_dir = ".cache/misen"
 ```
 
+`pool` is optional. When set, Misen sends every managed job to that existing
+[SkyPilot pool](https://docs.skypilot.ai/en/latest/examples/pools.html), so a
+reused worker retains its node-local `/tmp/misen-env-store-<user>` and avoids
+provisioning a fresh instance. The pool itself still pays provisioning when it
+is created or scaled, and the first job on each worker still pays Misen's
+environment materialization cost. A one-worker pool for a CPU smoke workload
+can be created with:
+
+```yaml
+# misen-pool.yaml
+pool:
+  workers: 1
+
+resources:
+  infra: aws/us-east-1
+  cpus: 1+
+  memory: 2+
+```
+
+```bash
+uv run sky jobs pool apply -p misen-dev misen-pool.yaml -y
+# A fixed worker remains billable until the pool is removed.
+uv run sky jobs pool down misen-dev -y
+```
+
+Each job's requested resource shape must fit the pool worker. Use separate
+pools for incompatible shapes, or omit `pool` to retain ordinary per-job
+provisioning. Misen currently accepts a pool only when the pending work units
+are dependency-independent (parents that are already cached are fine): pool
+workers are exclusive, and admitting a descendant before its pending parent
+could otherwise deadlock a finite pool. Run dependent stages separately or
+omit `pool` for a dependent DAG. SkyPilot currently labels pools beta and the
+CLI experimental.
+
+SkyPilot [launch calls are
+asynchronous](https://docs.skypilot.ai/en/latest/reference/async.html). Misen
+persists each returned request ID immediately, allowing independent work units
+to submit without waiting for managed-job ID assignment. Status polling batches
+active request lookups; once a request succeeds, Misen resolves and durably
+records its managed-job ID before querying the managed-job queue. Immediate
+client or HTTP submission errors still raise `SubmissionError`, while a
+server-side request failure is reported as a failed job during polling (and
+therefore as `JobFailedError` for a blocking run). The generated launch name is
+also stored so a job can be recovered after SkyPilot expires its request
+metadata.
+
+Cancel unresolved jobs through Misen (for example, with `c` in the task
+monitor): Misen waits for the launch result and then cancels the assigned
+managed-job ID, avoiding SkyPilot's non-quiescent raw request-cancellation
+race. If a launch request is cancelled externally, Misen publishes a failed
+worker gate and spends 60 seconds reconciling any late-assigned ID. An ID that
+appears still later can provision before the gated worker exits, so direct
+`sky api cancel` is not the preferred cancellation path for Misen jobs.
+
 For GCP, use an infrastructure such as `infra = "gcp/us-central1"` and
 `backend = "gcs"`. The configured accelerator names are concrete SkyPilot
 hardware choices, not Misen accelerator types; CPU-only workflows can omit
@@ -384,19 +438,33 @@ through an instance role, service account, or equivalent workload identity.
 `CloudWorkspace.config` is deliberately not copied into worker bootstrap
 commands and cannot be used to carry worker secrets.
 
+The submitting Misen process also needs access to the workspace bucket. If its
+AWS credentials are stored in `~/.aws/credentials`, AWS CLI v2 can export the
+selected profile into the current shell before Misen constructs the
+`CloudWorkspace`:
+
+```bash
+eval "$(aws configure export-credentials --profile default --format env)"
+```
+
+This only configures the submitting process; pooled workers still need their
+own ambient bucket access.
+
 The adapter requires `snapshot = true`, `prewarm_envs = false`, a remotely
-fetchable workspace transport, and a relative workspace `cache_dir`. It
-supports arbitrary Misen DAGs by eagerly submitting one managed job per
-pending work unit. Independent branches run in parallel; each dependent
-worker waits on durable, submission-scoped workspace markers before entering
-user code. This remains durable after submission, but a downstream job may
-provision and incur cost while it waits.
+fetchable workspace transport, and a relative workspace `cache_dir`. Without a
+pool, it supports arbitrary Misen DAGs by eagerly submitting one asynchronous
+launch request per pending work unit. Independent branches can run in parallel
+when the backend has capacity; each dependent worker waits on durable,
+submission-scoped workspace markers before entering user code. This remains
+durable after submission, but a downstream job may provision and incur cost
+while it waits.
 
 DAG parallelism and multi-node task parallelism are separate layers. Misen
 can run independent work units as separate SkyPilot managed jobs at the same
 time. A work unit that binds `DASK_CLIENT` gets its own temporary Dask cluster
 inside its single SkyPilot allocation; Dask does not replace Misen's DAG
-scheduler or share workers between work units.
+scheduler or share a live Dask runtime between work units. A configured
+SkyPilot pool may reuse the underlying worker cluster after that runtime exits.
 
 Multi-node requests use SkyPilot's `num_nodes`. Without `DASK_CLIENT`, the
 Misen payload runs only on rank 0 and user code owns any additional-node
@@ -482,8 +550,9 @@ prints two worker addresses mapped to two distinct hostnames.
 `DASK_CLIENT` requires `nodes > 1`. Misen provisions a private Dask runtime only for pending work units that bind this sentinel. Its client connection opens when the first uncached function resolves the sentinel, is shared by every requesting task in the work unit, and closes when that work unit finishes; task code must not close the client or shut down the cluster. The client represents the work unit's complete fixed allocation, with one Dask worker per node. Every task using it in the same work unit must therefore request exactly the work unit's node and accelerator topology. `cpus`, `memory`, and `accelerators` are per-node quantities.
 
 This is intra-work-unit parallelism, independent of Misen's DAG scheduling.
-Two ready Dask-backed work units can run concurrently as two separate backend
-allocations; workers are never pooled or shared between them.
+Two ready Dask-backed work units run as separate managed jobs and never share
+a live Dask runtime. With `pool` configured, SkyPilot may schedule them on
+different pool workers concurrently or reuse a worker cluster serially.
 
 Gather futures into ordinary serializable values before returning—Dask clients and futures are tied to the live allocation and are not task results. `SlurmExecutor` and `SkyPilotExecutor` realize `DASK_CLIENT`; `LocalExecutor` and `InProcessExecutor` remain single-node executors and reject it. Unit tests can call the task function directly with a local Dask client.
 
