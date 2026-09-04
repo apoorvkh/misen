@@ -1058,6 +1058,10 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
         if not isinstance(request_id, str) or not request_id:
             msg = f"SkyPilot returned an invalid launch request ID for job {name!r}: {request_id!r}."
             raise SubmissionError(msg)
+        # SkyPilot 0.13 returns ``sky.server.common.RequestId``, a ``str``
+        # subclass that msgspec deliberately does not encode as a JSON string.
+        # Keep SDK-specific scalar types out of Misen's durable job records.
+        request_id = str(request_id)
 
         logger.info("Submitted SkyPilot launch request for %s (request_id=%s).", name, request_id)
         return SkyPilotJob(

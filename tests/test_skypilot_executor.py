@@ -92,6 +92,10 @@ class _FakeTask:
         self.api_server_access = kwargs["api_server_access"]
 
 
+class _FakeRequestId(str):
+    """Match SkyPilot 0.13's non-JSON-native RequestId string subclass."""
+
+
 def _fake_sky(
     *,
     launch_results: Sequence[object] = (([42], None),),
@@ -105,10 +109,10 @@ def _fake_sky(
     request_states: dict[str, object] = {f"launch-request-{index}": status for index, status in enumerate(statuses)}
     launch_count = 0
 
-    def launch(_task: object, *, name: str, pool: str | None) -> str:
+    def launch(_task: object, *, name: str, pool: str | None) -> _FakeRequestId:
         nonlocal launch_count
         del name, pool
-        request_id = f"launch-request-{launch_count}"
+        request_id = _FakeRequestId(f"launch-request-{launch_count}")
         launch_count += 1
         return request_id
 
@@ -603,6 +607,8 @@ def test_pool_is_forwarded_to_managed_job_launch(monkeypatch, tmp_path) -> None:
 
     assert job.managed_job_id is None
     assert job.request_id == "launch-request-0"
+    assert type(job.request_id) is str
+    msgspec.json.encode(job._record())
     assert fake_sky.jobs.launch.call_args.kwargs["pool"] == "misen-dev"
     fake_sky.get.assert_not_called()
 
