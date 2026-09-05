@@ -1,4 +1,4 @@
-"""Owned API sessions and real subprocess cleanup without cloud operations."""
+"""Isolated clients, namespace leases, and opt-in real SDK process cleanup."""
 
 from __future__ import annotations
 
@@ -9,19 +9,24 @@ import os
 import select
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing.connection import Pipe
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import psutil
 import pytest
 
-import misen.utils.skypilot_server as server_module
+import misen.executors.skypilot as executor_module
+import misen.utils.skypilot_broker as broker
+import misen.utils.skypilot_server as server
 from misen import Task, meta
 from misen.exceptions import ConfigError, ExecutionError, SubmissionError
 from misen.executor import Executor
 from misen.executors.skypilot import SkyPilotExecutor, SkyPilotJob
+from misen.utils.hashing import stable_hash
 from misen.utils.skypilot_server import ManagedSkyPilotSession, active_session, managed_session
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.memory import InMemoryWorkspace
@@ -32,54 +37,90 @@ def _task() -> int:
     return 1
 
 
-@pytest.fixture
-def fake_server(monkeypatch, tmp_path):
-    original_start = MagicMock()
-    sky = SimpleNamespace(
-        server=SimpleNamespace(
-            common=SimpleNamespace(
-                is_api_server_local=MagicMock(return_value=True),
-                get_server_url=MagicMock(return_value="http://127.0.0.1:46580"),
-                check_server_healthy_or_start_fn=original_start,
-                check_server_healthy=MagicMock(),
-            )
-        ),
-        skypilot_config=SimpleNamespace(get_nested=MagicMock(return_value=False)),
-        get=MagicMock(return_value=([42], None)),
+def _job(tmp_path, managed_job_id=None):
+    return SkyPilotJob(
+        work_unit=WorkUnit(root=Task(_task), dependencies=set()),
+        job_id="misen-job",
+        managed_job_id=managed_job_id,
+        request_id="launch-request",
+        submission_id="submission",
+        deadline_minutes=1,
+        log_path=tmp_path / "worker.log",
+        workspace=InMemoryWorkspace(),
     )
-    process = MagicMock()
-    process.poll.return_value = None
-    process.stdin = io.BytesIO()
-    process.stdout = io.BytesIO()
-    popen = MagicMock(return_value=process)
-    monkeypatch.setattr(server_module.subprocess, "Popen", popen)
-    monkeypatch.setattr(server_module.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(ManagedSkyPilotSession, "_wait_ready", lambda self, endpoint: None)
-    return SimpleNamespace(sky=sky, process=process, popen=popen, original_start=original_start)
 
 
-def test_session_is_lazy_and_nested_until_outer_exit(monkeypatch):
-    stop = MagicMock()
-    monkeypatch.setattr(ManagedSkyPilotSession, "_stop", stop)
-    executor = SkyPilotExecutor(manage_api_server=True)
-    with executor.session():
-        outer = active_session()
-        assert outer is not None
-        with executor.session():
-            assert active_session() is outer
-        stop.assert_not_called()
-        assert outer.process is None
-    assert outer.closed
+def test_lazy_nested_and_independent_sessions(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    start = MagicMock()
+    monkeypatch.setattr(ManagedSkyPilotSession, "ensure_started", start)
+    with managed_session("first") as first:
+        with managed_session("first") as nested:
+            assert nested is first
+        with managed_session("second") as second:
+            assert second is not first
+            assert active_session() is second
+        assert second.closed
+        assert active_session() is first
+        with ThreadPoolExecutor(max_workers=1) as threads:
+
+            def other_thread():
+                assert active_session() is None
+                with managed_session("first") as concurrent:
+                    assert concurrent is not first
+                    assert concurrent.directory == first.directory
+
+            threads.submit(other_thread).result()
+    assert first.closed
     assert active_session() is None
-    stop.assert_called_once()
+    assert not tmp_path.exists() or not list(tmp_path.iterdir())
+    start.assert_not_called()
 
 
-def test_external_mode_keeps_existing_sdk_behavior():
-    with SkyPilotExecutor().session():
-        assert active_session() is None
+def test_managed_client_never_imports_sky_in_parent(monkeypatch):
+    import_module = MagicMock(side_effect=AssertionError("parent imported SkyPilot"))
+    monkeypatch.setattr(executor_module.importlib, "import_module", import_module)
+    with managed_session() as session:
+        assert executor_module._load_skypilot() is session.client
+    import_module.assert_not_called()
 
 
-def test_blocking_submission_opens_session_through_polling(monkeypatch):
+@pytest.mark.parametrize("name", ["", "../other", "/tmp/foo", "a/b", "x" * 65, "a b", ".", ".."])
+def test_invalid_namespace_rejected(name):
+    with pytest.raises(ValueError, match="api_server_namespace"):
+        SkyPilotExecutor(api_server_namespace=name)
+
+
+def test_namespace_keys_are_distinct_and_external_keys_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    for pool in (None, "misen-dev"):
+        external = SkyPilotExecutor(pool=pool)
+        first = SkyPilotExecutor(pool=pool, manage_api_server=True, api_server_namespace="first")
+        second = SkyPilotExecutor(pool=pool, manage_api_server=True, api_server_namespace="second")
+        assert len({stable_hash(item._job_key_identity()) for item in (external, first, second)}) == 3
+        assert stable_hash(external._job_key_identity()) == stable_hash(
+            SkyPilotExecutor(pool=pool, api_server_namespace="ignored")._job_key_identity()
+        )
+
+
+def test_child_environment_isolated_without_hiding_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("SKYPILOT_API_SERVER_ENDPOINT", "https://ordinary.example")
+    monkeypatch.setenv("SKYPILOT_DB_CONNECTION_URI", "test-database")
+    monkeypatch.setenv("SKYPILOT_SERVICE_ACCOUNT_TOKEN", "test-token")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-credential")
+    original = dict(os.environ)
+    env = server._isolated_environment(tmp_path, "abcd1234", tmp_path / "config.yaml")
+    assert dict(os.environ) == original
+    assert env["HOME"] == original["HOME"]
+    assert env["AWS_ACCESS_KEY_ID"] == "test-credential"
+    assert env["SKY_RUNTIME_DIR"] == str(tmp_path)
+    assert env["SKYPILOT_USER_ID"] == "abcd1234"
+    assert "SKYPILOT_API_SERVER_ENDPOINT" not in env
+    assert "SKYPILOT_SERVICE_ACCOUNT_TOKEN" not in env
+    assert "SKYPILOT_DB_CONNECTION_URI" not in env
+
+
+def test_blocking_submission_scopes_cleanup(monkeypatch):
     def submit(_self, tasks, workspace, *, blocking):
         assert active_session() is not None
         assert blocking is True
@@ -91,171 +132,194 @@ def test_blocking_submission_opens_session_through_polling(monkeypatch):
     assert active_session() is None
 
 
-def test_nonblocking_managed_submission_requires_session():
+def test_nonblocking_requires_matching_session():
+    executor = SkyPilotExecutor(manage_api_server=True, api_server_namespace="first")
     with pytest.raises(ConfigError, match="with executor.session"):
-        SkyPilotExecutor(manage_api_server=True).submit({Task(_task)}, InMemoryWorkspace())
+        executor.submit({Task(_task)}, InMemoryWorkspace())
+    with managed_session("second"), pytest.raises(ConfigError, match="other SkyPilot namespace"):
+        executor.submit({Task(_task)}, InMemoryWorkspace())
 
 
-def test_empty_submission_does_not_start_a_server(fake_server):
-    graph = SkyPilotExecutor(manage_api_server=True).submit(set(), InMemoryWorkspace(), blocking=True)
-    assert not graph.nodes()
-    fake_server.popen.assert_not_called()
+def test_empty_submission_never_starts(monkeypatch):
+    start = MagicMock()
+    monkeypatch.setattr(ManagedSkyPilotSession, "ensure_started", start)
+    assert not SkyPilotExecutor(manage_api_server=True).submit(set(), InMemoryWorkspace(), blocking=True).nodes()
+    start.assert_not_called()
 
 
-def test_concurrent_session_rejected_without_closing_owner():
-    with managed_session():
-        original = active_session()
-        with ThreadPoolExecutor(max_workers=1) as threads:
-
-            def open_session():
-                with managed_session():
-                    pytest.fail("A concurrent process-wide session must be rejected")
-
-            with pytest.raises(ConfigError, match="another thread"):
-                threads.submit(open_session).result()
-        assert active_session() is original
-        assert not original.closed
+def test_failed_startup_closes_bootstrap_pipe(monkeypatch, tmp_path):
+    process = MagicMock(stdin=io.BytesIO(), stdout=io.BytesIO(b'{"error":"SDK lacks isolation"}\n'))
+    monkeypatch.setattr(server.subprocess, "Popen", MagicMock(return_value=process))
+    monkeypatch.setattr(server.select, "select", lambda *args: ([process.stdout], [], []))
+    session = ManagedSkyPilotSession(tmp_path)
+    with pytest.raises(ConfigError, match="SDK lacks isolation"):
+        session._start()
+    assert process.stdin.closed
+    assert process.stdout.closed
+    assert session._connection is None
 
 
-@pytest.mark.parametrize("failure", [RuntimeError("body failed"), KeyboardInterrupt(), SystemExit(2)])
-def test_cleanup_and_sdk_restoration_after_errors(fake_server, failure):
-    with pytest.raises(type(failure)):
-        with managed_session():
-            session = active_session()
-            session.ensure_started(fake_server.sky)
-            fake_server.sky.server.common.check_server_healthy_or_start_fn()
-            fake_server.original_start.assert_not_called()
-            fake_server.sky.server.common.check_server_healthy.assert_called_once()
-            raise failure
-    assert session.closed
-    assert fake_server.process.stdin.closed
-    fake_server.process.wait.assert_called_once()
-    assert fake_server.sky.server.common.check_server_healthy_or_start_fn is fake_server.original_start
+@pytest.mark.parametrize("acquired", [False, True])
+def test_bootstrap_eof_only_stops_unclaimed_broker(acquired):
+    leases = broker._Leases(MagicMock())
+    leases.acquired = acquired
+    read, write = os.pipe()
+    os.close(write)
+    try:
+        leases.bootstrap(read)
+        assert leases.stop.is_set() is not acquired
+    finally:
+        os.close(read)
 
 
-@pytest.mark.parametrize("local,consolidated", [(False, False), (True, True)])
-def test_remote_and_consolidated_servers_rejected(fake_server, local, consolidated):
-    fake_server.sky.server.common.is_api_server_local.return_value = local
-    fake_server.sky.skypilot_config.get_nested.return_value = consolidated
-    with managed_session(), pytest.raises(ConfigError):
-        active_session().ensure_started(fake_server.sky)
-    fake_server.popen.assert_not_called()
-    assert fake_server.sky.server.common.check_server_healthy_or_start_fn is fake_server.original_start
-
-
-def test_startup_failure_stops_guardian_and_restores_sdk(fake_server, monkeypatch):
-    def fail_ready(self, endpoint):
-        raise ExecutionError("startup timed out")
-
-    monkeypatch.setattr(ManagedSkyPilotSession, "_wait_ready", fail_ready)
-    with managed_session(), pytest.raises(ExecutionError, match="startup timed out"):
-        active_session().ensure_started(fake_server.sky)
-    assert fake_server.process.stdin.closed
-    assert fake_server.sky.server.common.check_server_healthy_or_start_fn is fake_server.original_start
-
-
-def test_mid_session_server_failure_cannot_autostart_replacement(fake_server):
-    with managed_session():
-        session = active_session()
-        session.ensure_started(fake_server.sky)
-        fake_server.process.poll.return_value = 1
-        with pytest.raises(ExecutionError, match="exited unexpectedly"):
-            session.ensure_started(fake_server.sky)
-    fake_server.popen.assert_called_once()
-    fake_server.original_start.assert_not_called()
-
-
-def _job(tmp_path):
-    return SkyPilotJob(
-        work_unit=WorkUnit(root=Task(_task), dependencies=set()),
-        job_id="misen-job",
-        managed_job_id=None,
-        request_id="launch-request",
-        submission_id="submission",
-        deadline_minutes=1,
-        log_path=tmp_path / "worker.log",
-        workspace=InMemoryWorkspace(),
-    )
-
-
-def test_exit_resolves_and_persists_accepted_launch_before_stopping(fake_server, tmp_path):
-    with managed_session():
-        session = active_session()
-        session.ensure_started(fake_server.sky)
+def test_exit_drains_launch_before_release(monkeypatch, tmp_path):
+    events = []
+    with managed_session() as session:
+        session._connection = MagicMock()
+        monkeypatch.setattr(session.client, "get", lambda _request: (events.append("get") or [42], None))
+        monkeypatch.setattr(session, "_exchange", lambda *args, **kwargs: events.append("release"))
         job = _job(tmp_path)
         job._bind_record(job.workspace, "record")
         SkyPilotExecutor()._record_job(job, job.workspace, "record")
-        assert job.managed_job_id is None
-
-        def get_result(request_id):
-            assert not fake_server.process.stdin.closed
-            assert request_id == "launch-request"
-            return ([42], None)
-
-        fake_server.sky.get.side_effect = get_result
-    assert job.managed_job_id == 42
+    assert events == ["get", "release"]
     assert json.loads(job.workspace.read_job_file("jobs", "record.json"))["native_id"] == 42
-    assert fake_server.process.stdin.closed
+    session._connection.close.assert_called_once()
     with pytest.raises(ExecutionError, match="session is closed"):
         job.state()
     with pytest.raises(ExecutionError, match="session is closed"):
         job.cancel()
 
 
-def test_drain_failure_preserves_original_error_and_stops_server(fake_server, tmp_path, monkeypatch):
-    with pytest.raises(SubmissionError, match="original") as raised:
-        with managed_session():
-            active_session().ensure_started(fake_server.sky)
-            _job(tmp_path)
+@pytest.mark.parametrize("error", [SubmissionError("body"), KeyboardInterrupt(), SystemExit(2)])
+def test_drain_failure_preserves_original_exception(monkeypatch, tmp_path, error):
+    with pytest.raises(type(error)) as raised:
+        with managed_session() as session:
+            session._connection = MagicMock()
+            exchange = MagicMock()
+            monkeypatch.setattr(session, "_exchange", exchange)
             monkeypatch.setattr(SkyPilotJob, "_resolve_managed_job_id", MagicMock(side_effect=ValueError("drain")))
-            raise SubmissionError("original")
+            _job(tmp_path)
+            raise error
     assert "drain" in raised.value.__notes__[0]
-    assert fake_server.process.stdin.closed
+    exchange.assert_called_once_with({"op": "release"}, timeout=server._STOP_TIMEOUT_S)
+    assert session.closed
 
 
-def test_server_lifecycle_does_not_change_durable_job_identity():
-    from misen.utils.hashing import stable_hash
-
-    for pool in (None, "misen-dev"):
-        unmanaged = SkyPilotExecutor(pool=pool)
-        managed = SkyPilotExecutor(pool=pool, manage_api_server=True)
-        assert stable_hash(unmanaged._job_key_identity()) == stable_hash(managed._job_key_identity())
-
-
-def test_guardian_refuses_existing_server_without_touching_it(monkeypatch, tmp_path):
-    constants = pytest.importorskip("sky.skylet.constants")
-    monkeypatch.setattr(constants, "API_SERVER_CREATION_LOCK_PATH", str(tmp_path / "server.lock"))
-    monkeypatch.setattr(server_module.signal, "signal", MagicMock())
-    existing = SimpleNamespace(info={"cmdline": [sys.executable, "-m", "sky.server.server"]})
-    monkeypatch.setattr(psutil, "process_iter", lambda _attrs: [existing])
-    supervise = MagicMock()
-    monkeypatch.setattr(server_module, "_supervise_server", supervise)
-    with pytest.raises(RuntimeError, match="already running"):
-        server_module._guard_server("http://127.0.0.1:46580")
-    supervise.assert_not_called()
-
-
-def test_guardian_refuses_contended_creation_lock(monkeypatch, tmp_path):
-    constants = pytest.importorskip("sky.skylet.constants")
-    filelock = pytest.importorskip("filelock")
-    lock_path = tmp_path / "server.lock"
-    monkeypatch.setattr(constants, "API_SERVER_CREATION_LOCK_PATH", str(lock_path))
-    monkeypatch.setattr(server_module.signal, "signal", MagicMock())
-    supervise = MagicMock()
-    monkeypatch.setattr(server_module, "_supervise_server", supervise)
-    with filelock.FileLock(lock_path), pytest.raises(filelock.Timeout):
-        server_module._guard_server("http://127.0.0.1:46580")
-    supervise.assert_not_called()
+def test_poll_and_cancel_use_job_namespace_in_other_threads(monkeypatch, tmp_path):
+    with managed_session("first") as first, managed_session("second") as second:
+        first_job = _job(tmp_path, 42)
+        first_job._api_session = first
+        second_job = _job(tmp_path, 42)
+        for session, state in ((first, "RUNNING"), (second, "PENDING")):
+            monkeypatch.setattr(session.client.jobs, "queue_v2", MagicMock(return_value="queue"))
+            monkeypatch.setattr(session.client.jobs, "cancel", MagicMock(return_value="cancel"))
+            monkeypatch.setattr(
+                session.client, "get", MagicMock(return_value=([{"job_id": 42, "status": state}], None))
+            )
+        with ThreadPoolExecutor(max_workers=1) as threads:
+            assert threads.submit(SkyPilotJob.bulk_state, [first_job, second_job]).result() == {
+                first_job: "running",
+                second_job: "pending",
+            }
+            threads.submit(first_job.cancel).result()
+        first.client.jobs.cancel.assert_called_once_with(job_ids=[42])
+        second.client.jobs.cancel.assert_not_called()
 
 
-def _read_json_line(pipe, timeout=10):
-    readable, _, _ = select.select([pipe], [], [], timeout)
-    assert readable, "No handshake received from child process"
-    return json.loads(pipe.readline())
+def test_json_protocol_discards_launch_handle_and_preserves_tuple():
+    sky = SimpleNamespace(get=MagicMock(return_value=([42], object())))
+    result = broker._dispatch(sky, "get", {"request_id": "launch"})
+    assert server._decode_result(json.loads(json.dumps(broker._encode_result(result)))) == ([42], None)
+    with pytest.raises(ValueError, match="Unsupported"):
+        broker._dispatch(sky, "api_stop", {})
+    with pytest.raises(TypeError, match="Unsupported"):
+        broker._encode_result(object())
+
+
+def test_pool_status_omits_opaque_handles():
+    sky = SimpleNamespace(
+        jobs=SimpleNamespace(pool_status=MagicMock(return_value="status-request")),
+        get=MagicMock(
+            return_value=[
+                {
+                    "name": "pool",
+                    "status": "READY",
+                    "replica_info": [{"status": "READY", "handle": object(), "resources_str": "1 CPU"}],
+                }
+            ]
+        ),
+    )
+    result = broker._dispatch(sky, "pool_status", {})
+    assert json.loads(json.dumps(broker._encode_result(result)))[0]["replica_info"] == [
+        {"status": "READY", "resources_str": "1 CPU"}
+    ]
+
+
+def test_proxy_launch_is_json_native_and_does_not_wait(monkeypatch, tmp_path):
+    session = ManagedSkyPilotSession(tmp_path)
+    call = MagicMock(return_value="launch-id")
+    monkeypatch.setattr(session, "call", call)
+    sky = session.client
+    task = sky.Task(name="task", run="true", resources=[sky.Resources(infra="aws", cpus="1+")])
+    assert sky.jobs.launch(task, name="task", pool="pool") == "launch-id"
+    call.assert_called_once_with(
+        "launch",
+        task={
+            "name": "task",
+            "run": "true",
+            "resources": [{"infra": "aws", "cpus": "1+"}],
+        },
+        name="task",
+        pool="pool",
+    )
+    json.dumps(call.call_args.kwargs)
+
+
+def _lease(leases):
+    client, owner = Pipe(duplex=True)
+    threading.Thread(target=leases._read, args=(owner,), daemon=True).start()
+    client.send_bytes(b'{"op":"acquire"}')
+    assert json.loads(client.recv_bytes())["result"] == "acquired"
+    return client
+
+
+def test_shared_leases_keep_server_until_last_release():
+    leases = broker._Leases(lambda operation, arguments: arguments)
+    first, second = _lease(leases), _lease(leases)
+    first.send_bytes(b'{"op":"release"}')
+    assert first.poll(5)
+    assert json.loads(first.recv_bytes()) == {"result": None}
+    assert not leases.stop.is_set()
+    second.send_bytes(b'{"op":"release"}')
+    assert leases.stop.wait(5)
+    assert not second.poll(0.05)
+    leases.finish()
+    assert json.loads(second.recv_bytes()) == {"result": None}
+    first.close()
+    second.close()
+
+
+def test_client_disconnect_detected_during_blocking_sdk_call():
+    entered, finish = threading.Event(), threading.Event()
+
+    def dispatch(operation, arguments):
+        entered.set()
+        finish.wait(10)
+
+    leases = broker._Leases(dispatch)
+    client = _lease(leases)
+    try:
+        client.send_bytes(b'{"op":"get"}')
+        assert entered.wait(5)
+        client.close()
+        assert leases.stop.wait(5)
+    finally:
+        finish.set()
+        client.close()
 
 
 def _assert_stopped(pid):
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         try:
             if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
@@ -266,49 +330,101 @@ def _assert_stopped(pid):
     pytest.fail(f"Owned process {pid} is still running")
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
-@pytest.mark.parametrize("kill_client", [False, True])
-def test_guardian_reaps_server_tree_on_pipe_close_or_client_death(tmp_path, kill_client):
-    # This is a real process hierarchy, not an SDK mock. The child pretends to
-    # be the API server, and starts its own worker. No SkyPilot/cloud is used.
-    worker_pid_path = tmp_path / "worker.pid"
-    server_code = (
-        "import subprocess, sys, time; from pathlib import Path; "
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
-        f"Path({str(worker_pid_path)!r}).write_text(str(p.pid)); time.sleep(120)"
-    )
-    guardian_code = (
-        "import os; from misen.utils.skypilot_server import _supervise_server; "
-        f"_supervise_server({[sys.executable, '-c', server_code]!r}, env=dict(os.environ))"
-    )
-    client_code = (
-        "import subprocess, sys, time, json; "
-        f"p = subprocess.Popen({[sys.executable, '-c', guardian_code]!r}, "
-        "stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True); "
-        "print(json.dumps({'guardian': p.pid, **json.loads(p.stdout.readline())}), flush=True); "
-        "sys.stdin.buffer.read(1); p.stdin.close(); p.wait(timeout=20)"
-    )
-    client = subprocess.Popen(
-        [sys.executable, "-c", client_code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
+_live = pytest.mark.skipif(os.environ.get("MISEN_TEST_SKYPILOT_SERVER") != "1", reason="Opt-in local SDK server tests")
+
+
+@_live
+def test_real_namespaces_share_leases_restart_and_leave_parent_untouched(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("SKYPILOT_API_SERVER_ENDPOINT", "http://ordinary.example:1234")
+    original_env = dict(os.environ)
+    ordinary_identity = server.Path.home() / ".sky" / "user_hash"
+    original_hash = ordinary_identity.read_bytes() if ordinary_identity.exists() else None
+    first = ManagedSkyPilotSession(server.namespace_directory("first"))
+    same = ManagedSkyPilotSession(server.namespace_directory("first"))
+    other = ManagedSkyPilotSession(server.namespace_directory("other"))
+    pids = []
     try:
-        identity = _read_json_line(client.stdout)
-        deadline = time.monotonic() + 10
-        while not worker_pid_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.1)
-        worker_pid = int(worker_pid_path.read_text())
-        if kill_client:
-            client.kill()
-        else:
-            client.stdin.close()
-        client.wait(timeout=20)
-        for pid in (identity["pid"], worker_pid, identity["guardian"]):
+        with ThreadPoolExecutor(max_workers=3) as threads:
+            list(threads.map(lambda session: session.client.api_info(), (first, same, other)))
+        first.client.Resources(infra="aws/us-east-1", cpus="1+", memory="2+").validate()
+        assert first.client.api_status(request_ids=[]) == []
+        assert first.endpoint == same.endpoint
+        assert first.endpoint != other.endpoint
+        for session in (first, other):
+            descriptor = json.loads((session.directory / "server.json").read_text())
+            pids.extend([descriptor["pid"], descriptor["server_pid"]])
+            pids.extend(child.pid for child in psutil.Process(descriptor["server_pid"]).children(recursive=True))
+        first.close()
+        same.client.api_info()
+        other.client.api_info()
+        same.close()
+        other.client.api_info()
+        identity = (first.directory / "identity").read_text()
+        with managed_session("first") as restarted:
+            restarted.client.api_info()
+            assert (restarted.directory / "identity").read_text() == identity
+    finally:
+        for session in (first, same, other):
+            session.close()
+    for pid in pids:
+        _assert_stopped(pid)
+    assert dict(os.environ) == original_env
+    assert (ordinary_identity.read_bytes() if ordinary_identity.exists() else None) == original_hash
+    assert "sky" not in sys.modules
+
+
+@_live
+def test_real_client_sigkill_stops_owned_tree(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    code = (
+        "import json, time; from misen.utils.skypilot_server import managed_session; "
+        "ctx = managed_session('crash'); s = ctx.__enter__(); s.client.api_info(); "
+        "print((s.directory / 'server.json').read_text(), flush=True); time.sleep(180)"
+    )
+    client = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        readable, _, _ = select.select([client.stdout], [], [], 120)
+        assert readable, "No server startup handshake"
+        line = client.stdout.readline()
+        assert line, client.stderr.read().decode()
+        descriptor = json.loads(line)
+        pids = [descriptor["pid"], descriptor["server_pid"]]
+        pids.extend(child.pid for child in psutil.Process(descriptor["server_pid"]).children(recursive=True))
+        client.kill()
+        client.wait(timeout=10)
+        for pid in pids:
             _assert_stopped(pid)
-        if not kill_client:
-            assert client.returncode == 0, client.stderr.read().decode()
     finally:
         with contextlib.suppress(ProcessLookupError):
             client.kill()
-        client.wait(timeout=20)
-        for stream in (client.stdin, client.stdout, client.stderr):
-            stream.close()
+        client.wait(timeout=10)
+        client.stdout.close()
+        client.stderr.close()
+
+
+@_live
+def test_real_client_death_during_startup_stops_owned_tree(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    code = (
+        "from misen.utils.skypilot_server import managed_session; "
+        "ctx = managed_session('early-crash'); s = ctx.__enter__(); s.client.api_info()"
+    )
+    client = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 30
+        owned = []
+        while time.monotonic() < deadline and client.poll() is None:
+            owned = psutil.Process(client.pid).children(recursive=True)
+            if any("--server" in process.cmdline() for process in owned):
+                break
+            time.sleep(0.02)
+        assert owned, "No owned processes started"
+        client.kill()
+        client.wait(timeout=10)
+        for process in owned:
+            _assert_stopped(process.pid)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            client.kill()
+        client.wait(timeout=10)

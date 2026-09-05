@@ -295,6 +295,8 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
             "--executor.pool",
             "misen-dev",
             "--executor.manage-api-server",
+            "--executor.api-server-namespace",
+            "dev",
             "list",
         ],
     )
@@ -305,6 +307,7 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
     assert executor.name_prefix == "research"
     assert executor.pool == "misen-dev"
     assert executor.manage_api_server is True
+    assert executor.api_server_namespace == "dev"
 
 
 def test_resolve_experiment_reference_accepts_instance(monkeypatch, tmp_path) -> None:

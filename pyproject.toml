@@ -31,6 +31,10 @@ misen = "misen.cli:main"
 
 [project.optional-dependencies]
 skypilot = ["skypilot>=0.13"]
+skypilot-managed = ["skypilot-nightly==1.0.0.dev20260905"]
+
+[tool.uv]
+conflicts = [[{ extra = "skypilot" }, { extra = "skypilot-managed" }]]
 
 [dependency-groups]
 dev = ["numpy==2.1.3", "pytest==9.0.3", "ruff==0.16.4", "ty==0.0.74"]

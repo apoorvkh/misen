@@ -42,3 +42,21 @@ jobs:
             - run: uv sync --frozen
             - run: uv pip install --python .venv/bin/python "skypilot${{ matrix.skypilot }}"
             - run: .venv/bin/pytest -q tests/test_skypilot_executor.py tests/test_skypilot_server.py
+
+    skypilot-managed:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, macos-latest]
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v7
+            - uses: astral-sh/setup-uv@v9.0.0
+              with:
+                  version: "0.12.3"
+                  python-version: "3.13"
+                  enable-cache: true
+            - run: uv sync --frozen --extra skypilot-managed
+            - run: .venv/bin/pytest -q tests/test_skypilot_executor.py tests/test_skypilot_server.py
+              env:
+                  MISEN_TEST_SKYPILOT_SERVER: "1"

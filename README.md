@@ -401,14 +401,22 @@ omit `pool` for a dependent DAG. SkyPilot currently labels pools beta and the
 CLI experimental.
 
 To avoid leaving a local API service running after Misen exits, enable
-`manage_api_server` (Linux/macOS):
+`manage_api_server` (Linux/macOS). This mode requires the newer SDK's native
+runtime isolation; install **one** SkyPilot extra, not both distributions:
+
+```bash
+uv sync --extra skypilot-managed
+# Add only the compute-provider extras you need, using the same nightly:
+uv pip install 'skypilot-nightly[aws]==1.0.0.dev20260905'
+```
 
 ```toml
 [executor]
 type = "skypilot"
 infra = "aws/us-east-1"
-pool = "misen-dev"  # optional; the existing pool remains reusable
+pool = "misen-dev"  # optional; create it inside this namespace (below)
 manage_api_server = true
+api_server_namespace = "dev"  # default: "default"
 ```
 
 CLI runs, including the TUI and `run --no-tui`, keep the server alive through
@@ -416,7 +424,7 @@ job monitoring and stop it on exit. Blocking Python submissions do the same.
 For nonblocking Python calls, scope submission and polling explicitly:
 
 ```python
-executor = SkyPilotExecutor(manage_api_server=True, pool="misen-dev")
+executor = SkyPilotExecutor(manage_api_server=True, api_server_namespace="dev", pool="misen-dev")
 with executor.session():
     jobs = task.submit(executor=executor, workspace=workspace)
     for job in jobs.nodes():
@@ -426,24 +434,49 @@ with executor.session():
 The server starts only when pending work needs it. On normal exit (including
 Python exceptions and Ctrl-C), Misen first resolves accepted launch requests
 and persists their managed-job IDs, which can delay shutdown. A guardian
-process stops the owned server tree even if the Misen process is killed;
+process stops the owned server tree when its last client disconnects, even if killed;
 an abrupt kill can interrupt unresolved launches. SkyPilot's durable state and
 Misen's job records remain available for a later run to reconcile. Server logs
-are retained at `~/.sky/misen-api-server-*.log`.
+are retained alongside persistent namespace state under
+`$XDG_STATE_HOME/misen/skypilot/<namespace>` (default
+`~/.local/state/misen/skypilot/<namespace>`). Keep this directory to retain the
+namespace's cloud-controller identity and recover jobs across sessions.
 
-SkyPilot 0.13 shares local state across API servers, so this mode requires
-exclusive local use. It refuses to start if another local server exists;
-stop that server explicitly with `uv run sky api stop` first (including one
-started by the pool-creation command above), and avoid other local SkyPilot
-sessions during the run. Remote API endpoints and
-`jobs.controller.consolidation_mode: true` are rejected: the jobs/pool
-controller must run remotely and outlive the local API service. Stopping
+The SDK runs in a child process with its own runtime directory, identity,
+configuration, and dynamically allocated ports. Misen does not import or
+reconfigure SkyPilot in your Python process, change `HOME`, use your configured
+API endpoint, or stop any ordinary SkyPilot server. Concurrent runs using the
+same namespace share a server until their last session exits; different
+namespaces have independent servers and durable-job identities. Cloud
+credentials remain available to the children. The namespace's private
+`config.yaml` can be configured explicitly; ordinary SkyPilot global/project
+configuration is not inherited. Consolidation mode and shared database
+overrides are rejected so remote controllers can outlive the local service.
+
+Pools created through ordinary `sky jobs pool apply` are in a different
+controller namespace. Create, inspect, and terminate this namespace's pools
+through the scoped session instead (using the same `misen-pool.yaml` above):
+
+```python
+with executor.session() as session:
+    session.pool_apply("misen-dev", "misen-pool.yaml")  # explicit, billable provisioning
+    print(session.pool_status())
+
+# Later, when you no longer need the workers:
+with executor.session() as session:
+    session.pool_down("misen-dev")
+```
+
+Submission never automatically creates or deletes a pool. Stopping
 Misen's API server does **not** cancel remote jobs or terminate pool workers;
 they retain their usual billing and lifecycle. `Experiment.run()` scopes only
 submission, as before; use the CLI or blocking submissions to wait for completion.
 Handles returned from an ended managed session cannot silently start a new
 server; resubmit inside a new session to reattach. The default
 `manage_api_server = false` retains SkyPilot's normal shared/remote behavior.
+Stable SkyPilot 0.13 remains supported in that default mode; isolated managed
+mode pins the tested `1.0.0.dev20260905` nightly, which includes
+[upstream runtime isolation](https://github.com/skypilot-org/skypilot/commit/f81d2b2674d4611b0145024c2f777221aa96debd).
 
 SkyPilot [launch calls are
 asynchronous](https://docs.skypilot.ai/en/latest/reference/async.html). Misen

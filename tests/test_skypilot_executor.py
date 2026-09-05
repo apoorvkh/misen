@@ -634,7 +634,9 @@ def test_unset_pool_preserves_runtime_subclass_identity_and_fields() -> None:
     assert identity_type.__name__ == type(executor).__name__
     assert identity_type.__qualname__ == type(executor).__qualname__
     assert identity_type.__struct_fields__ == tuple(
-        field for field in executor.__struct_fields__ if field not in {"pool", "manage_api_server"}
+        field
+        for field in executor.__struct_fields__
+        if field not in {"pool", "manage_api_server", "api_server_namespace"}
     )
     assert identity.scheduling_class == "priority"
 

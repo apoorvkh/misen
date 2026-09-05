@@ -1,9 +1,9 @@
-"""Own a local SkyPilot API server for one foreground execution session.
+"""Scoped clients for independent, persistent SkyPilot namespaces.
 
-SkyPilot 0.13 has a shared local state directory. An owned server therefore
-requires exclusive local use, including the SDK's server-creation lock. A
-small guardian owns that lock and the server process tree, and watches a pipe
-from Misen so even an abruptly killed client leaves no local server behind.
+The SDK and API server run in child processes. No SkyPilot imports, endpoint
+changes, or environment changes are needed in the user's Python process.
+An authenticated local socket leases the namespace server until its last
+client disconnects, including when a client crashes.
 """
 
 from __future__ import annotations
@@ -12,293 +12,333 @@ import contextlib
 import json
 import logging
 import os
+import re
 import select
-import signal
-import socket
 import subprocess
 import sys
 import threading
 import time
+import uuid
+from contextvars import ContextVar
+from multiprocessing.connection import Client
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from urllib.error import URLError
-from urllib.parse import urlsplit
-from urllib.request import urlopen
 
 from misen.exceptions import ConfigError, ExecutionError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from types import FrameType
+    from multiprocessing.connection import Connection
 
     from misen.executors.skypilot import SkyPilotJob
 
 logger = logging.getLogger(__name__)
-_START_TIMEOUT_S = 90
-_STOP_TIMEOUT_S = 20
-_TERM_GRACE_S = 5
-_SESSION_LOCK = threading.RLock()
-_active_session: ManagedSkyPilotSession | None = None
+_START_TIMEOUT_S = 120
+_STOP_TIMEOUT_S = 25
+_active_session: ContextVar[ManagedSkyPilotSession | None] = ContextVar("misen_skypilot_session", default=None)
+_NAMESPACE_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}")
+
+
+def namespace_directory(namespace: str) -> Path:
+    """Resolve persistent state outside project snapshots and disposable caches."""
+    if not isinstance(namespace, str) or not _NAMESPACE_PATTERN.fullmatch(namespace) or namespace in {".", ".."}:
+        msg = "api_server_namespace must be 1-64 letters, digits, periods, underscores, or hyphens."
+        raise ValueError(msg)
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    return (state_home / "misen" / "skypilot" / namespace).expanduser().resolve()
 
 
 def active_session() -> ManagedSkyPilotSession | None:
-    """Return the process-wide SDK session, if one is open."""
-    return _active_session
+    """Return this context's session; jobs retain it for polling in other threads."""
+    return _active_session.get()
 
 
 @contextlib.contextmanager
-def managed_session() -> Iterator[None]:
-    """Nest sessions on the owning thread without changing SDK configuration."""
-    global _active_session  # noqa: PLW0603
-    with _SESSION_LOCK:
-        existing = _active_session
-        if existing is not None and existing.owner_thread != threading.get_ident():
-            msg = "A managed SkyPilot session is already open in another thread."
-            raise ConfigError(msg)
-        if existing is None:
-            _active_session = ManagedSkyPilotSession()
-        session = _active_session
-    if existing is not None:
-        yield
+def managed_session(namespace: str = "default") -> Iterator[ManagedSkyPilotSession]:
+    """Nest matching sessions and isolate different namespaces and threads."""
+    directory = namespace_directory(namespace)
+    existing = active_session()
+    if existing is not None and existing.directory == directory:
+        existing.check_open()
+        yield existing
         return
+    session = ManagedSkyPilotSession(directory)
+    token = _active_session.set(session)
     error: BaseException | None = None
     try:
-        yield
+        yield session
     except BaseException as exc:
         error = exc
         raise
     finally:
         try:
-            if session is not None:
-                session.close(error)
+            session.close(error)
         finally:
-            with _SESSION_LOCK:
-                _active_session = None
+            _active_session.reset(token)
 
 
 class ManagedSkyPilotSession:
-    """Lazily start one owned server and retain accepted launch requests."""
+    """A lazy, scoped lease on a namespace's API server and isolated SDK."""
 
-    def __init__(self) -> None:
-        """Create a session without importing SkyPilot or starting processes."""
-        self.owner_thread = threading.get_ident()
+    def __init__(self, directory: Path) -> None:
+        """Initialize a session without importing SkyPilot or starting processes."""
+        self.directory = directory
         self.jobs: list[SkyPilotJob] = []
         self.closed = False
-        self.process: subprocess.Popen[bytes] | None = None
-        self.log_path = Path.home() / ".sky" / f"misen-api-server-{os.getpid()}-{time.time_ns()}.log"
-        self._sky: Any = None
-        self._original_start: Any = None
+        self.endpoint: str | None = None
+        self.log_path: Path | None = None
+        self._connection: Connection | None = None
         self._lock = threading.RLock()
+        self.client = _SkyClient(self)
 
     def check_open(self) -> None:
-        """Prevent stale job handles from restarting an unowned SDK server."""
+        """Prevent closed handles from silently creating another server."""
         if self.closed:
             msg = "This SkyPilot job's API session is closed; resubmit inside executor.session() to reattach."
             raise ExecutionError(msg)
 
-    def ensure_started(self, sky: Any) -> None:
-        """Start a server once, and prohibit SDK automatic daemon creation."""
+    def ensure_started(self) -> None:
+        """Connect to a live namespace broker or launch one under its own lock."""
+        try:
+            from filelock import FileLock
+        except ModuleNotFoundError as exc:
+            msg = "Isolated API sessions require `misen[skypilot-managed]`."
+            raise ConfigError(msg) from exc
+
         with self._lock:
             self.check_open()
-            if self.process is not None:
-                if self.process.poll() is not None:
-                    msg = f"Misen's SkyPilot API server exited unexpectedly; see {self.log_path}."
-                    raise ExecutionError(msg)
+            if self._connection is not None:
                 return
             if os.name != "posix":
                 msg = "manage_api_server requires Linux or macOS."
                 raise ConfigError(msg)
-            common = sky.server.common
-            if not common.is_api_server_local():
-                msg = "manage_api_server requires a local SkyPilot endpoint; unset it for a remote API server."
-                raise ConfigError(msg)
-            if sky.skypilot_config.get_nested(("jobs", "controller", "consolidation_mode"), default_value=False):
-                msg = (
-                    "manage_api_server requires jobs.controller.consolidation_mode=false in SkyPilot config; "
-                    "the remote jobs/pool controller must outlive the local API server."
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with FileLock(self.directory / "session.lock", timeout=_START_TIMEOUT_S):
+                descriptor_path = self.directory / "server.json"
+                if descriptor_path.exists():
+                    try:
+                        self._connect(json.loads(descriptor_path.read_text()))
+                    except (OSError, EOFError, ExecutionError, ValueError, KeyError):
+                        # A previous last client may still be shutting down.
+                        # The new broker takes a namespace lifetime lock before
+                        # touching any SkyPilot state.
+                        pass
+                    else:
+                        return
+                self._start()
+
+    def _connect(self, descriptor: dict[str, Any]) -> None:
+        connection = Client(descriptor["address"], family="AF_UNIX", authkey=bytes.fromhex(descriptor["authkey"]))
+        try:
+            connection.send_bytes(b'{"op":"acquire"}')
+            if not connection.poll(_START_TIMEOUT_S):
+                msg = "Timed out acquiring a SkyPilot namespace session."
+                raise ExecutionError(msg)  # noqa: TRY301
+            reply = json.loads(connection.recv_bytes())
+            if reply.get("result") != "acquired":
+                msg = "SkyPilot namespace server is shutting down; retry the submission."
+                raise ExecutionError(msg)  # noqa: TRY301
+        except BaseException:
+            connection.close()
+            raise
+        self._connection = connection
+        self.endpoint = descriptor["endpoint"]
+        self.log_path = Path(descriptor["log_path"])
+
+    def _start(self) -> None:
+        identity_path = self.directory / "identity"
+        if not identity_path.exists():
+            identity_path.touch(mode=0o600, exist_ok=False)
+            identity_path.write_text(uuid.uuid4().hex[:8])
+        identity = identity_path.read_text().strip()
+        if not re.fullmatch(r"[a-f0-9]{8}", identity):
+            msg = f"Invalid SkyPilot namespace identity in {identity_path}."
+            raise ConfigError(msg)
+        config_path = self.directory / "config.yaml"
+        if not config_path.exists():
+            config_path.touch(mode=0o600, exist_ok=False)
+            config_path.write_text('{"jobs": {"controller": {"consolidation_mode": false}}}\n')
+        self.log_path = self.directory / f"server-{time.time_ns()}.log"
+        self.log_path.touch(mode=0o600, exist_ok=False)
+        env = _isolated_environment(self.directory, identity, config_path)
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            with self.log_path.open("wb") as log:
+                process = subprocess.Popen(  # noqa: S603
+                    [sys.executable, "-m", "misen.utils.skypilot_broker", str(self.directory), str(self.log_path)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=log,
+                    start_new_session=True,
+                    env=env,
+                    cwd=self.directory,
                 )
-                raise ConfigError(msg)
-            endpoint = common.get_server_url()
-            self._sky = sky
-            self._original_start = common.check_server_healthy_or_start_fn
-            # The SDK wrappers look up this function at call time. Checking
-            # health only also prevents a mid-session crash from spawning a
-            # detached replacement (or deadlocking on the guardian's lock).
-            common.check_server_healthy_or_start_fn = self._check_server
-            try:
-                self.log_path.parent.mkdir(parents=True, exist_ok=True)
-                self.log_path.touch(mode=0o600, exist_ok=False)
-                with self.log_path.open("wb") as log:
-                    self.process = subprocess.Popen(  # noqa: S603
-                        [sys.executable, "-m", "misen.utils.skypilot_server", endpoint],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=log,
-                        start_new_session=True,
-                    )
-                self._wait_ready(endpoint)
-            except BaseException as exc:
-                try:
-                    self._stop()
-                except Exception as cleanup_error:  # noqa: BLE001
-                    exc.add_note(f"SkyPilot server cleanup also failed: {cleanup_error}")
-                raise
-            logger.info("Started Misen-owned SkyPilot API server (%s; log=%s).", endpoint, self.log_path)
+            if process.stdout is None:
+                msg = "SkyPilot broker did not provide a startup pipe."
+                raise ExecutionError(msg)
+            readable, _, _ = select.select([process.stdout], [], [], _START_TIMEOUT_S)
+            if not readable:
+                msg = f"Timed out starting Misen's SkyPilot server; see {self.log_path}."
+                raise ExecutionError(msg)
+            line = process.stdout.readline()
+            if not line:
+                msg = f"SkyPilot broker exited during startup; see {self.log_path}."
+                raise ExecutionError(msg)
+            descriptor = json.loads(line)
+            if "error" in descriptor:
+                raise ConfigError(descriptor["error"])
+            self._connect(descriptor)
+            logger.info("Connected to Misen's SkyPilot namespace at %s (state=%s).", self.endpoint, self.directory)
+        finally:
+            if process is not None:
+                # EOF on the startup pipe before a socket lease is acquired
+                # also handles the creator being killed during startup.
+                if process.stdin is not None:
+                    process.stdin.close()
+                if process.stdout is not None:
+                    process.stdout.close()
+                threading.Thread(target=process.wait, daemon=True, name="misen-skypilot-reaper").start()
 
-    def _check_server(self, *_args: Any, **_kwargs: Any) -> None:
-        """Replace SDK autostart with a health check during owned sessions."""
-        self.check_open()
-        self._sky.server.common.check_server_healthy()
+    def call(self, operation: str, **arguments: Any) -> Any:
+        """Call the isolated SDK over authenticated JSON, never Python pickle."""
+        with self._lock:
+            self.ensure_started()
+            return self._exchange({"op": operation, "args": arguments})
 
-    def _wait_ready(self, endpoint: str) -> None:
-        process = self.process
-        if process is None or process.stdout is None:
-            msg = "SkyPilot server guardian was not started."
+    def _exchange(self, message: dict[str, Any], *, timeout: float | None = None) -> Any:
+        connection = self._connection
+        if connection is None:
+            msg = "SkyPilot session has no broker connection."
             raise ExecutionError(msg)
-        deadline = time.monotonic() + _START_TIMEOUT_S
-        launched = False
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                msg = (
-                    f"Could not start an exclusive SkyPilot API server; see {self.log_path}. "
-                    "Another local SkyPilot server may already be running. Stop it explicitly before retrying."
-                )
-                raise ConfigError(msg)
-            if not launched:
-                readable, _, _ = select.select([process.stdout], [], [], 0.1)
-                if not readable:
-                    continue
-                try:
-                    launched = isinstance(json.loads(process.stdout.readline()).get("pid"), int)
-                except ValueError:
-                    launched = False
-                continue
-            try:
-                with urlopen(f"{endpoint}/api/health", timeout=1) as response:  # noqa: S310
-                    healthy = json.load(response).get("status") == "healthy"
-            except (URLError, OSError, ValueError):
-                healthy = False
-            if healthy and process.poll() is None:
-                return
-            time.sleep(0.1)
-        msg = f"Timed out starting Misen's SkyPilot API server; see {self.log_path}."
-        raise ExecutionError(msg)
+        try:
+            connection.send_bytes(json.dumps(message).encode())
+            if timeout is not None and not connection.poll(timeout):
+                msg = f"SkyPilot server shutdown timed out; see {self.log_path}."
+                raise ExecutionError(msg)
+            reply = json.loads(connection.recv_bytes())
+        except (OSError, EOFError) as exc:
+            msg = f"Lost Misen's SkyPilot server connection; see {self.log_path}."
+            raise ExecutionError(msg) from exc
+        if "error" in reply:
+            raise ExecutionError(reply["error"])
+        return _decode_result(reply["result"])
+
+    def pool_apply(self, pool_name: str, config: str | Path) -> None:
+        """Create/update a pool in this namespace, waiting for SkyPilot's result."""
+        self.call("pool_apply", pool_name=pool_name, config=str(Path(config).expanduser().resolve()))
+
+    def pool_down(self, pool_name: str) -> None:
+        """Terminate only the named pool in this namespace."""
+        self.call("pool_down", pool_name=pool_name)
+
+    def pool_status(self) -> Any:
+        """Return this namespace's pool statuses."""
+        return self.call("pool_status")
 
     def close(self, original_error: BaseException | None = None) -> None:
-        """Drain accepted launches, then stop the server even on error."""
+        """Persist accepted launches and release the lease; the last release stops the server."""
         failures: list[Exception] = []
-        try:
-            if self.process is not None and self.process.poll() is None:
-                for job in self.jobs:
-                    if job.managed_job_id is None and job._terminal_state is None:  # noqa: SLF001
-                        try:
-                            job._resolve_managed_job_id(self._sky)  # noqa: SLF001
-                        except Exception as exc:  # noqa: BLE001
-                            failures.append(exc)
-        finally:
-            self.closed = True
-            try:
-                self._stop()
-            except Exception as exc:  # noqa: BLE001
-                failures.append(exc)
-        if failures:
-            msg = "SkyPilot session cleanup failed: " + "; ".join(str(exc) for exc in failures)
-            if original_error is not None:
-                original_error.add_note(msg)
-            else:
-                raise ExecutionError(msg) from failures[0]
-
-    def _stop(self) -> None:
-        try:
-            if self.process is not None:
-                if self.process.stdin is not None:
-                    self.process.stdin.close()
-                try:
-                    self.process.wait(timeout=_STOP_TIMEOUT_S)
-                except subprocess.TimeoutExpired as exc:
-                    msg = f"SkyPilot server cleanup did not finish; see {self.log_path}."
-                    raise ExecutionError(msg) from exc
-                finally:
-                    if self.process.stdout is not None:
-                        self.process.stdout.close()
-                logger.info("Stopped Misen-owned SkyPilot API server.")
-        finally:
-            if self._original_start is not None:
-                self._sky.server.common.check_server_healthy_or_start_fn = self._original_start
-                self._original_start = None
-
-
-def _stop_tree(process: subprocess.Popen[bytes]) -> None:
-    """Reap only the child tree and process group started by this guardian."""
-    import psutil
-
-    descendants = []
-    with contextlib.suppress(psutil.NoSuchProcess):
-        descendants = psutil.Process(process.pid).children(recursive=True)
-    # Give the server supervisor a chance to stop its request workers before
-    # terminating the remaining group; signalling the workers simultaneously
-    # can break its shutdown queue before it drains.
-    process.terminate()
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=_TERM_GRACE_S)
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGKILL)
-    for child in descendants:
-        with contextlib.suppress(psutil.NoSuchProcess):
-            child.kill()
-    process.wait(timeout=_TERM_GRACE_S)
-    psutil.wait_procs(descendants, timeout=_TERM_GRACE_S)
-
-
-def _guard_server(endpoint: str) -> None:
-    """Run in a helper process; pipe EOF also covers client SIGKILL/crashes."""
-    import filelock
-    import psutil
-    from sky.skylet import constants
-
-    def exit_on_signal(_signum: int, _frame: FrameType | None) -> None:
-        raise SystemExit(1)
-
-    signal.signal(signal.SIGTERM, exit_on_signal)
-    signal.signal(signal.SIGINT, exit_on_signal)
-    lock = filelock.FileLock(Path(constants.API_SERVER_CREATION_LOCK_PATH).expanduser())
-    with lock.acquire(timeout=0):
-        for process in psutil.process_iter(["cmdline", "uids"]):
-            args = process.info["cmdline"] or []
-            if "sky.server.server" in args:
-                msg = "Another local SkyPilot API server is already running."
-                raise RuntimeError(msg)
-        port = urlsplit(endpoint).port or 46580
-        # A bound but not-yet-healthy server must never be mistaken for ours.
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", port))
-        env = dict(os.environ)
-        env[constants.ENV_VAR_IS_SKYPILOT_SERVER] = "true"
-        _supervise_server([sys.executable, "-m", "sky.server.server", "--host=127.0.0.1", f"--port={port}"], env=env)
-
-
-def _supervise_server(command: list[str], *, env: dict[str, str]) -> None:
-    """Keep the server tree alive only while the owning client's pipe is open."""
-    child = subprocess.Popen(  # noqa: S603
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=sys.stderr,
-        stderr=sys.stderr,
-        start_new_session=True,
-        env=env,
-    )
-    try:
-        sys.stdout.write(json.dumps({"pid": child.pid}) + "\n")
-        sys.stdout.flush()
-        while child.poll() is None:
-            readable, _, _ = select.select([sys.stdin], [], [], 0.2)
-            if readable and not os.read(sys.stdin.fileno(), 1):
+        with self._lock:
+            if self.closed:
                 return
-        msg = f"SkyPilot API server exited with status {child.returncode}."
-        raise RuntimeError(msg)
-    finally:
-        _stop_tree(child)
+            try:
+                if self._connection is not None:
+                    for job in self.jobs:
+                        if job.managed_job_id is None and job._terminal_state is None:  # noqa: SLF001
+                            try:
+                                job._resolve_managed_job_id(self.client)  # noqa: SLF001
+                            except Exception as exc:  # noqa: BLE001
+                                failures.append(exc)
+                    try:
+                        self._exchange({"op": "release"}, timeout=_STOP_TIMEOUT_S)
+                    except Exception as exc:  # noqa: BLE001
+                        failures.append(exc)
+            finally:
+                self.closed = True
+                if self._connection is not None:
+                    self._connection.close()
+            if failures:
+                msg = "SkyPilot session cleanup failed: " + "; ".join(str(exc) for exc in failures)
+                if original_error is not None:
+                    original_error.add_note(msg)
+                else:
+                    raise ExecutionError(msg) from failures[0]
 
 
-if __name__ == "__main__":
-    _guard_server(sys.argv[1])
+def _isolated_environment(directory: Path, identity: str, config_path: Path) -> dict[str, str]:
+    """Keep credentials available while replacing only the child's SkyPilot control settings."""
+    # Provider credentials (AWS_*, GOOGLE_*, AZURE_*, etc.) remain available;
+    # ambient SkyPilot control/auth flags belong to the ordinary namespace.
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("SKYPILOT_", "SKY_", "IS_SKYPILOT_"))}
+    env.update(
+        SKY_RUNTIME_DIR=str(directory),
+        SKYPILOT_USER_ID=identity,
+        SKYPILOT_GLOBAL_CONFIG=str(config_path),
+        SKYPILOT_PROJECT_CONFIG=str(config_path),
+        SKYPILOT_API_COOKIE_FILE=str(directory / "cookies.txt"),
+    )
+    return env
+
+
+def _decode_result(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {"__tuple__"}:
+            return tuple(_decode_result(item) for item in value["__tuple__"])
+        return {key: _decode_result(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decode_result(item) for item in value]
+    return value
+
+
+class _Resources:
+    def __init__(self, session: ManagedSkyPilotSession, **kwargs: Any) -> None:
+        self.session = session
+        self.options = kwargs
+
+    def validate(self) -> None:
+        self.session.call("validate_resources", options=self.options)
+
+
+class _Task:
+    def __init__(self, **kwargs: Any) -> None:
+        self.options = kwargs
+
+
+class _SkyJobs:
+    def __init__(self, session: ManagedSkyPilotSession) -> None:
+        self.session = session
+
+    def launch(self, task: _Task, **kwargs: Any) -> str:
+        options = dict(task.options)
+        options["resources"] = [resource.options for resource in options["resources"]]
+        return self.session.call("launch", task=options, **kwargs)
+
+    def queue_v2(self, **kwargs: Any) -> str:
+        return self.session.call("queue_v2", **kwargs)
+
+    def cancel(self, **kwargs: Any) -> str:
+        return self.session.call("cancel", **kwargs)
+
+
+class _SkyClient:
+    """The small SDK surface used by SkyPilotExecutor, without importing sky."""
+
+    Task = _Task
+
+    def __init__(self, session: ManagedSkyPilotSession) -> None:
+        self.session = session
+        self.jobs = _SkyJobs(session)
+        self.server = SimpleNamespace(common=SimpleNamespace(is_api_server_local=lambda: True))
+
+    def Resources(self, **kwargs: Any) -> _Resources:  # noqa: N802
+        return _Resources(self.session, **kwargs)
+
+    def get(self, request_id: str) -> Any:
+        return self.session.call("get", request_id=request_id)
+
+    def api_status(self, **kwargs: Any) -> Any:
+        return self.session.call("api_status", **kwargs)
+
+    def api_info(self) -> Any:
+        return self.session.call("api_info")

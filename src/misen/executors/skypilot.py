@@ -36,7 +36,7 @@ from misen.utils.dask_runtime import (
 from misen.utils.job_dependencies import dependency_state_name, publish_dependency_state
 from misen.utils.resource_env import resource_environment
 from misen.utils.runtime_events import work_unit_label
-from misen.utils.skypilot_server import active_session, managed_session
+from misen.utils.skypilot_server import active_session, managed_session, namespace_directory
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -86,7 +86,9 @@ _SKYPILOT_STATE_MAP: dict[str, JobState] = {
 @cache
 def _pre_pool_key_type(executor_type: type[msgspec.Struct], *, include_pool: bool = False) -> type[msgspec.Struct]:
     """Preserve durable keys independently of the API server's local lifetime."""
-    ignored = {"manage_api_server"} if include_pool else {"pool", "manage_api_server"}
+    ignored = {"manage_api_server", "api_server_namespace"}
+    if not include_pool:
+        ignored.add("pool")
     fields = tuple(field for field in executor_type.__struct_fields__ if field not in ignored)
     return msgspec.defstruct(
         executor_type.__name__,
@@ -99,6 +101,14 @@ def _pre_pool_key_type(executor_type: type[msgspec.Struct], *, include_pool: boo
 
 def _load_skypilot() -> Any:
     """Load the optional SkyPilot SDK on first use."""
+    if (session := active_session()) is not None:
+        session.check_open()
+        return session.client
+    return _load_external_skypilot()
+
+
+def _load_external_skypilot() -> Any:
+    """Load the ambient SDK without changing its endpoint or configuration."""
     try:
         sky = importlib.import_module("sky")
     except ModuleNotFoundError as exc:
@@ -106,8 +116,6 @@ def _load_skypilot() -> Any:
             raise
         msg = f"SkyPilotExecutor requires SkyPilot >=0.13; install it with `{_SKYPILOT_INSTALL}`."
         raise ConfigError(msg) from exc
-    if (session := active_session()) is not None:
-        session.ensure_started(sky)
     return sky
 
 
@@ -196,7 +204,11 @@ class SkyPilotJob(Job):
         """Cancel an unresolved launch request or its assigned managed job."""
         if self._api_session is not None:
             self._api_session.check_open()
-        sky = _load_skypilot()
+        sky = (
+            self._api_session.client
+            if self._api_session is not None
+            else (_load_skypilot() if active_session() is None else _load_external_skypilot())
+        )
         try:
             self._cancel(sky)
         except ExecutionError:
@@ -642,11 +654,21 @@ class SkyPilotJob(Job):
         if not active_jobs:
             return result
 
+        groups: dict[Any, list[SkyPilotJob]] = {}
         for job in active_jobs:
-            if job._api_session is not None:  # noqa: SLF001
-                job._api_session.check_open()  # noqa: SLF001
-
-        sky = _load_skypilot()
+            groups.setdefault(job._api_session, []).append(job)  # noqa: SLF001
+        if len(groups) > 1:
+            for group in groups.values():
+                result.update(cls.bulk_state(group))
+            return result
+        session = active_jobs[0]._api_session  # noqa: SLF001
+        if session is not None:
+            session.check_open()
+        sky = (
+            session.client
+            if session is not None
+            else (_load_skypilot() if active_session() is None else _load_external_skypilot())
+        )
         for job in active_jobs:
             if job.managed_job_id is not None and not job._managed_job_id_persisted:  # noqa: SLF001
                 job._remember_managed_job_id(job.managed_job_id)  # noqa: SLF001
@@ -785,17 +807,18 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
     name_prefix: str = "misen"
     pool: str | None = None
     manage_api_server: bool = False
+    api_server_namespace: str = "default"
     _job_class: ClassVar[type[Job] | None] = SkyPilotJob
     _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
 
-    def session(self) -> AbstractContextManager[None]:
+    def session(self) -> AbstractContextManager[Any]:
         """Own a local API server until the enclosing run/session exits.
 
         With ``manage_api_server=True``, use this around nonblocking Python
         submissions and polling. Blocking submissions and CLI runs open a
         session automatically. The server starts lazily when work is pending.
         """
-        return managed_session() if self.manage_api_server else super().session()
+        return managed_session(self.api_server_namespace) if self.manage_api_server else super().session()
 
     def submit(
         self,
@@ -812,6 +835,7 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
 
     def __post_init__(self) -> None:
         """Normalize configuration and reject modes unsafe on remote workers."""
+        namespace_directory(self.api_server_namespace)
         self.accelerators = msgspec.convert(self.accelerators, type=dict[AcceleratorType, list[str]])
         self.accelerator_memory = msgspec.convert(self.accelerator_memory, type=dict[str, int])
         infras = [self.infra] if isinstance(self.infra, str) else self.infra
@@ -904,6 +928,12 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
         if self.manage_api_server and active_session() is None:
             msg = "Nonblocking submissions with manage_api_server=True require `with executor.session():`."
             raise ConfigError(msg)
+        session = active_session()
+        if session is not None and (
+            not self.manage_api_server or session.directory != namespace_directory(self.api_server_namespace)
+        ):
+            msg = "Submit this executor outside the other SkyPilot namespace or inside its own executor.session()."
+            raise ConfigError(msg)
         pending_set = set(pending_work_units)
         if self.pool is not None and any(work_unit.dependencies & pending_set for work_unit in pending_work_units):
             msg = (
@@ -941,7 +971,10 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
     def _job_key_identity(self) -> object:
         """Preserve pre-pool reattachment keys when the pool is unset."""
         legacy_type = _pre_pool_key_type(type(self), include_pool=self.pool is not None)
-        return legacy_type(*(getattr(self, field) for field in legacy_type.__struct_fields__))
+        identity = legacy_type(*(getattr(self, field) for field in legacy_type.__struct_fields__))
+        if self.manage_api_server:
+            return identity, "managed-skypilot", str(namespace_directory(self.api_server_namespace))
+        return identity
 
     def _accelerator_models(self, work_unit: WorkUnit) -> Sequence[str | None]:
         """Resolve a generic accelerator request to concrete SkyPilot models."""

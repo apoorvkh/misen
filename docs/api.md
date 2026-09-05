@@ -189,11 +189,30 @@ durable records are retained. A guardian also cleans up after abrupt client
 termination, which may interrupt unresolved launch requests. Closed-session
 handles require resubmission inside a new session to reattach.
 
-This opt-in mode requires exclusive local SkyPilot use and a remote jobs/pool
-controller (`jobs.controller.consolidation_mode` unset or false). Existing
-local servers and remote endpoints are rejected. It never calls the global
-`sky.api_stop()` command. With the default `manage_api_server=False`, the SDK
-continues to use its normal shared or remote server.
+Install `misen[skypilot-managed]` instead of `misen[skypilot]` for this mode;
+it pins a SkyPilot nightly with native runtime isolation. Set
+`api_server_namespace="dev"` (default `"default"`) to select persistent state
+under `$XDG_STATE_HOME/misen/skypilot/dev` or `~/.local/state/misen/skypilot/dev`.
+The SDK runs in a child process with private configuration, identity, state,
+and ports. The parent's environment and any ordinary SkyPilot SDK/server are
+unchanged. Concurrent sessions in a namespace share a server until their last
+client disconnects; other namespaces are independent. Namespace-specific
+durable keys prevent reattaching to another controller's job IDs.
+
+Cloud credentials are inherited, but ordinary SkyPilot endpoint and
+configuration overrides are not. Edit the namespace's `config.yaml` for its
+SkyPilot settings. A remote jobs/pool controller is required
+(`jobs.controller.consolidation_mode: false`); shared database overrides are
+not supported. Pools in this namespace are distinct from ordinary SkyPilot
+pools. Use `with executor.session() as session:` and explicitly call
+`session.pool_apply(name, yaml_path)`, `session.pool_status()`, or
+`session.pool_down(name)` to manage them. Applying a pool provisions billable
+workers; closing a session does not terminate them. Keep the persistent state
+directory until its cloud resources have been torn down.
+
+No global `sky.api_stop()` is called. With the default
+`manage_api_server=False`, stable SkyPilot 0.13+ continues to use its normal
+shared or remote server and its existing durable-job keys.
 
 ::: misen.executors.skypilot.SkyPilotExecutor
     options:

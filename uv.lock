@@ -1,16 +1,28 @@
 version = 1
 requires-python = ">=3.11"
 resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
+    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14'",
+    "python_full_version < '3.13'",
+    "python_full_version == '3.13.*'",
+    "python_full_version >= '3.14'",
 ]
+conflicts = [[
+    { package = "misen", extra = "skypilot" },
+    { package = "misen", extra = "skypilot-managed" },
+]]
 
 [[package]]
 name = "aiofiles"
@@ -1488,6 +1500,9 @@ dependencies = [
 skypilot = [
     { name = "skypilot" },
 ]
+skypilot-managed = [
+    { name = "skypilot-nightly" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1513,6 +1528,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=13.7.0" },
     { name = "skypilot", marker = "extra == 'skypilot'", specifier = ">=0.13" },
+    { name = "skypilot-nightly", marker = "extra == 'skypilot-managed'", specifier = "==1.0.0.dev20260905" },
     { name = "textual", specifier = ">=0.78.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "tyro", specifier = ">=1.0.0" },
@@ -2038,9 +2054,8 @@ name = "pandas"
 version = "2.3.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14' and sys_platform == 'win32'",
-    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
-    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.14'",
+    "python_full_version >= '3.14'",
 ]
 dependencies = [
     { name = "numpy", marker = "python_full_version >= '3.14'" },
@@ -2097,12 +2112,18 @@ name = "pandas"
 version = "3.0.5"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
+    "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
+    "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
     { name = "numpy", marker = "python_full_version < '3.14'" },
@@ -3192,6 +3213,68 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/69/b1/0ad50c2e89a3b18dafca3e8b5910e11aa9608dae8977394902fe59ba1e0d/skypilot-0.13.0.tar.gz", hash = "sha256:0bd0c59a649d59fa21f1093534318e6c2f50b30e10fb3f54f4d702acf2615fb7", size = 3313547 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/d9/a503213b79d362e7a5da595dd7fa38186a6d1adb3642466f1399045bafe2/skypilot-0.13.0-py3-none-any.whl", hash = "sha256:30411fb3622140e61d386494dfaaeefaee737f76565a3838d72a31157571d96c", size = 3653109 },
+]
+
+[[package]]
+name = "skypilot-nightly"
+version = "1.0.0.dev20260905"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "aiohttp" },
+    { name = "aiosqlite" },
+    { name = "alembic" },
+    { name = "anyio" },
+    { name = "asyncpg" },
+    { name = "bcrypt" },
+    { name = "cachetools" },
+    { name = "casbin" },
+    { name = "click" },
+    { name = "colorama" },
+    { name = "cryptography" },
+    { name = "fastapi" },
+    { name = "filelock" },
+    { name = "gitpython" },
+    { name = "greenlet" },
+    { name = "httpx" },
+    { name = "ijson" },
+    { name = "jinja2" },
+    { name = "jsonschema" },
+    { name = "networkx" },
+    { name = "orjson" },
+    { name = "packaging" },
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "paramiko" },
+    { name = "passlib" },
+    { name = "pendulum" },
+    { name = "pip" },
+    { name = "prettytable" },
+    { name = "prometheus-client" },
+    { name = "psutil" },
+    { name = "psycopg2-binary" },
+    { name = "pulp" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "python-dotenv" },
+    { name = "python-multipart" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "setproctitle" },
+    { name = "setuptools" },
+    { name = "sqlalchemy" },
+    { name = "sqlalchemy-adapter" },
+    { name = "tabulate" },
+    { name = "tqdm" },
+    { name = "types-paramiko" },
+    { name = "typing-extensions" },
+    { name = "uvicorn", extra = ["standard"] },
+    { name = "wheel" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f1/b4/4f641e7f5f432cdf90fcea0f728ec186a76b32ff8e1e073322bb537dba72/skypilot_nightly-1.0.0.dev20260905.tar.gz", hash = "sha256:9fd1dc221462ca53fe6f76ac4abd2835d5ce17b46446b2af0bab9aa77e470bab", size = 3565890 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/b8/90b1520292352f633bf14ce0fbfc034763b4ad25c75069b1a6168047572d/skypilot_nightly-1.0.0.dev20260905-py3-none-any.whl", hash = "sha256:d110af9b3ce610706e7cdce0c9e838e356ca32be03e69328a26885d0eaee44f3", size = 3912910 },
 ]
 
 [[package]]

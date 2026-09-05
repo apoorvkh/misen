@@ -150,16 +150,24 @@ in version 0.13 and newer:
 - An optional `manage_api_server` owns the local API process for a foreground
   session. CLI monitors and blocking submissions establish `executor.session()`
   automatically; nonblocking callers establish it explicitly. A lazy guardian
-  holds SkyPilot's server-creation lock, refuses existing local servers, starts
-  one server process group, and cleans it up on pipe EOF even after client
-  death. SDK autostart is replaced with health-only checking for the session,
-  then restored. No global stop command or endpoint/environment rewrite is used.
+  runs the SDK in a child process with native `SKY_RUNTIME_DIR` isolation and
+  private identity/configuration/ports. An authenticated local JSON socket
+  leases that namespace's server; concurrent clients share it, and the last
+  disconnect cleans up its process tree even after client death. Separate
+  namespaces have separate lifetime locks and servers. SDK autostart is
+  disabled only inside the broker. No parent SDK import, environment rewrite,
+  `HOME` override, or global stop command is used. A child-only compatibility
+  patch relocates SkyPilot's remaining legacy user-hash file and generated SSH
+  shortcuts, including in spawned request workers.
   Normal exit drains accepted launch requests before stopping; abrupt exit can
   interrupt unresolved requests. Durable records and local SkyPilot state are
-  retained for reconciliation, and this option is excluded from durable key
-  identity. Local consolidation mode is rejected so remote jobs and pool
-  controllers can continue after the API service stops. This requires exclusive
-  local SkyPilot use; concurrent clients must use the default shared-server mode.
+  retained for reconciliation. Managed keys include the persistent namespace
+  directory; unmanaged keys remain backwards-compatible. Private namespace
+  configuration rejects consolidation mode and shared databases so remote jobs
+  and pool controllers can continue after the API service stops. Pools belong
+  to this separate controller namespace and are managed explicitly through
+  session helpers. The managed dependency extra pins a tested nightly with
+  native isolation; the ordinary extra retains stable 0.13+ support.
 - Managed Dask is an orthogonal, intra-work-unit layer. Each Dask-backed work
   unit owns a temporary cluster inside its one SkyPilot allocation; Dask does
   not schedule Misen's work-unit DAG, and work units never share a live Dask
