@@ -205,10 +205,27 @@ SkyPilot settings. A remote jobs/pool controller is required
 (`jobs.controller.consolidation_mode: false`); shared database overrides are
 not supported. Pools in this namespace are distinct from ordinary SkyPilot
 pools. Use `with executor.session() as session:` and explicitly call
-`session.pool_apply(name, yaml_path)`, `session.pool_status()`, or
+`session.check(["aws"])`, `session.pool_apply(name, yaml_path)`, `session.pool_status()`, or
 `session.pool_down(name)` to manage them. Applying a pool provisions billable
 workers; closing a session does not terminate them. Keep the persistent state
 directory until its cloud resources have been torn down.
+
+Before the first launch or pool creation in a fresh namespace, run its credential
+check explicitly (ordinary `sky check` configures a different namespace):
+
+```python
+with executor.session() as session:
+    print(session.check(["aws"], verbose=True))
+    session.pool_apply("misen-dev", "misen-pool.yaml")
+```
+
+This check enables the selected clouds without provisioning workers. Install
+the matching provider extra (for AWS, `skypilot-nightly[aws]` at the version
+pinned by `misen[skypilot-managed]`) and ensure `rsync` is on `PATH`. For an
+S3-backed Misen workspace, export the selected AWS profile's credentials as
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and, if present,
+`AWS_SESSION_TOKEN` before opening the session; SkyPilot alone reading
+`~/.aws/credentials` does not configure the object-store client.
 
 No global `sky.api_stop()` is called. With the default
 `manage_api_server=False`, stable SkyPilot 0.13+ continues to use its normal

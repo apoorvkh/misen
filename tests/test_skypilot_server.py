@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.connection import Pipe
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from urllib.parse import urlsplit
 
 import psutil
 import pytest
@@ -255,12 +256,14 @@ def test_pool_status_omits_opaque_handles():
     ]
 
 
-def test_proxy_launch_is_json_native_and_does_not_wait(monkeypatch, tmp_path):
+@pytest.mark.parametrize("single", [True, False])
+def test_proxy_launch_is_json_native_and_does_not_wait(monkeypatch, tmp_path, single):
     session = ManagedSkyPilotSession(tmp_path)
     call = MagicMock(return_value="launch-id")
     monkeypatch.setattr(session, "call", call)
     sky = session.client
-    task = sky.Task(name="task", run="true", resources=[sky.Resources(infra="aws", cpus="1+")])
+    resource = sky.Resources(infra="aws", cpus="1+")
+    task = sky.Task(name="task", run="true", resources=resource if single else [resource])
     assert sky.jobs.launch(task, name="task", pool="pool") == "launch-id"
     call.assert_called_once_with(
         "launch",
@@ -273,6 +276,59 @@ def test_proxy_launch_is_json_native_and_does_not_wait(monkeypatch, tmp_path):
         pool="pool",
     )
     json.dumps(call.call_args.kwargs)
+
+
+@pytest.mark.parametrize("infra", ["aws/us-east-1", ["aws/us-east-1", "aws/us-west-2"]])
+def test_executor_resource_options_round_trip_through_proxy(monkeypatch, tmp_path, infra):
+    session = ManagedSkyPilotSession(tmp_path)
+    call = MagicMock(return_value="launch-id")
+    monkeypatch.setattr(session, "call", call)
+    sky = session.client
+    executor = SkyPilotExecutor(infra=infra)
+    resources = executor._resource_options(sky, WorkUnit(root=Task(_task), dependencies=set()))
+    task = sky.Task(name="task", run="true", resources=resources)
+    assert sky.jobs.launch(task, name="task", pool="pool") == "launch-id"
+    options = call.call_args.kwargs["task"]["resources"]
+    assert [option["infra"] for option in options] == ([infra] if isinstance(infra, str) else infra)
+    json.dumps(call.call_args.kwargs)
+
+
+def test_namespace_check_forwards_selected_infrastructure(monkeypatch, tmp_path):
+    session = ManagedSkyPilotSession(tmp_path)
+    result = {"default": {"AWS": ["compute", "storage"]}}
+    call = MagicMock(return_value=result)
+    monkeypatch.setattr(session, "call", call)
+    assert session.check(["aws"], verbose=True) == result
+    call.assert_called_once_with("check", infra_list=["aws"], verbose=True)
+
+
+def test_broker_check_uses_async_sdk_and_waits(monkeypatch):
+    sdk = SimpleNamespace(check=MagicMock(return_value="check-request"))
+    monkeypatch.setitem(sys.modules, "sky.client", SimpleNamespace(sdk=sdk))
+    result = {"default": {"AWS": ["compute", "storage"]}}
+    sky = SimpleNamespace(get=MagicMock(return_value=result), check=object())
+    assert broker._dispatch(sky, "check", {"infra_list": ["aws"], "verbose": True}) == result
+    sdk.check.assert_called_once_with(infra_list=("aws",), verbose=True)
+    sky.get.assert_called_once_with("check-request")
+
+
+@pytest.mark.parametrize("infra", ["aws", [], [""], [None]])
+def test_namespace_check_rejects_invalid_selection_without_starting(monkeypatch, tmp_path, infra):
+    session = ManagedSkyPilotSession(tmp_path)
+    start = MagicMock()
+    monkeypatch.setattr(session, "ensure_started", start)
+    with pytest.raises(ValueError, match="infra_list"):
+        session.check(infra)
+    start.assert_not_called()
+
+
+def test_status_dispatch_bypasses_native_process_detector(monkeypatch):
+    status = MagicMock(return_value=[{"status": "FAILED"}])
+    monkeypatch.setattr(broker, "_api_status", status)
+    sky = SimpleNamespace(api_status=MagicMock(side_effect=AssertionError("native process detector")))
+    assert broker._dispatch(sky, "api_status", {"request_ids": ["request"]}) == [{"status": "FAILED"}]
+    status.assert_called_once_with(request_ids=["request"])
+    sky.api_status.assert_not_called()
 
 
 def _lease(leases):
@@ -334,6 +390,49 @@ _live = pytest.mark.skipif(os.environ.get("MISEN_TEST_SKYPILOT_SERVER") != "1", 
 
 
 @_live
+def test_real_async_request_status_reports_success_and_failure(monkeypatch, tmp_path):
+    """Exercise HTTP status against the wrapped server, without creating cloud resources."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    with managed_session("requests") as session:
+        sky = session.client
+        session.ensure_started()
+        env = server._isolated_environment(
+            session.directory, (session.directory / "identity").read_text().strip(), session.directory / "config.yaml"
+        )
+        env.update(
+            SKYPILOT_API_SERVER_ENDPOINT=session.endpoint,
+            SKYPILOT_API_SERVER_LOCAL_PORT=str(urlsplit(session.endpoint).port),
+        )
+        # Submit a read-only cluster-status request in a child so the parent
+        # still never imports SkyPilot. A fresh namespace has no clusters.
+        code = (
+            "from misen.utils.skypilot_broker import _load_isolated_sdk; "
+            "sky = _load_isolated_sdk(); "
+            "sky.server.common.check_server_healthy_or_start_fn = "
+            "lambda *a, **k: sky.server.common.check_server_healthy(); "
+            "from sky.client import sdk; print(sdk.status())"
+        )
+        success = subprocess.check_output([sys.executable, "-c", code], env=env, text=True, timeout=30).strip()
+        # This fresh namespace has no controller: cancellation fails remotely,
+        # after returning an accepted request ID. It cannot cancel another user's job.
+        failure = sky.jobs.cancel(job_ids=[1])
+        deadline = time.monotonic() + 60
+        while True:
+            statuses = sky.api_status(request_ids=[success, failure])
+            states = {item["request_id"]: item["status"] for item in statuses}
+            assert set(states) == {success, failure}
+            if states == {success: "SUCCEEDED", failure: "FAILED"}:
+                break
+            assert time.monotonic() < deadline, states
+            time.sleep(0.1)
+        assert sky.get(success) == []
+        with pytest.raises(ExecutionError, match="ClusterNotUpError"):
+            sky.get(failure)
+        session.client.api_info()
+    assert "sky" not in sys.modules
+
+
+@_live
 def test_real_namespaces_share_leases_restart_and_leave_parent_untouched(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setenv("SKYPILOT_API_SERVER_ENDPOINT", "http://ordinary.example:1234")
@@ -348,7 +447,7 @@ def test_real_namespaces_share_leases_restart_and_leave_parent_untouched(monkeyp
         with ThreadPoolExecutor(max_workers=3) as threads:
             list(threads.map(lambda session: session.client.api_info(), (first, same, other)))
         first.client.Resources(infra="aws/us-east-1", cpus="1+", memory="2+").validate()
-        assert first.client.api_status(request_ids=[]) == []
+        assert first.client.api_status(request_ids=["nonexistent-request"]) == []
         assert first.endpoint == same.endpoint
         assert first.endpoint != other.endpoint
         for session in (first, other):

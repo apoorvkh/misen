@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any
 from misen.exceptions import ConfigError, ExecutionError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
     from multiprocessing.connection import Connection
 
     from misen.executors.skypilot import SkyPilotJob
@@ -224,6 +224,21 @@ class ManagedSkyPilotSession:
             raise ExecutionError(reply["error"])
         return _decode_result(reply["result"])
 
+    def check(self, infra_list: Sequence[str], *, verbose: bool = False) -> Any:
+        """Check credentials and enable the selected clouds in this namespace.
+
+        Run once before using a fresh namespace, and again after changing cloud
+        credentials. This does not provision workers or modify other namespaces.
+        """
+        if (
+            isinstance(infra_list, str)
+            or not infra_list
+            or any(not isinstance(item, str) or not item for item in infra_list)
+        ):
+            msg = "infra_list must be a nonempty sequence of infrastructure names, e.g. ['aws']."
+            raise ValueError(msg)
+        return self.call("check", infra_list=list(infra_list), verbose=verbose)
+
     def pool_apply(self, pool_name: str, config: str | Path) -> None:
         """Create/update a pool in this namespace, waiting for SkyPilot's result."""
         self.call("pool_apply", pool_name=pool_name, config=str(Path(config).expanduser().resolve()))
@@ -311,7 +326,10 @@ class _SkyJobs:
 
     def launch(self, task: _Task, **kwargs: Any) -> str:
         options = dict(task.options)
-        options["resources"] = [resource.options for resource in options["resources"]]
+        resources = options["resources"]
+        if isinstance(resources, _Resources):
+            resources = [resources]
+        options["resources"] = [resource.options for resource in resources]
         return self.session.call("launch", task=options, **kwargs)
 
     def queue_v2(self, **kwargs: Any) -> str:

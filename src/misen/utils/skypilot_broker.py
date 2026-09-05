@@ -124,6 +124,29 @@ def _encode_result(value: Any) -> Any:
     raise TypeError(msg)
 
 
+def _api_status(**arguments: Any) -> Any:
+    """Query our endpoint without SkyPilot's native command-line process probe.
+
+    Our server runs through this module's isolation bootstrap, so the SDK's
+    search for ``-m sky.server.server`` incorrectly reports it as stopped.
+    Use the pinned SDK's authenticated transport and payloads, without changing
+    its process detection or exposing any global start/stop operations.
+    """
+    from sky.client import common as client_common
+    from sky.server import common as server_common
+    from sky.server.requests import payloads
+
+    body = payloads.RequestStatusBody(**arguments)
+    response = server_common.make_authenticated_request(
+        "GET",
+        "/api/status",
+        params=server_common.request_body_to_params(body),
+        timeout=(client_common.API_SERVER_REQUEST_CONNECTION_TIMEOUT_SECONDS, None),
+    )
+    server_common.handle_request_error(response)
+    return [payloads.RequestPayload(**request) for request in response.json()]
+
+
 def _dispatch(sky: Any, operation: str, arguments: dict[str, Any]) -> Any:
     """Expose only the SDK operations required by Misen and namespace pools."""
     if operation == "validate_resources":
@@ -142,8 +165,14 @@ def _dispatch(sky: Any, operation: str, arguments: dict[str, Any]) -> Any:
         if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], list):  # noqa: PLR2004
             return result[0], None
         return result
-    if operation in {"api_status", "api_info"}:
-        return getattr(sky, operation)(**arguments)
+    if operation == "api_status":
+        return _api_status(**arguments)
+    if operation == "api_info":
+        return sky.api_info()
+    if operation == "check":
+        from sky.client import sdk
+
+        return sky.get(sdk.check(infra_list=tuple(arguments["infra_list"]), verbose=arguments["verbose"]))
     if operation == "pool_apply":
         from sky.serve.serve_utils import UpdateMode
 
