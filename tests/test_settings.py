@@ -249,6 +249,7 @@ class TestConfigurable:
                 "use_spot = true\n"
                 'name_prefix = "research"\n'
                 'pool = "misen-dev"\n'
+                "manage_api_server = true\n"
                 "[executor.accelerators]\n"
                 'cuda = ["A100", "L4"]\n'
                 "[executor.accelerator_memory]\n"
@@ -268,6 +269,7 @@ class TestConfigurable:
         assert executor.use_spot is True
         assert executor.name_prefix == "research"
         assert executor.pool == "misen-dev"
+        assert executor.manage_api_server is True
         assert executor.accelerators == {"cuda": ["A100", "L4"]}
         assert executor.accelerator_memory == {"A100": 80, "L4": 24}
 

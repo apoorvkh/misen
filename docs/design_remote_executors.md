@@ -147,6 +147,19 @@ in version 0.13 and newer:
   because a descendant admitted first could occupy an exclusive worker while
   its parent waits for pool capacity; already-cached parents are fine. SkyPilot
   currently labels pools beta and its pool CLI experimental.
+- An optional `manage_api_server` owns the local API process for a foreground
+  session. CLI monitors and blocking submissions establish `executor.session()`
+  automatically; nonblocking callers establish it explicitly. A lazy guardian
+  holds SkyPilot's server-creation lock, refuses existing local servers, starts
+  one server process group, and cleans it up on pipe EOF even after client
+  death. SDK autostart is replaced with health-only checking for the session,
+  then restored. No global stop command or endpoint/environment rewrite is used.
+  Normal exit drains accepted launch requests before stopping; abrupt exit can
+  interrupt unresolved requests. Durable records and local SkyPilot state are
+  retained for reconciliation, and this option is excluded from durable key
+  identity. Local consolidation mode is rejected so remote jobs and pool
+  controllers can continue after the API service stops. This requires exclusive
+  local SkyPilot use; concurrent clients must use the default shared-server mode.
 - Managed Dask is an orthogonal, intra-work-unit layer. Each Dask-backed work
   unit owns a temporary cluster inside its one SkyPilot allocation; Dask does
   not schedule Misen's work-unit DAG, and work units never share a live Dask

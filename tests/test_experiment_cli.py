@@ -1,5 +1,6 @@
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -293,6 +294,7 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
             "research",
             "--executor.pool",
             "misen-dev",
+            "--executor.manage-api-server",
             "list",
         ],
     )
@@ -302,6 +304,7 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
     assert executor.infra == "gcp/us-central1"
     assert executor.name_prefix == "research"
     assert executor.pool == "misen-dev"
+    assert executor.manage_api_server is True
 
 
 def test_resolve_experiment_reference_accepts_instance(monkeypatch, tmp_path) -> None:
@@ -979,6 +982,8 @@ def test_experiment_cli_parses_positional_run_command(monkeypatch) -> None:
     workspace = object()
 
     class StubExecutor:
+        session = staticmethod(nullcontext)
+
         def submit(self, *, tasks: set[object], workspace: object, blocking: bool = False) -> tuple[None, None]:
             submit_calls.append((tasks, workspace, blocking))
             return None, None
@@ -1210,6 +1215,8 @@ def test_submit_and_watch_jobs_calls_submit_without_blocking(monkeypatch) -> Non
     submit_args: dict[str, object] = {}
 
     class StubExecutor:
+        session = staticmethod(nullcontext)
+
         def submit(
             self,
             tasks: set[Task[int]],
@@ -1262,6 +1269,8 @@ def test_submit_and_watch_jobs_raises_for_failed_job(monkeypatch) -> None:
     graph.add_node(FakeJob(work_unit=WorkUnit(root=task, dependencies=set()), states=["failed"]))
 
     class StubExecutor:
+        session = staticmethod(nullcontext)
+
         def submit(self, **_kwargs: object) -> DependencyGraph[Job]:
             return graph
 
@@ -1286,6 +1295,8 @@ def test_submit_and_watch_jobs_suppresses_runtime_events_only_during_watch(monke
     seen: dict[str, str | None] = {}
 
     class StubExecutor:
+        session = staticmethod(nullcontext)
+
         def submit(
             self,
             tasks: set[Task[int]],
@@ -1348,6 +1359,8 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     graph.add_node(sink_job)
 
     class StubExecutor:
+        session = staticmethod(nullcontext)
+
         def submit(
             self,
             *,

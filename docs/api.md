@@ -179,7 +179,24 @@ durably records managed IDs as requests complete. A server-side launch failure
 therefore appears as a failed job during polling; immediate client and transport
 failures still raise `SubmissionError`.
 
+Set `manage_api_server=True` to own a local API server for the run on
+Linux/macOS. CLI monitoring and `submit(..., blocking=True)` scope it
+automatically. Wrap nonblocking Python submissions and polling in
+`with executor.session():`. `Experiment.run()` scopes its submission-only
+operation. Fully cached runs need no server. Session exit resolves pending
+launch requests before stopping the owned server; remote jobs, pools, and
+durable records are retained. A guardian also cleans up after abrupt client
+termination, which may interrupt unresolved launch requests. Closed-session
+handles require resubmission inside a new session to reattach.
+
+This opt-in mode requires exclusive local SkyPilot use and a remote jobs/pool
+controller (`jobs.controller.consolidation_mode` unset or false). Existing
+local servers and remote endpoints are rejected. It never calls the global
+`sky.api_stop()` command. With the default `manage_api_server=False`, the SDK
+continues to use its normal shared or remote server.
+
 ::: misen.executors.skypilot.SkyPilotExecutor
     options:
       members:
         - __init__
+        - session

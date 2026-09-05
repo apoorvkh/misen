@@ -400,6 +400,51 @@ could otherwise deadlock a finite pool. Run dependent stages separately or
 omit `pool` for a dependent DAG. SkyPilot currently labels pools beta and the
 CLI experimental.
 
+To avoid leaving a local API service running after Misen exits, enable
+`manage_api_server` (Linux/macOS):
+
+```toml
+[executor]
+type = "skypilot"
+infra = "aws/us-east-1"
+pool = "misen-dev"  # optional; the existing pool remains reusable
+manage_api_server = true
+```
+
+CLI runs, including the TUI and `run --no-tui`, keep the server alive through
+job monitoring and stop it on exit. Blocking Python submissions do the same.
+For nonblocking Python calls, scope submission and polling explicitly:
+
+```python
+executor = SkyPilotExecutor(manage_api_server=True, pool="misen-dev")
+with executor.session():
+    jobs = task.submit(executor=executor, workspace=workspace)
+    for job in jobs.nodes():
+        job.wait()
+```
+
+The server starts only when pending work needs it. On normal exit (including
+Python exceptions and Ctrl-C), Misen first resolves accepted launch requests
+and persists their managed-job IDs, which can delay shutdown. A guardian
+process stops the owned server tree even if the Misen process is killed;
+an abrupt kill can interrupt unresolved launches. SkyPilot's durable state and
+Misen's job records remain available for a later run to reconcile. Server logs
+are retained at `~/.sky/misen-api-server-*.log`.
+
+SkyPilot 0.13 shares local state across API servers, so this mode requires
+exclusive local use. It refuses to start if another local server exists;
+stop that server explicitly with `uv run sky api stop` first (including one
+started by the pool-creation command above), and avoid other local SkyPilot
+sessions during the run. Remote API endpoints and
+`jobs.controller.consolidation_mode: true` are rejected: the jobs/pool
+controller must run remotely and outlive the local API service. Stopping
+Misen's API server does **not** cancel remote jobs or terminate pool workers;
+they retain their usual billing and lifecycle. `Experiment.run()` scopes only
+submission, as before; use the CLI or blocking submissions to wait for completion.
+Handles returned from an ended managed session cannot silently start a new
+server; resubmit inside a new session to reattach. The default
+`manage_api_server = false` retains SkyPilot's normal shared/remote behavior.
+
 SkyPilot [launch calls are
 asynchronous](https://docs.skypilot.ai/en/latest/reference/async.html). Misen
 persists each returned request ID immediately, allowing independent work units

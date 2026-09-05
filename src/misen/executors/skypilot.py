@@ -36,11 +36,15 @@ from misen.utils.dask_runtime import (
 from misen.utils.job_dependencies import dependency_state_name, publish_dependency_state
 from misen.utils.resource_env import resource_environment
 from misen.utils.runtime_events import work_unit_label
+from misen.utils.skypilot_server import active_session, managed_session
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
+    from misen.executor import CompletedJob
+    from misen.tasks import Task
     from misen.utils.graph import DependencyGraph
     from misen.utils.snapshot import ProjectSnapshot
     from misen.utils.work_unit import WorkUnit
@@ -80,9 +84,10 @@ _SKYPILOT_STATE_MAP: dict[str, JobState] = {
 
 
 @cache
-def _pre_pool_key_type(executor_type: type[msgspec.Struct]) -> type[msgspec.Struct]:
-    """Build a hash-only structural twin of an executor before ``pool`` existed."""
-    fields = tuple(field for field in executor_type.__struct_fields__ if field != "pool")
+def _pre_pool_key_type(executor_type: type[msgspec.Struct], *, include_pool: bool = False) -> type[msgspec.Struct]:
+    """Preserve durable keys independently of the API server's local lifetime."""
+    ignored = {"manage_api_server"} if include_pool else {"pool", "manage_api_server"}
+    fields = tuple(field for field in executor_type.__struct_fields__ if field not in ignored)
     return msgspec.defstruct(
         executor_type.__name__,
         fields,
@@ -95,12 +100,15 @@ def _pre_pool_key_type(executor_type: type[msgspec.Struct]) -> type[msgspec.Stru
 def _load_skypilot() -> Any:
     """Load the optional SkyPilot SDK on first use."""
     try:
-        return importlib.import_module("sky")
+        sky = importlib.import_module("sky")
     except ModuleNotFoundError as exc:
         if exc.name != "sky":
             raise
         msg = f"SkyPilotExecutor requires SkyPilot >=0.13; install it with `{_SKYPILOT_INSTALL}`."
         raise ConfigError(msg) from exc
+    if (session := active_session()) is not None:
+        session.ensure_started(sky)
+    return sky
 
 
 def _field(record: object, name: str, default: Any = None) -> Any:
@@ -139,6 +147,7 @@ class SkyPilotJob(Job):
     """One Misen work unit backed by one SkyPilot managed job."""
 
     __slots__ = (
+        "_api_session",
         "_managed_job_id_persisted",
         "_terminal_state",
         "deadline_minutes",
@@ -175,6 +184,9 @@ class SkyPilotJob(Job):
         self.deadline_minutes = deadline_minutes
         self.workspace = workspace
         self._terminal_state: JobState | None = None
+        self._api_session = active_session()
+        if self._api_session is not None:
+            self._api_session.jobs.append(self)
 
     def state(self) -> JobState:
         """Return this managed job's normalized SkyPilot state."""
@@ -182,6 +194,8 @@ class SkyPilotJob(Job):
 
     def cancel(self) -> None:
         """Cancel an unresolved launch request or its assigned managed job."""
+        if self._api_session is not None:
+            self._api_session.check_open()
         sky = _load_skypilot()
         try:
             self._cancel(sky)
@@ -628,6 +642,10 @@ class SkyPilotJob(Job):
         if not active_jobs:
             return result
 
+        for job in active_jobs:
+            if job._api_session is not None:  # noqa: SLF001
+                job._api_session.check_open()  # noqa: SLF001
+
         sky = _load_skypilot()
         for job in active_jobs:
             if job.managed_job_id is not None and not job._managed_job_id_persisted:  # noqa: SLF001
@@ -766,8 +784,31 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
     dask_scheduler_port: int = DEFAULT_DASK_SCHEDULER_PORT
     name_prefix: str = "misen"
     pool: str | None = None
+    manage_api_server: bool = False
     _job_class: ClassVar[type[Job] | None] = SkyPilotJob
     _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
+
+    def session(self) -> AbstractContextManager[None]:
+        """Own a local API server until the enclosing run/session exits.
+
+        With ``manage_api_server=True``, use this around nonblocking Python
+        submissions and polling. Blocking submissions and CLI runs open a
+        session automatically. The server starts lazily when work is pending.
+        """
+        return managed_session() if self.manage_api_server else super().session()
+
+    def submit(
+        self,
+        tasks: set[Task],
+        workspace: Workspace,
+        *,
+        blocking: bool = False,
+    ) -> DependencyGraph[CompletedJob | SkyPilotJob]:
+        """Submit jobs, automatically scoping the API server for blocking use."""
+        if blocking:
+            with self.session():
+                return super().submit(tasks, workspace, blocking=True)
+        return super().submit(tasks, workspace, blocking=False)
 
     def __post_init__(self) -> None:
         """Normalize configuration and reject modes unsafe on remote workers."""
@@ -860,6 +901,9 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
     ) -> None:
         """Reject local-only storage and validate every remote resource request."""
         del work_graph
+        if self.manage_api_server and active_session() is None:
+            msg = "Nonblocking submissions with manage_api_server=True require `with executor.session():`."
+            raise ConfigError(msg)
         pending_set = set(pending_work_units)
         if self.pool is not None and any(work_unit.dependencies & pending_set for work_unit in pending_work_units):
             msg = (
@@ -896,9 +940,7 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
 
     def _job_key_identity(self) -> object:
         """Preserve pre-pool reattachment keys when the pool is unset."""
-        if self.pool is not None:
-            return self
-        legacy_type = _pre_pool_key_type(type(self))
+        legacy_type = _pre_pool_key_type(type(self), include_pool=self.pool is not None)
         return legacy_type(*(getattr(self, field) for field in legacy_type.__struct_fields__))
 
     def _accelerator_models(self, work_unit: WorkUnit) -> Sequence[str | None]:

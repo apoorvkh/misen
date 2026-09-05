@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, ClassVar, Generic, Literal, TypeAlias, TypeVar, cast
 
 import msgspec
@@ -78,6 +79,15 @@ class Executor(Configurable, Generic[JobT]):
     env_store_dir: str | None = None
     prewarm_envs: bool = False
     _job_class: ClassVar[type[Job] | None] = None
+
+    def session(self) -> AbstractContextManager[None]:
+        """Keep backend services alive across submission and job observation.
+
+        Most executors require no scoped resources. Managed SkyPilot API
+        servers use this boundary for nonblocking Python submissions; CLI
+        runs and blocking submissions establish it automatically.
+        """
+        return nullcontext()
 
     def submit(
         self,

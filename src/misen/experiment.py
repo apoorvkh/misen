@@ -173,7 +173,8 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
             executor.__class__.__name__,
             workspace.__class__.__name__,
         )
-        executor.submit(tasks=experiment_tasks, workspace=workspace)
+        with executor.session():
+            executor.submit(tasks=experiment_tasks, workspace=workspace)
 
     @_ClassOrInstanceMethod
     def cli(self: Any) -> None:

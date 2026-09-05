@@ -41,4 +41,4 @@ jobs:
                   enable-cache: true
             - run: uv sync --frozen
             - run: uv pip install --python .venv/bin/python "skypilot${{ matrix.skypilot }}"
-            - run: .venv/bin/pytest -q tests/test_skypilot_executor.py
+            - run: .venv/bin/pytest -q tests/test_skypilot_executor.py tests/test_skypilot_server.py

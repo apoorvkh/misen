@@ -621,7 +621,8 @@ def test_unset_pool_preserves_pre_pool_durable_key_identity() -> None:
     assert stable_hash(executor._job_key_identity()) == 4424697057611365518
 
     pooled = SkyPilotExecutor(pool="misen-dev")
-    assert pooled._job_key_identity() is pooled
+    assert pooled._job_key_identity().pool == "misen-dev"
+    assert "manage_api_server" not in pooled._job_key_identity().__struct_fields__
 
 
 def test_unset_pool_preserves_runtime_subclass_identity_and_fields() -> None:
@@ -632,7 +633,9 @@ def test_unset_pool_preserves_runtime_subclass_identity_and_fields() -> None:
     assert identity_type.__module__ == type(executor).__module__
     assert identity_type.__name__ == type(executor).__name__
     assert identity_type.__qualname__ == type(executor).__qualname__
-    assert identity_type.__struct_fields__ == tuple(field for field in executor.__struct_fields__ if field != "pool")
+    assert identity_type.__struct_fields__ == tuple(
+        field for field in executor.__struct_fields__ if field not in {"pool", "manage_api_server"}
+    )
     assert identity.scheduling_class == "priority"
 
     changed = _ExtendedSkyPilotExecutor(scheduling_class="batch")._job_key_identity()
@@ -641,7 +644,8 @@ def test_unset_pool_preserves_runtime_subclass_identity_and_fields() -> None:
     assert stable_hash(identity) != stable_hash(SkyPilotExecutor()._job_key_identity())
 
     pooled = _ExtendedSkyPilotExecutor(pool="misen-dev", scheduling_class="priority")
-    assert pooled._job_key_identity() is pooled
+    assert pooled._job_key_identity().pool == "misen-dev"
+    assert pooled._job_key_identity().scheduling_class == "priority"
 
 
 @pytest.mark.parametrize("pool", ["misen-dev", "Research_Pool.2", "a"])
@@ -1900,6 +1904,13 @@ def test_installed_skypilot_sdk_contract() -> None:
         assert callable(sky.api_status)
         inspect.signature(sky.api_cancel).bind(request_ids=["request-id"], silent=True)
         assert callable(sky.server.common.is_api_server_local)
+        assert callable(sky.server.common.check_server_healthy_or_start_fn)
+        assert callable(sky.server.common.check_server_healthy)
+        assert callable(sky.server.common.get_server_url)
+        assert callable(sky.skypilot_config.get_nested)
+        from sky.skylet import constants
+        assert isinstance(constants.API_SERVER_CREATION_LOCK_PATH, str)
+        assert isinstance(constants.ENV_VAR_IS_SKYPILOT_SERVER, str)
         """
     )
     result = subprocess.run(  # noqa: S603

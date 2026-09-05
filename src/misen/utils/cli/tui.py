@@ -68,7 +68,7 @@ def submit_and_watch_jobs(*, experiment: Any, executor: Any, workspace: Any) -> 
         JobFailedError: If one or more monitored jobs fail.
     """
     named_tasks = experiment.normalized_tasks()
-    with _runtime_job_board_suppressed():
+    with executor.session(), _runtime_job_board_suppressed():
         job_graph = executor.submit(tasks=set(named_tasks.values()), workspace=workspace, blocking=False)
         with _runtime_events_suppressed():
             final_states = watch_tasks(named_tasks=named_tasks, job_graph=job_graph, workspace=workspace)
@@ -88,7 +88,7 @@ def run_without_tui(*, experiment: Any, executor: Any, workspace: Any) -> None:
     """
     named_tasks = experiment.normalized_tasks()
     console = Console(stderr=True, soft_wrap=True)
-    with _runtime_job_board_suppressed():
+    with executor.session(), _runtime_job_board_suppressed():
         job_graph = executor.submit(tasks=set(named_tasks.values()), workspace=workspace, blocking=False)
         if not job_graph.nodes():
             console.print("[bold blue][misen][/bold blue] No jobs were submitted.", style="dim")
