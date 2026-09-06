@@ -89,6 +89,10 @@ class Executor(Configurable, Generic[JobT]):
         """
         return nullcontext()
 
+    def _run_defaults_to_blocking(self) -> bool:
+        """Whether Experiment.run must keep an attached coordinator alive."""
+        return False
+
     def submit(
         self,
         tasks: set[Task],

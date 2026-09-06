@@ -154,6 +154,8 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
         self,
         workspace: Workspace | Literal["auto"] = "auto",
         executor: Executor | Literal["auto"] = "auto",
+        *,
+        blocking: bool | None = None,
     ) -> None:
         """Submit all experiment tasks to an executor.
 
@@ -162,6 +164,9 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
                 settings/defaults.
             executor: Executor instance, or ``"auto"`` to resolve from
                 settings/defaults.
+            blocking: Wait for completion. ``None`` waits for attached graph
+                executors and preserves submission-only behavior elsewhere.
+                Explicit ``False`` requires the caller to own any needed session.
         """
         workspace = Workspace.resolve_auto(workspace)
         executor = Executor.resolve_auto(executor)
@@ -173,8 +178,15 @@ class Experiment(Struct, Generic[TasksT], metaclass=_FrozenStructMeta):
             executor.__class__.__name__,
             workspace.__class__.__name__,
         )
-        with executor.session():
+        if blocking is False:
             executor.submit(tasks=experiment_tasks, workspace=workspace)
+            return
+        with executor.session():
+            executor.submit(
+                tasks=experiment_tasks,
+                workspace=workspace,
+                blocking=blocking if blocking is not None else executor._run_defaults_to_blocking(),  # noqa: SLF001
+            )
 
     @_ClassOrInstanceMethod
     def cli(self: Any) -> None:

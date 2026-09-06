@@ -20,9 +20,11 @@ import tyro
 from dotenv import load_dotenv
 
 from misen.utils.dask_runtime import run_role_from_env
+from misen.utils.resource_env import narrow_accelerator_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
 
 _ENV_FILES_LOADED = "MISEN_ENV_FILES_LOADED"
 
@@ -65,6 +67,18 @@ def execute(
         os.execve(sys.executable, [sys.executable, "-m", "misen.utils.execute", *sys.argv[1:]], env)  # noqa: S606
         return
 
+    attempt_identity = None
+    if "MISEN_RUN_ID" in os.environ or "MISEN_ATTEMPT_ID" in os.environ:
+        from misen.executors.skypilot import _consume_attempt_identity, _execute_attempt
+
+        attempt_identity = _consume_attempt_identity()
+    if "MISEN_ACCELERATOR_COUNT" in os.environ:
+        inherited = dict(os.environ)
+        narrowed = narrow_accelerator_environment(inherited, inherited)
+        os.environ.pop("MISEN_ACCELERATOR_COUNT", None)
+        os.environ.pop("MISEN_ACCELERATOR_TYPE", None)
+        os.environ.update(narrowed)
+
     if run_role_from_env():
         return
 
@@ -79,7 +93,10 @@ def execute(
     streaming = workspace.streaming_job_log(job_log_path) if job_log_path is not None else contextlib.nullcontext()
 
     with streaming:
-        payload_fn()
+        if attempt_identity is None:
+            payload_fn()
+        else:
+            _execute_attempt(workspace, payload_fn, attempt_identity)
 
 
 if __name__ == "__main__":

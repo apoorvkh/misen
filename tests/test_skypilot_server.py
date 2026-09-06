@@ -20,15 +20,19 @@ from urllib.parse import urlsplit
 import psutil
 import pytest
 
+import misen.executors.skypilot as broker
 import misen.executors.skypilot as executor_module
-import misen.utils.skypilot_broker as broker
-import misen.utils.skypilot_server as server
+import misen.executors.skypilot as server
 from misen import Task, meta
 from misen.exceptions import ConfigError, ExecutionError, SubmissionError
 from misen.executor import Executor
-from misen.executors.skypilot import SkyPilotExecutor, SkyPilotJob
-from misen.utils.hashing import stable_hash
-from misen.utils.skypilot_server import ManagedSkyPilotSession, active_session, managed_session
+from misen.executors.skypilot import (
+    ManagedSkyPilotSession,
+    SkyPilotExecutor,
+    SkyPilotJob,
+    active_session,
+    managed_session,
+)
 from misen.utils.work_unit import WorkUnit
 from misen.workspaces.memory import InMemoryWorkspace
 
@@ -92,16 +96,22 @@ def test_invalid_namespace_rejected(name):
         SkyPilotExecutor(api_server_namespace=name)
 
 
-def test_namespace_keys_are_distinct_and_external_keys_unchanged(monkeypatch, tmp_path):
+def test_capacity_profiles_do_not_change_namespace_session_isolation(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    for pool in (None, "misen-dev"):
-        external = SkyPilotExecutor(pool=pool)
-        first = SkyPilotExecutor(pool=pool, manage_api_server=True, api_server_namespace="first")
-        second = SkyPilotExecutor(pool=pool, manage_api_server=True, api_server_namespace="second")
-        assert len({stable_hash(item._job_key_identity()) for item in (external, first, second)}) == 3
-        assert stable_hash(external._job_key_identity()) == stable_hash(
-            SkyPilotExecutor(pool=pool, api_server_namespace="ignored")._job_key_identity()
-        )
+    for source in ({"cluster": "misen-cpu"}, {"pool": "misen-dev"}):
+        capacity = {"cpu": source}
+        external = SkyPilotExecutor(capacity=capacity, manage_api_server=False)
+        first = SkyPilotExecutor(capacity=capacity, api_server_namespace="first")
+        second = SkyPilotExecutor(capacity=capacity, api_server_namespace="second")
+        assert first.capacity == second.capacity == external.capacity
+        with first.session() as first_session:
+            assert active_session() is first_session
+            with second.session() as second_session:
+                assert active_session() is second_session
+                assert first_session.directory != second_session.directory
+            assert active_session() is first_session
+        with external.session():
+            assert active_session() is None
 
 
 def test_child_environment_isolated_without_hiding_credentials(monkeypatch, tmp_path):
@@ -135,10 +145,19 @@ def test_blocking_submission_scopes_cleanup(monkeypatch):
 
 def test_nonblocking_requires_matching_session():
     executor = SkyPilotExecutor(manage_api_server=True, api_server_namespace="first")
+    workspace = SimpleNamespace(
+        supports_job_file_reads=lambda: True,
+        bootstrap_transport=lambda: "remote-fetch",
+        get_temp_dir=lambda: server.Path(".cache/misen/tmp"),
+    )
     with pytest.raises(ConfigError, match="with executor.session"):
-        executor.submit({Task(_task)}, InMemoryWorkspace())
-    with managed_session("second"), pytest.raises(ConfigError, match="other SkyPilot namespace"):
-        executor.submit({Task(_task)}, InMemoryWorkspace())
+        executor._validate_submission(work_graph=None, pending_work_units=[], workspace=workspace)
+    with managed_session("second"), pytest.raises(ConfigError, match="with executor.session"):
+        executor._validate_submission(work_graph=None, pending_work_units=[], workspace=workspace)
+    with managed_session("second"), executor.session() as session:
+        assert active_session() is session
+        assert session.directory == server.namespace_directory("first")
+        executor._validate_submission(work_graph=None, pending_work_units=[], workspace=workspace)
 
 
 def test_empty_submission_never_starts(monkeypatch):
@@ -280,16 +299,18 @@ def test_proxy_launch_is_json_native_and_does_not_wait(monkeypatch, tmp_path, si
 
 @pytest.mark.parametrize("infra", ["aws/us-east-1", ["aws/us-east-1", "aws/us-west-2"]])
 def test_executor_resource_options_round_trip_through_proxy(monkeypatch, tmp_path, infra):
+    from misen.executors.skypilot import SkyPilotCapacity
+
     session = ManagedSkyPilotSession(tmp_path)
     call = MagicMock(return_value="launch-id")
     monkeypatch.setattr(session, "call", call)
     sky = session.client
-    executor = SkyPilotExecutor(infra=infra)
-    resources = executor._resource_options(sky, WorkUnit(root=Task(_task), dependencies=set()))
+    profile = SkyPilotCapacity(infra=infra, cpus=1, memory=8)
+    resources = [sky.Resources(**profile.as_sky_options())]
     task = sky.Task(name="task", run="true", resources=resources)
     assert sky.jobs.launch(task, name="task", pool="pool") == "launch-id"
     options = call.call_args.kwargs["task"]["resources"]
-    assert [option["infra"] for option in options] == ([infra] if isinstance(infra, str) else infra)
+    assert [option["infra"] for option in options] == [infra]
     json.dumps(call.call_args.kwargs)
 
 
@@ -406,7 +427,7 @@ def test_real_async_request_status_reports_success_and_failure(monkeypatch, tmp_
         # Submit a read-only cluster-status request in a child so the parent
         # still never imports SkyPilot. A fresh namespace has no clusters.
         code = (
-            "from misen.utils.skypilot_broker import _load_isolated_sdk; "
+            "from misen.executors.skypilot import _load_isolated_sdk; "
             "sky = _load_isolated_sdk(); "
             "sky.server.common.check_server_healthy_or_start_fn = "
             "lambda *a, **k: sky.server.common.check_server_healthy(); "
@@ -477,7 +498,7 @@ def test_real_namespaces_share_leases_restart_and_leave_parent_untouched(monkeyp
 def test_real_client_sigkill_stops_owned_tree(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     code = (
-        "import json, time; from misen.utils.skypilot_server import managed_session; "
+        "import json, time; from misen.executors.skypilot import managed_session; "
         "ctx = managed_session('crash'); s = ctx.__enter__(); s.client.api_info(); "
         "print((s.directory / 'server.json').read_text(), flush=True); time.sleep(180)"
     )
@@ -506,7 +527,7 @@ def test_real_client_sigkill_stops_owned_tree(monkeypatch, tmp_path):
 def test_real_client_death_during_startup_stops_owned_tree(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     code = (
-        "from misen.utils.skypilot_server import managed_session; "
+        "from misen.executors.skypilot import managed_session; "
         "ctx = managed_session('early-crash'); s = ctx.__enter__(); s.client.api_info()"
     )
     client = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

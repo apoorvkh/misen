@@ -280,7 +280,28 @@ def test_experiment_cli_instance_defaults_still_overridable_by_flags(captured_ar
     assert exp.value == 99
 
 
-def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_args) -> None:
+def test_experiment_cli_builds_skypilot_executor_from_capacity_config(captured_args, tmp_path) -> None:
+    from misen.executors.skypilot import SkyPilotExecutor
+
+    config = tmp_path / "skypilot.toml"
+    config.write_text(
+        '[executor]\ntype = "skypilot"\nname_prefix = "research"\napi_server_namespace = "dev"\n'
+        '[executor.capacity.cpu]\npool = "misen-dev"\ncpus = 2\nmemory = 8\n',
+        encoding="utf-8",
+    )
+    experiment_cli(CliExperiment, argv=["--config", str(config), "list"])
+
+    executor = experiment_module._resolve_executor(captured_args["args"])
+    assert isinstance(executor, SkyPilotExecutor)
+    assert executor.name_prefix == "research"
+    assert executor.capacity["cpu"].pool == "misen-dev"
+    assert executor.capacity["cpu"].cpus == 2
+    assert executor.capacity["cpu"].memory == 8
+    assert executor.manage_api_server is True
+    assert executor.api_server_namespace == "dev"
+
+
+def test_experiment_cli_builds_skypilot_executor_from_concrete_scalar_flags(captured_args) -> None:
     from misen.executors.skypilot import SkyPilotExecutor
 
     experiment_cli(
@@ -288,26 +309,18 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
         argv=[
             "--executor",
             "skypilot",
-            "--executor.infra",
-            "gcp/us-central1",
             "--executor.name-prefix",
             "research",
-            "--executor.pool",
-            "misen-dev",
-            "--executor.manage-api-server",
             "--executor.api-server-namespace",
             "dev",
             "list",
         ],
     )
-
     executor = getattr(captured_args["args"], "executor")
     assert isinstance(executor, SkyPilotExecutor)
-    assert executor.infra == "gcp/us-central1"
     assert executor.name_prefix == "research"
-    assert executor.pool == "misen-dev"
-    assert executor.manage_api_server is True
     assert executor.api_server_namespace == "dev"
+    assert executor.manage_api_server is True
 
 
 def test_resolve_experiment_reference_accepts_instance(monkeypatch, tmp_path) -> None:

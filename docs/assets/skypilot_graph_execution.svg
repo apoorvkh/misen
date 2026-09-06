@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="620" viewBox="0 0 1240 620" role="img" aria-labelledby="title desc">
+  <title id="title">Ready work to durable completion sequence</title>
+  <desc id="desc">After an allocation and agent are ready, the coordinator persists an attempt and assigns a ready work unit. The agent executes it, commits task outputs and the attempt outcome in the workspace, then reports completion. The coordinator validates durable state and releases successors without a SkyPilot queue query.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#2563eb"/></marker>
+    <marker id="commit" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#087f5b"/></marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #17243a; }
+      .heading { font-size: 26px; font-weight: 700; }
+      .title { font-size: 18px; font-weight: 700; }
+      .body { font-size: 16px; }
+      .small { font-size: 14px; fill: #49566c; }
+      .line { fill: none; stroke: #2563eb; stroke-width: 2.4; }
+      .data { fill: none; stroke: #087f5b; stroke-width: 2.4; }
+    </style>
+  </defs>
+  <rect width="1240" height="620" rx="20" fill="#f6f8fc"/>
+  <text x="36" y="45" class="heading">A completion event releases work—not a SkyPilot poll</text>
+  <text x="36" y="73" class="body">Warm path · allocation, agent, and environment available · known-key workspace polling</text>
+  <rect x="50" y="104" width="275" height="49" rx="10" fill="#e5edff"/>
+  <rect x="466" y="104" width="275" height="49" rx="10" fill="#e5edff"/>
+  <rect x="880" y="104" width="310" height="49" rx="10" fill="#eaf7f1"/>
+  <text x="187" y="135" text-anchor="middle" class="title">Run coordinator</text>
+  <text x="603" y="135" text-anchor="middle" class="title">Worker agent</text>
+  <text x="1035" y="135" text-anchor="middle" class="title">Durable workspace</text>
+  <path d="M187 155V529M603 155V529M1035 155V529" stroke="#c8d2e2" stroke-width="2" stroke-dasharray="5 5"/>
+  <text x="35" y="181" class="small">Inputs done</text>
+  <path d="M187 197H1032" class="data" marker-end="url(#commit)"/>
+  <text x="225" y="186" class="body">1. Reserve capacity; persist attempt / assignment token</text>
+  <path d="M187 248H600" class="line" marker-end="url(#arrow)"/>
+  <text x="225" y="236" class="body">2. Assign ready work + payload reference</text>
+  <path d="M603 280H662V310H607" class="line" marker-end="url(#arrow)"/>
+  <text x="680" y="296" class="body">3. Validate lease; run isolated subprocess</text>
+  <path d="M603 354H1032" class="data" marker-end="url(#commit)"/>
+  <text x="633" y="338" class="body">4. Commit outputs + attempt outcome</text>
+  <path d="M1035 382H607" class="data" marker-end="url(#commit)"/>
+  <text x="754" y="406" class="small">Durability precedes notification</text>
+  <path d="M603 438H191" class="line" marker-end="url(#arrow)"/>
+  <text x="226" y="426" class="body">5. Observe committed completion record</text>
+  <path d="M187 464H139V504H183" class="line" marker-end="url(#arrow)"/>
+  <text x="225" y="489" class="body">6. Verify committed state; release successors</text>
+  <text x="225" y="515" class="small">Lost events reconcile from durable records; duplicates are idempotent.</text>
+  <rect x="36" y="552" width="1168" height="42" rx="10" fill="#f0eaff"/>
+  <text x="56" y="579" class="body">SkyPilot runs on a separate allocation-health loop. Final logs, process exit, and cleanup still have to finish.</text>
+</svg>

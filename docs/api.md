@@ -111,128 +111,65 @@ generic `config` mapping cannot be embedded in worker bootstrap commands.
 
 # SkyPilotExecutor
 
-`SkyPilotExecutor` is an optional remote adapter for SkyPilot managed jobs.
-Install Misen's provider-neutral extra into the environment that runs
-Misen (rather than only as an isolated `uv tool`), compose it with the
-upstream extras for the compute backends used by a local SkyPilot API server,
-then verify provider access. A configured remote SkyPilot API server owns its
-provider dependencies, so its Misen clients need only the base extra. The
-integration declares `skypilot>=0.13` without an upper bound; compatibility
-CI tests both that minimum and the newest stable release on Python 3.14. Misen
-supports Python 3.11–3.14; individual SkyPilot releases and provider extras may
-impose additional constraints.
+`SkyPilotExecutor` schedules ready work units over explicit
+`capacity: dict[str, SkyPilotCapacity]` profiles. SkyPilot owns allocations;
+Misen owns graph readiness, logical jobs, attempt records, and completion.
+Reusable agents execute one fresh task subprocess at a time. Dedicated
+profiles provide one allocation per admitted work unit.
 
-```bash
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.13"
-# For example, instead target existing Kubernetes, SSH, and Slurm clusters:
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.13"
-sky check
-# From a Misen source checkout:
-uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[kubernetes,ssh,slurm]>=0.13" sky check
-```
+See the [SkyPilot usage guide](skypilot.md) for installation, complete TOML
+examples, provider/workspace authentication, and the current validation limits.
 
-`infra` accepts any compute infrastructure registered by the installed
-SkyPilot version, including Azure, OCI, Lambda Cloud, RunPod, Kubernetes,
-existing SSH machines, and Slurm. Install the corresponding named SkyPilot
-extra rather than `skypilot[all]`; backend capabilities such as multi-node
-support still vary. See [Installation and backend selection](design_remote_executors.md#installation-and-backend-selection)
-for the provider matrix. Compute selection is independent of workspace
-storage: every worker may use any supported `CloudWorkspace` object store it
-can reach and authenticate to.
+| Setting | Contract |
+| --- | --- |
+| `capacity` | Named profiles selecting exactly one `pool`, `cluster`, or `infra`; every work unit must fit one |
+| `lifecycle` | `"attached"` by default; `"detached"` requires explicit remote coordination |
+| `manage_api_server` | `True` by default; isolated local API lifecycle on the supported pinned nightly |
+| `api_server_namespace` | Persistent isolated API identity/state; defaults to `"default"` |
+| `max_run_minutes` | Finite graph/agent lifetime; defaults to 1440 |
+| `setup_timeout_s` | Provisioning/bootstrap allowance; defaults to 600 |
+| `shutdown_timeout_s` | Bounded cleanup grace; defaults to 30 |
+| `poll_interval_s` | Workspace mailbox polling interval; defaults to 0.2 |
 
-Set `pool` to the name of an existing [SkyPilot worker
-pool](https://docs.skypilot.ai/en/latest/examples/pools.html) to route every
-managed job through that pool. Reused workers preserve Misen's node-local
-environment store, reducing cold starts after the first job. Each requested
-resource shape must fit a pool worker, and fixed workers remain billable until
-the pool is terminated. Pooled pending work units must be
-dependency-independent (already-cached parents are fine), preventing a
-descendant from occupying an exclusive worker while its parent waits for
-capacity. SkyPilot currently labels pools beta and the CLI experimental.
+Attached `submit(..., blocking=False)` requires a live
+`with executor.session():` context. `submit(..., blocking=True)` scopes its own
+session. `Experiment.run()` waits by default for attached graph execution.
+Closing an unfinished session cancels/stops owned work and attempts bounded
+cleanup; it does not detach the graph or terminate borrowed pools/clusters.
 
-Without a pool, the implementation eagerly submits one managed job per pending
-work unit and uses durable workspace markers to gate dependencies, so arbitrary
-DAGs are supported and independent branches can run in parallel when backend
-capacity permits. Descendants may provision while waiting; failures before a
-worker can publish its marker propagate only when the submitting Misen process
-observes SkyPilot status, or at the dependent job's cumulative timeout.
-Multi-node requests use SkyPilot
-`num_nodes`. A work unit that binds `DASK_CLIENT` gets one private Dask
-scheduler on rank 0, one worker per node, and one rank-0 task coordinator;
-without the sentinel, the Misen payload runs only on rank 0 and user code may
-orchestrate the remaining nodes itself. The managed cluster has fixed
-membership, uses the allocation's private TCP network, and waits up to
-`dask_startup_timeout` for startup. `dask_scheduler_port` (default 8786) must
-be in the range 1024–65535, free on rank 0, and reachable from every node; this
-internal Dask connection is neither authenticated nor encrypted and therefore
-requires a trusted network isolated from untrusted workloads. The project
-environment must include `distributed`. The adapter requires worker-side snapshots
-(`prewarm_envs = false`) and a remotely fetchable workspace such as
-`CloudWorkspace` with a relative `cache_dir`. See the
-[remote executor design](design_remote_executors.md) for the control/data-plane
-contract and planned adapters.
+Detached execution requires `manage_api_server=False`, a stable remote API
+with service-account credential injection enabled, a compatible SDK in the
+project's snapshotted dependencies, and a dedicated run-owned single-node
+`coordinator` profile. Submission waits for durable remote acknowledgement.
 
-Submission persists SkyPilot's asynchronous request ID without waiting for
-managed-job ID assignment. Polling batches unresolved request statuses and
-durably records managed IDs as requests complete. A server-side launch failure
-therefore appears as a failed job during polling; immediate client and transport
-failures still raise `SubmissionError`.
+`attach(run_id, workspace)` reads a trusted run manifest and reconstructs
+observing/cancelling job handles. It does not resubmit, retry, or take over a
+lost coordinator. Cancellation requires a live coordinator to act on its
+workspace request. Uncertain execution remains uncertain until reconciled.
 
-Set `manage_api_server=True` to own a local API server for the run on
-Linux/macOS. CLI monitoring and `submit(..., blocking=True)` scope it
-automatically. Wrap nonblocking Python submissions and polling in
-`with executor.session():`. `Experiment.run()` scopes its submission-only
-operation. Fully cached runs need no server. Session exit resolves pending
-launch requests before stopping the owned server; remote jobs, pools, and
-durable records are retained. A guardian also cleans up after abrupt client
-termination, which may interrupt unresolved launch requests. Closed-session
-handles require resubmission inside a new session to reattach.
-
-Install `misen[skypilot-managed]` instead of `misen[skypilot]` for this mode;
-it pins a SkyPilot nightly with native runtime isolation. Set
-`api_server_namespace="dev"` (default `"default"`) to select persistent state
-under `$XDG_STATE_HOME/misen/skypilot/dev` or `~/.local/state/misen/skypilot/dev`.
-The SDK runs in a child process with private configuration, identity, state,
-and ports. The parent's environment and any ordinary SkyPilot SDK/server are
-unchanged. Concurrent sessions in a namespace share a server until their last
-client disconnects; other namespaces are independent. Namespace-specific
-durable keys prevent reattaching to another controller's job IDs.
-
-Cloud credentials are inherited, but ordinary SkyPilot endpoint and
-configuration overrides are not. Edit the namespace's `config.yaml` for its
-SkyPilot settings. A remote jobs/pool controller is required
-(`jobs.controller.consolidation_mode: false`); shared database overrides are
-not supported. Pools in this namespace are distinct from ordinary SkyPilot
-pools. Use `with executor.session() as session:` and explicitly call
-`session.check(["aws"])`, `session.pool_apply(name, yaml_path)`, `session.pool_status()`, or
-`session.pool_down(name)` to manage them. Applying a pool provisions billable
-workers; closing a session does not terminate them. Keep the persistent state
-directory until its cloud resources have been torn down.
-
-Before the first launch or pool creation in a fresh namespace, run its credential
-check explicitly (ordinary `sky check` configures a different namespace):
-
-```python
-with executor.session() as session:
-    print(session.check(["aws"], verbose=True))
-    session.pool_apply("misen-dev", "misen-pool.yaml")
-```
-
-This check enables the selected clouds without provisioning workers. Install
-the matching provider extra (for AWS, `skypilot-nightly[aws]` at the version
-pinned by `misen[skypilot-managed]`) and ensure `rsync` is on `PATH`. For an
-S3-backed Misen workspace, export the selected AWS profile's credentials as
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and, if present,
-`AWS_SESSION_TOKEN` before opening the session; SkyPilot alone reading
-`~/.aws/credentials` does not configure the object-store client.
-
-No global `sky.api_stop()` is called. With the default
-`manage_api_server=False`, stable SkyPilot 0.13+ continues to use its normal
-shared or remote server and its existing durable-job keys.
+There is no current eager/worker mode switch and no top-level `infra` or
+`pool` setting. Existing low-level managed-job records are not a substitute
+for new run/attempt/allocation identities. Shared managed-job controllers may
+remain billable after run cleanup.
 
 ::: misen.executors.skypilot.SkyPilotExecutor
     options:
+      inherited_members: true
       members:
-        - __init__
         - session
+        - submit
+        - attach
+
+# SkyPilotCapacity
+
+A profile reserves CPU, memory, and accelerator resources per node.
+`max_workers` bounds active allocations, not individual DAG nodes. Borrowed
+clusters require `max_workers=1`; multi-node profiles require
+`dedicated=True`. Model names and declared accelerator memory must describe
+the actual available hardware. Creation-only options are rejected for
+borrowed pools/clusters.
+
+::: misen.executors.skypilot.SkyPilotCapacity
+    options:
+      members:
+        - fits

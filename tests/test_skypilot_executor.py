@@ -11,34 +11,26 @@ import time
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 from unittest.mock import MagicMock, call
 
 import msgspec
 import pytest
 
 import misen.executor as executor_module
+import misen.executors.skypilot as graph_module
 import misen.executors.skypilot as skypilot_module
 import misen.utils.snapshot as snapshot_module
 from misen import DASK_CLIENT, Task, meta
-from misen.exceptions import CacheError, ConfigError, ExecutionError, StatusQueryError, StorageError, SubmissionError
-from misen.executors.skypilot import SkyPilotExecutor, SkyPilotJob
+from misen.exceptions import CacheError, ConfigError, ExecutionError, StatusQueryError, StorageError
+from misen.executors.skypilot import RunManifest, SkyPilotCapacity, SkyPilotExecutor, SkyPilotJob, SkyPilotTaskJob
 from misen.utils.graph import DependencyGraph
-from misen.utils.hashing import stable_hash
 from misen.utils.work_unit import WorkUnit
 from misen.workspace import Workspace
 from misen.workspaces.memory import InMemoryWorkspace
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from misen.executor import CompletedJob
-
-
-class _ExtendedSkyPilotExecutor(SkyPilotExecutor):
-    """Exercise durable-key compatibility for downstream executor subclasses."""
-
-    scheduling_class: str = "standard"
 
 
 @meta(id="skypilot_chain_task", cache=False)
@@ -94,6 +86,8 @@ class _FakeTask:
 
 class _FakeRequestId(str):
     """Match SkyPilot 0.13's non-JSON-native RequestId string subclass."""
+
+    __slots__ = ()
 
 
 def _fake_sky(
@@ -470,535 +464,288 @@ def _diamond_graph() -> tuple[DependencyGraph[WorkUnit], tuple[WorkUnit, WorkUni
     return graph, (base, left, right, root)
 
 
-def test_submit_accepts_diamond_dag_and_launches_one_managed_job_per_work_unit(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("cached_parent", [False, True])
+def test_submit_builds_logical_diamond_and_one_bounded_agent_without_eager_launch(
+    monkeypatch, *, cached_parent: bool
+) -> None:
     graph, work_units = _diamond_graph()
-    base, left, right, root = work_units
+    parent = work_units[0]
     workspace = _remote_workspace()
-    fake_sky = _fake_sky(
-        launch_results=tuple(([managed_id], {"name": "ignored"}) for managed_id in (311, 312, 313, 314))
-    )
-    prepared: list[tuple[WorkUnit, dict[WorkUnit, tuple[str, str]]]] = []
+    prepared: list[tuple[WorkUnit, object]] = []
+    staged_agents: list[object] = []
+    fake_sky = _fake_sky()
 
-    class _FakeSnapshot:
-        submission_id = "SUBMISSIONABC"
+    class FakeSnapshot:
+        submission_id = "GRAPHABC"
+        snapshot_key = "GRAPH-SNAPSHOT"
 
         def __init__(self, **_kwargs: object) -> None:
             pass
 
         def prepare_job(
-            self,
-            *,
-            work_unit: WorkUnit,
-            workspace: Workspace,
-            dependency_jobs: dict[WorkUnit, tuple[str, str]],
+            self, work_unit: WorkUnit, workspace: Workspace, *, dependency_jobs: object = None
         ) -> tuple[str, list[str], dict[str, str], Path]:
             del workspace
             prepared.append((work_unit, dependency_jobs))
             task_id = work_unit.root.kwargs["value"]
             return (
-                f"misen-job-{task_id}",
-                ["python", "-m", "misen.worker", str(task_id)],
-                {"MISEN_TEST_VALUE": f"value {task_id}"},
-                tmp_path / "logs" / f"{task_id}.log",
+                f"logical-{task_id}",
+                ["python", "worker.py", str(task_id)],
+                {"TASK_VALUE": str(task_id)},
+                Path(f"logs/{task_id}.log"),
             )
+
+    def prepare_agent(
+        _snapshot: object, _workspace: Workspace, fn: object
+    ) -> tuple[str, list[str], dict[str, str], Path]:
+        staged_agents.append(fn)
+        return "agent-bootstrap", ["python", "agent.py"], {}, Path("logs/agent.log")
 
     monkeypatch.setattr(executor_module, "build_work_graph", lambda **_kwargs: graph)
 
-    def never_done(self: WorkUnit, workspace: Workspace) -> bool:
-        del self, workspace
-        return False
+    def done(self: WorkUnit, workspace: Workspace) -> bool:
+        del workspace
+        return cached_parent and self is parent
 
-    monkeypatch.setattr(WorkUnit, "done", never_done)
-    monkeypatch.setattr(snapshot_module, "ProjectSnapshot", _FakeSnapshot)
+    monkeypatch.setattr(WorkUnit, "done", done)
+    monkeypatch.setattr(snapshot_module, "ProjectSnapshot", FakeSnapshot)
     monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
+    monkeypatch.setattr(graph_module, "_prepare_control", prepare_agent)
+    monkeypatch.setattr(graph_module, "_SkyCapacityBackend", MagicMock())
+    start = MagicMock()
+    close = MagicMock()
+    monkeypatch.setattr(graph_module.GraphCoordinator, "start", start)
+    monkeypatch.setattr(graph_module.GraphCoordinator, "close", close)
+    executor = SkyPilotExecutor(capacity={"cpu": {"pool": "misen-dev"}}, manage_api_server=False)
 
-    job_graph = SkyPilotExecutor(infra="gcp/us-central1").submit(
-        tasks={Task(_chain_task, value=99)},
-        workspace=cast("Workspace", workspace),
-    )
+    with executor.session():
+        result = executor.submit({Task(_chain_task, value=99)}, cast("Workspace", workspace))
 
-    assert prepared == [
-        (base, {}),
-        (left, {base: ("SUBMISSIONABC", "misen-job-1")}),
-        (right, {base: ("SUBMISSIONABC", "misen-job-1")}),
-        (root, {left: ("SUBMISSIONABC", "misen-job-2"), right: ("SUBMISSIONABC", "misen-job-3")}),
-    ]
-    launch_calls = fake_sky.jobs.launch.call_args_list
-    assert len(launch_calls) == 4
-    sky_tasks = [cast("_FakeTask", launch_call.args[0]) for launch_call in launch_calls]
-    assert all(task.num_nodes == 1 for task in sky_tasks)
-    assert all(task.api_server_access is False for task in sky_tasks)
-    assert all(
-        launch_call.kwargs["name"] == task.name for launch_call, task in zip(launch_calls, sky_tasks, strict=True)
-    )
-    assert all(launch_call.kwargs["pool"] is None for launch_call in launch_calls)
-    first_run = cast("str", sky_tasks[0].run)
-    assert "timeout --signal=TERM --kill-after=30s 60m" in first_run
-    assert "tee -a" in first_run
-    assert "OMP_DYNAMIC=FALSE" in first_run
-    assert "MKL_DYNAMIC=FALSE" in first_run
-    assert "OPENBLAS_DYNAMIC=0" in first_run
-    assert "OMP_NUM_THREADS=" not in first_run
-    assert "CUDA_VISIBLE_DEVICES=" not in first_run
-
-    jobs = [cast("SkyPilotJob", job_graph[index]) for index in range(4)]
-    assert all(isinstance(job, SkyPilotJob) for job in jobs)
-    assert [(job.request_id, job.job_id) for job in jobs] == [
-        ("launch-request-0", "misen-job-1"),
-        ("launch-request-1", "misen-job-2"),
-        ("launch-request-2", "misen-job-3"),
-        ("launch-request-3", "misen-job-4"),
-    ]
-    assert all(job.managed_job_id is None for job in jobs)
+    pending = [unit for unit in work_units if not (cached_parent and unit is parent)]
+    assert prepared == [(unit, None) for unit in pending]
+    assert len(staged_agents) == 1
+    start.assert_called_once()
+    close.assert_called_once()
+    fake_sky.jobs.launch.assert_not_called()
     fake_sky.get.assert_not_called()
-    assert all(not hasattr(job, "pipeline_task_id") for job in jobs)
-    assert [job.deadline_minutes for job in jobs] == [60, 120, 120, 180]
-    assert job_graph.successors(1) == [jobs[0]]
-    assert job_graph.successors(2) == [jobs[0]]
-    assert set(job_graph.successors(3)) == {jobs[1], jobs[2]}
-
-
-def test_independent_work_launches_without_dependency_gates(monkeypatch, tmp_path) -> None:
-    first = _work_unit(Task(_chain_task, value=1))
-    second = _work_unit(Task(_chain_task, value=2))
-    fake_sky = _fake_sky(launch_results=(([41], None), ([42], None)))
-    snapshot = SimpleNamespace(
-        submission_id="PARALLELABC",
-        prepare_job=MagicMock(
-            side_effect=[
-                ("job-1", ["python", "worker.py", "1"], {}, tmp_path / "one.log"),
-                ("job-2", ["python", "worker.py", "2"], {}, tmp_path / "two.log"),
-            ]
-        ),
-    )
-    workspace = _remote_workspace()
-    jobs: dict[WorkUnit, CompletedJob | SkyPilotJob] = {}
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
-
-    SkyPilotExecutor()._dispatch_work_graph(
-        pending_work_units=[first, second],
-        jobs=jobs,
-        workspace=cast("Workspace", workspace),
-        snapshot=cast("Any", snapshot),
-        progress=MagicMock(),
-    )
-
-    assert [item.kwargs["dependency_jobs"] for item in snapshot.prepare_job.call_args_list] == [{}, {}]
-    assert len(fake_sky.jobs.launch.call_args_list) == 2
-    assert set(jobs) == {first, second}
-
-
-def test_pool_is_forwarded_to_managed_job_launch(monkeypatch, tmp_path) -> None:
-    work_unit = _work_unit(Task(_cpu_task))
-    workspace = _remote_workspace()
-    fake_sky = _fake_sky(launch_results=(([42], None),))
-    snapshot = SimpleNamespace(
-        submission_id="POOLEDABC",
-        prepare_job=MagicMock(return_value=("job-1", ["python", "worker.py"], {}, tmp_path / "pool.log")),
-    )
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
-
-    job = SkyPilotExecutor(pool="misen-dev")._dispatch(
-        work_unit=work_unit,
-        dependencies=set(),
-        workspace=cast("Workspace", workspace),
-        snapshot=cast("Any", snapshot),
-    )
-
-    assert job.managed_job_id is None
-    assert job.request_id == "launch-request-0"
-    assert type(job.request_id) is str
-    msgspec.json.encode(job._record())
-    assert fake_sky.jobs.launch.call_args.kwargs["pool"] == "misen-dev"
-    fake_sky.get.assert_not_called()
-
-
-def test_unset_pool_preserves_pre_pool_durable_key_identity() -> None:
-    executor = SkyPilotExecutor()
-
-    # Pinned from the same default SkyPilotExecutor before ``pool`` became a
-    # declared field; active unpooled jobs must remain reattachable on upgrade.
-    assert stable_hash(executor._job_key_identity()) == 4424697057611365518
-
-    pooled = SkyPilotExecutor(pool="misen-dev")
-    assert pooled._job_key_identity().pool == "misen-dev"
-    assert "manage_api_server" not in pooled._job_key_identity().__struct_fields__
-
-
-def test_unset_pool_preserves_runtime_subclass_identity_and_fields() -> None:
-    executor = _ExtendedSkyPilotExecutor(scheduling_class="priority")
-
-    identity = executor._job_key_identity()
-    identity_type = type(identity)
-    assert identity_type.__module__ == type(executor).__module__
-    assert identity_type.__name__ == type(executor).__name__
-    assert identity_type.__qualname__ == type(executor).__qualname__
-    assert identity_type.__struct_fields__ == tuple(
-        field
-        for field in executor.__struct_fields__
-        if field not in {"pool", "manage_api_server", "api_server_namespace"}
-    )
-    assert identity.scheduling_class == "priority"
-
-    changed = _ExtendedSkyPilotExecutor(scheduling_class="batch")._job_key_identity()
-    assert type(changed) is identity_type
-    assert stable_hash(changed) != stable_hash(identity)
-    assert stable_hash(identity) != stable_hash(SkyPilotExecutor()._job_key_identity())
-
-    pooled = _ExtendedSkyPilotExecutor(pool="misen-dev", scheduling_class="priority")
-    assert pooled._job_key_identity().pool == "misen-dev"
-    assert pooled._job_key_identity().scheduling_class == "priority"
-
-
-@pytest.mark.parametrize("pool", ["misen-dev", "Research_Pool.2", "a"])
-def test_skypilot_accepts_valid_pool_names(pool: str) -> None:
-    assert SkyPilotExecutor(pool=pool).pool == pool
-
-
-@pytest.mark.parametrize("pool", ["", "1pool", "-pool", "pool-", "pool/name", "pool name"])
-def test_skypilot_rejects_invalid_pool_names(pool: str) -> None:
-    with pytest.raises(ValueError, match="pool must start with a letter"):
-        SkyPilotExecutor(pool=pool)
-
-
-def test_pool_rejects_dependencies_between_pending_work_units() -> None:
-    graph, work_units = _diamond_graph()
-
-    with pytest.raises(ConfigError, match="dependency-independent pending work units"):
-        SkyPilotExecutor(pool="misen-dev")._validate_submission(
-            work_graph=graph,
-            pending_work_units=list(work_units),
-            workspace=cast("Workspace", _remote_workspace()),
-        )
-
-
-def test_submit_reattaches_live_parent_across_submission_namespaces(monkeypatch, tmp_path) -> None:
-    parent = _work_unit(Task(_chain_task, value=1))
-    child = WorkUnit(root=Task(_chain_task, value=2), dependencies={parent})
-    workspace = InMemoryWorkspace(directory=str(tmp_path / "workspace"))
-    fake_sky = _fake_sky(
-        launch_results=(([41], None), ([42], None)),
-        queue_records=({"job_id": 41, "task_id": 0, "status": "RUNNING"},),
-    )
-    old_snapshot = SimpleNamespace(
-        submission_id="OLD",
-        snapshot_key="SNAPSHOT",
-        prepare_job=MagicMock(return_value=("parent-job", ["python", "worker.py"], {}, tmp_path / "parent.log")),
-    )
-    new_snapshot = SimpleNamespace(
-        submission_id="NEW",
-        snapshot_key="SNAPSHOT",
-        prepare_job=MagicMock(return_value=("child-job", ["python", "worker.py"], {}, tmp_path / "child.log")),
-    )
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
-    executor = SkyPilotExecutor()
-
-    executor._dispatch_work_graph(
-        pending_work_units=[parent], jobs={}, workspace=workspace, snapshot=old_snapshot, progress=MagicMock()
-    )
-    jobs: dict[Any, Any] = {}
-    executor._dispatch_work_graph(
-        pending_work_units=[parent, child], jobs=jobs, workspace=workspace, snapshot=new_snapshot, progress=MagicMock()
-    )
-
-    assert cast("SkyPilotJob", jobs[parent]).managed_job_id == 41
-    assert new_snapshot.prepare_job.call_args.kwargs["dependency_jobs"] == {parent: ("OLD", "parent-job")}
-    assert fake_sky.jobs.launch.call_count == 2
-
-
-def test_partial_launch_error_reports_already_accepted_managed_jobs(monkeypatch, tmp_path) -> None:
-    first = _work_unit(Task(_chain_task, value=1))
-    second = _work_unit(Task(_chain_task, value=2))
-    workspace = _remote_workspace()
-    fake_sky = _fake_sky(launch_results=(([101], None),))
-    launch = fake_sky.jobs.launch
-
-    def fail_second_launch(task: object, *, name: str, pool: str | None) -> str:
-        del task, pool
-        if launch.call_count == 1:
-            return "launch-request-0"
-        msg = f"provider rejected {name}"
-        raise RuntimeError(msg)
-
-    launch.side_effect = fail_second_launch
-    snapshot = SimpleNamespace(
-        submission_id="PARTIALABC",
-        prepare_job=MagicMock(
-            side_effect=[
-                ("job-1", ["python", "worker.py", "1"], {}, tmp_path / "one.log"),
-                ("job-2", ["python", "worker.py", "2"], {}, tmp_path / "two.log"),
-            ]
-        ),
-    )
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
-
-    with pytest.raises(SubmissionError, match="after 1 earlier job") as exc_info:
-        SkyPilotExecutor()._dispatch_work_graph(
-            pending_work_units=[first, second],
-            jobs={},
-            workspace=cast("Workspace", workspace),
-            snapshot=cast("Any", snapshot),
-            progress=MagicMock(),
-        )
-
-    assert len(exc_info.value.submitted_jobs) == 1
-    submitted = cast("SkyPilotJob", exc_info.value.submitted_jobs[0])
-    assert submitted.work_unit is first
-    assert submitted.managed_job_id is None
-    assert submitted.request_id == "launch-request-0"
-
-
-def test_cpu_resources_expand_to_ordered_infrastructure_alternatives() -> None:
-    fake_sky = _fake_sky()
-    executor = SkyPilotExecutor(
-        infra=["aws", "gcp/us-central1"],
-        instance_type="worker-shape",
-        use_spot=True,
-        image_id="image-tag",
-        disk_size=200,
-        max_hourly_cost=3.5,
-        job_recovery="FAILOVER",
-    )
-
-    options = executor._resource_options(fake_sky, _work_unit(Task(_cpu_task)))
-
-    assert isinstance(options, list)
-    assert [option.kwargs for option in options] == [
-        {
-            "infra": "aws",
-            "cpus": "4+",
-            "memory": "32+",
-            "use_spot": True,
-            "instance_type": "worker-shape",
-            "image_id": "image-tag",
-            "disk_size": 200,
-            "max_hourly_cost": 3.5,
-            "job_recovery": "FAILOVER",
-        },
-        {
-            "infra": "gcp/us-central1",
-            "cpus": "4+",
-            "memory": "32+",
-            "use_spot": True,
-            "instance_type": "worker-shape",
-            "image_id": "image-tag",
-            "disk_size": 200,
-            "max_hourly_cost": 3.5,
-            "job_recovery": "FAILOVER",
-        },
+    records = [
+        msgspec.json.decode(item.args[2], type=RunManifest)
+        for item in workspace.put_job_file.call_args_list
+        if item.args[1] == "run-manifest.json"
     ]
+    assert len(records) == 1
+    manifest = records[0]
+    nodes = {node.job_id: node for node in manifest.nodes}
+    assert nodes["logical-2"].dependencies == ([] if cached_parent else ["logical-1"])
+    assert nodes["logical-3"].dependencies == ([] if cached_parent else ["logical-1"])
+    assert set(nodes["logical-4"].dependencies) == {"logical-2", "logical-3"}
+    assert all(node.profile == "cpu" for node in nodes.values())
+    assert len(manifest.agents) == 1
+    assert len(list(result)) == 4
+    assert all(isinstance(result[work_units.index(unit)], SkyPilotTaskJob) for unit in pending)
+    assert result.successors(1) == [result[0]]
+    assert result.successors(2) == [result[0]]
+    assert set(result.successors(3)) == {result[1], result[2]}
+    if cached_parent:
+        assert isinstance(result[0], executor_module.CompletedJob)
+
+
+def test_public_executor_has_one_graph_contract_and_decodes_capacity_profiles() -> None:
+    executor = msgspec.convert(
+        {"capacity": {"cpu": {"pool": "misen-cpu", "cpus": 4, "memory": 32, "max_workers": 2}}},
+        type=SkyPilotExecutor,
+    )
+
+    assert isinstance(executor, graph_module.GraphSkyPilotExecutor)
+    assert isinstance(executor.capacity["cpu"], SkyPilotCapacity)
+    assert executor.capacity["cpu"].pool == "misen-cpu"
+    assert executor.capacity["cpu"].max_workers == 2
+    assert executor.lifecycle == "attached"
 
 
 @pytest.mark.parametrize(
-    "infra",
-    [
-        pytest.param("azure/eastus", id="azure"),
-        pytest.param("k8s/platform/research-cluster", id="kubernetes-context"),
-        pytest.param("ssh/on-prem-gpu-pool", id="ssh-node-pool"),
-        pytest.param("slurm/research-cluster", id="slurm-cluster"),
-        pytest.param("oci/us-ashburn-1", id="oci"),
-    ],
+    "kwargs", [{"infra": "aws"}, {"pool": "misen-dev"}, {"mode": "managed"}, {"execution_mode": "cluster"}]
 )
-def test_resource_options_forward_skypilot_compatible_infrastructures(infra: str) -> None:
-    option = SkyPilotExecutor(infra=infra)._resource_options(_fake_sky(), _work_unit(Task(_cpu_task)))
-
-    assert isinstance(option, _FakeResources)
-    assert option.kwargs == {
-        "infra": infra,
-        "cpus": "4+",
-        "memory": "32+",
-        "use_spot": False,
-    }
-    assert option.validated
+def test_obsolete_per_job_options_are_not_silent_execution_modes(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(TypeError, match="Unexpected keyword argument"):
+        SkyPilotExecutor(**kwargs)
 
 
-def test_resource_options_preserve_order_across_backend_families() -> None:
-    infras = [
-        "azure/eastus",
-        "k8s/platform/research-cluster",
-        "ssh/on-prem-gpu-pool",
-        "slurm/research-cluster",
-        "oci/us-ashburn-1",
-    ]
-
-    options = SkyPilotExecutor(infra=infras)._resource_options(_fake_sky(), _work_unit(Task(_cpu_task)))
-
-    assert isinstance(options, list)
-    assert [option.kwargs["infra"] for option in options] == infras
-    assert all(option.validated for option in options)
+@pytest.mark.parametrize("name", ["", "../other", "with space", "x" * 65])
+def test_capacity_profile_names_are_bounded(name: str) -> None:
+    with pytest.raises(ValueError, match="Capacity names"):
+        SkyPilotExecutor(capacity={name: SkyPilotCapacity(pool="workers")})
 
 
-def test_remote_api_server_owns_environment_dependent_resource_validation() -> None:
-    fake_sky = _fake_sky(api_server_local=False)
-
-    option = SkyPilotExecutor(infra="ssh/on-prem-gpu-pool")._resource_options(
-        fake_sky,
-        _work_unit(Task(_cpu_task)),
-    )
-
-    assert isinstance(option, _FakeResources)
-    assert not option.validated
-    fake_sky.server.common.is_api_server_local.assert_called_once_with()
-
-
-def test_gpu_resources_require_explicit_models_and_filter_by_device_memory() -> None:
-    fake_sky = _fake_sky()
-    work_unit = _work_unit(Task(_gpu_task))
+def test_resource_routing_prefers_cpu_capacity_and_uses_explicit_accelerator_shapes() -> None:
     executor = SkyPilotExecutor(
-        accelerators={"cuda": ["A100", "L4"]},
-        accelerator_memory={"A100": 80, "L4": 24},
+        capacity={
+            "gpu": SkyPilotCapacity(pool="gpu", cpus=8, memory=64, accelerators={"A100": 2}, accelerator_memory=80),
+            "cpu": SkyPilotCapacity(pool="cpu", cpus=4, memory=32),
+            "too-small-gpu": SkyPilotCapacity(
+                pool="small", cpus=8, memory=64, accelerators={"L4": 2}, accelerator_memory=24
+            ),
+        },
     )
 
-    option = executor._resource_options(fake_sky, work_unit)
-
-    assert isinstance(option, _FakeResources)
-    assert option.kwargs == {
-        "infra": "aws",
-        "cpus": "8+",
-        "memory": "64+",
-        "use_spot": False,
-        "accelerators": {"A100": 2},
-    }
-
-    with pytest.raises(SubmissionError, match="No SkyPilot accelerator models"):
-        SkyPilotExecutor()._resource_options(fake_sky, work_unit)
-    with pytest.raises(SubmissionError, match="minimum 40 GiB/device"):
-        SkyPilotExecutor(accelerators={"cuda": ["L4"]})._resource_options(fake_sky, work_unit)
+    assert executor._profile(_work_unit(Task(_cpu_task))) == "cpu"
+    assert executor._profile(_work_unit(Task(_gpu_task))) == "gpu"
+    with pytest.raises(ConfigError, match="No configured SkyPilot capacity fits"):
+        SkyPilotExecutor(capacity={"cpu": executor.capacity["cpu"]})._profile(_work_unit(Task(_gpu_task)))
 
 
-def test_invalid_sdk_resources_are_rejected_during_preflight(monkeypatch) -> None:
-    work_unit = _work_unit(Task(_cpu_task))
-    graph: DependencyGraph[WorkUnit] = DependencyGraph()
-    graph.add_node(work_unit)
-    fake_sky = _fake_sky()
+def test_empty_capacity_does_not_implicitly_provision_cloud_resources() -> None:
+    with pytest.raises(ConfigError, match="explicit bounded profile"):
+        SkyPilotExecutor()._profile(_work_unit(Task(_cpu_task)))
 
-    class _ValidatingResources(_FakeResources):
-        def validate(self) -> None:
-            if self.kwargs.get("job_recovery") == "RESTART":
-                msg = "Invalid job recovery strategy: RESTART"
-                raise ValueError(msg)
 
-    fake_sky.Resources = _ValidatingResources
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
+@pytest.mark.parametrize("backend", ["tpu", "mps"])
+def test_unsupported_accelerator_backends_fail_before_allocation(monkeypatch, backend: str) -> None:
+    profile = SkyPilotCapacity(
+        pool="accelerators", accelerators={"declared-device": 1}, accelerator_type=cast("Any", backend)
+    )
+    executor = SkyPilotExecutor(capacity={"devices": profile}, manage_api_server=False)
+    work_unit = _work_unit(
+        Task(_gpu_task).with_resources(
+            cpus=1, memory=8, accelerators=1, accelerator_type=cast("Any", backend), accelerator_memory=None
+        )
+    )
+    loader = MagicMock(side_effect=AssertionError("Unsupported device isolation must fail before contacting SkyPilot"))
+    monkeypatch.setattr(skypilot_module, "_load_skypilot", loader)
 
-    with pytest.raises(SubmissionError, match="Invalid SkyPilot resources") as exc_info:
-        SkyPilotExecutor(job_recovery="RESTART")._validate_submission(
-            work_graph=graph,
+    with executor.session(), pytest.raises(ConfigError, match=r"(accelerator|cuda|rocm|xpu)"):
+        executor._validate_submission(
+            work_graph=DependencyGraph(),
             pending_work_units=[work_unit],
             workspace=cast("Workspace", _remote_workspace()),
         )
+    loader.assert_not_called()
 
-    assert isinstance(exc_info.value.__cause__, ValueError)
 
-
-def test_multinode_work_unit_sets_num_nodes_and_runs_worker_on_rank_zero(monkeypatch, tmp_path) -> None:
-    work_unit = _work_unit(Task(_multinode_task))
-    workspace = _remote_workspace()
-    fake_sky = _fake_sky(launch_results=(([88], None),))
-    snapshot = SimpleNamespace(
-        submission_id="MULTINODEABC",
-        prepare_job=MagicMock(return_value=("job-1", ["python", "worker.py"], {}, tmp_path / "multi.log")),
+def test_multinode_and_dask_requests_select_dedicated_reserved_topology() -> None:
+    executor = SkyPilotExecutor(
+        capacity={
+            "single": SkyPilotCapacity(pool="single"),
+            "two": SkyPilotCapacity(infra="aws", nodes=2, dedicated=True),
+            "four": SkyPilotCapacity(infra="aws", nodes=4, dedicated=True),
+        },
     )
+    assert executor._profile(_work_unit(Task(_multinode_task))) == "two"
+    assert executor._profile(_work_unit(Task(_dask_task, DASK_CLIENT))) == "two"
+    with pytest.raises(ConfigError, match="No configured SkyPilot capacity fits"):
+        SkyPilotExecutor(capacity={"four": executor.capacity["four"]})._profile(
+            _work_unit(Task(_dask_task, DASK_CLIENT))
+        )
+
+
+def test_attached_submission_preflight_requires_an_owned_session(monkeypatch) -> None:
+    work_unit = _work_unit(Task(_cpu_task))
+    executor = SkyPilotExecutor(
+        capacity={"cpu": SkyPilotCapacity(pool="cpu", cpus=4, memory=32)}, manage_api_server=False
+    )
+    load = MagicMock(side_effect=AssertionError("Preflight should not contact SkyPilot"))
+    monkeypatch.setattr(skypilot_module, "_load_skypilot", load)
+    kwargs = {
+        "work_graph": DependencyGraph(),
+        "pending_work_units": [work_unit],
+        "workspace": cast("Workspace", _remote_workspace()),
+    }
+
+    with pytest.raises(ConfigError, match="Nonblocking attached submissions require"):
+        executor._validate_submission(**kwargs)
+    with executor.session():
+        executor._validate_submission(**kwargs)
+    load.assert_not_called()
+
+
+def test_nested_sessions_preserve_owner_and_do_not_start_local_service(monkeypatch) -> None:
+    load = MagicMock(side_effect=AssertionError("Empty sessions must remain lazy"))
+    monkeypatch.setattr(skypilot_module, "_load_skypilot", load)
+    executor = SkyPilotExecutor(manage_api_server=False)
+
+    with executor.session():
+        owner = graph_module._runs.get()
+        assert owner is not None
+        assert owner[0] == id(executor)
+        with executor.session():
+            assert graph_module._runs.get() is owner
+        assert graph_module._runs.get() is owner
+    assert graph_module._runs.get() is None
+    load.assert_not_called()
+
+
+def test_blocking_submit_owns_session_around_the_whole_graph(monkeypatch) -> None:
+    executor = SkyPilotExecutor(manage_api_server=False)
+    expected: DependencyGraph[Any] = DependencyGraph()
+
+    def submit(self, tasks, workspace, *, blocking=False) -> DependencyGraph[Any]:
+        del tasks, workspace
+        assert self is executor
+        assert blocking
+        owner = graph_module._runs.get()
+        assert owner is not None
+        assert owner[0] == id(executor)
+        return expected
+
+    monkeypatch.setattr(executor_module.Executor, "submit", submit)
+    assert executor.submit(set(), cast("Workspace", _remote_workspace()), blocking=True) is expected
+    assert graph_module._runs.get() is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lifecycle": "detached"},
+        {"lifecycle": "detached", "manage_api_server": False},
+        {"coordinator": SkyPilotCapacity(infra="aws", dedicated=True)},
+        {
+            "lifecycle": "detached",
+            "manage_api_server": False,
+            "coordinator": SkyPilotCapacity(pool="borrowed", dedicated=True),
+        },
+    ],
+)
+def test_detached_lifecycle_requires_explicit_run_owned_coordinator(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match=r"(Detached runs require|Coordinator capacity)"):
+        SkyPilotExecutor(**kwargs)
+
+
+def test_detached_preflight_rejects_local_api_before_any_launch(monkeypatch) -> None:
+    fake_sky = _fake_sky()
     monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
-
-    job = SkyPilotExecutor()._dispatch(
-        work_unit=work_unit,
-        dependencies=set(),
-        workspace=cast("Workspace", workspace),
-        snapshot=cast("Any", snapshot),
+    executor = SkyPilotExecutor(
+        capacity={"cpu": SkyPilotCapacity(pool="cpu", cpus=4, memory=32)},
+        lifecycle="detached",
+        manage_api_server=False,
+        coordinator=SkyPilotCapacity(infra="aws", dedicated=True),
     )
-
-    sky_task = cast("_FakeTask", fake_sky.jobs.launch.call_args.args[0])
-    assert sky_task.num_nodes == 2
-    assert '"${SKYPILOT_NODE_RANK:-0}" != "0"' in cast("str", sky_task.run)
-    assert job.managed_job_id is None
-    assert job.request_id == "launch-request-0"
-
-
-def test_dask_client_work_unit_passes_submission_preflight(monkeypatch) -> None:
-    work_unit = _work_unit(Task(_dask_task, DASK_CLIENT))
-    graph: DependencyGraph[WorkUnit] = DependencyGraph()
-    graph.add_node(work_unit)
-    sdk_attempted = False
-
-    def load_sdk() -> object:
-        nonlocal sdk_attempted
-        sdk_attempted = True
-        return _fake_sky()
-
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", load_sdk)
-
-    SkyPilotExecutor()._validate_submission(
-        work_graph=graph,
-        pending_work_units=[work_unit],
-        workspace=cast("Workspace", _remote_workspace()),
-    )
-
-    assert sdk_attempted
+    with pytest.raises(ConfigError, match="stable remote SkyPilot API"):
+        executor._validate_submission(
+            work_graph=DependencyGraph(),
+            pending_work_units=[_work_unit(Task(_cpu_task))],
+            workspace=cast("Workspace", _remote_workspace()),
+        )
+    fake_sky.jobs.launch.assert_not_called()
 
 
-def test_dask_multinode_work_unit_starts_managed_cluster_on_all_nodes(monkeypatch, tmp_path) -> None:
-    task = Task(_dask_task, DASK_CLIENT).with_resources(nodes=3, cpus=4, memory=12)
-    work_unit = _work_unit(task)
-    workspace = _remote_workspace()
-    fake_sky = _fake_sky(launch_results=(([89], None),))
-    snapshot = SimpleNamespace(
-        submission_id="DASKMULTIABC",
-        prepare_job=MagicMock(
-            return_value=(
-                "job-dask",
-                ["python", "worker.py", "--value", "spaces and 'quotes'"],
-                {"MISEN_TEST_VALUE": "value with spaces"},
-                tmp_path / "dask.log",
-            )
-        ),
-    )
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
-
-    job = SkyPilotExecutor(dask_startup_timeout=45, dask_scheduler_port=18786)._dispatch(
-        work_unit=work_unit,
-        dependencies=set(),
-        workspace=cast("Workspace", workspace),
-        snapshot=cast("Any", snapshot),
-    )
-
-    sky_task = cast("_FakeTask", fake_sky.jobs.launch.call_args.args[0])
-    script = cast("str", sky_task.run)
-    assert sky_task.num_nodes == 3
-    assert "SKYPILOT_NODE_RANK" in script
-    assert "SKYPILOT_NODE_IPS" in script
-    assert "MISEN_DASK_ROLE=scheduler" in script
-    assert "MISEN_DASK_ROLE=worker" in script
-    assert "MISEN_DASK_ROLE=coordinator" not in script
-    assert "MISEN_DASK_EXPECTED_WORKERS=3" in script
-    assert "MISEN_DASK_STARTUP_TIMEOUT=45" in script
-    assert "MISEN_DASK_CPUS=4" in script
-    assert "MISEN_DASK_MEMORY_GIB=12" in script
-    assert "18786" in script
-    assert 'if [[ "${SKYPILOT_NODE_RANK:-0}" != "0" ]]; then exit 0; fi' not in script
-    assert "trap cleanup EXIT" in script
-    assert "kill $coordinator_pid $preflight_pid $worker_pid $scheduler_pid" in script
-    assert job.managed_job_id is None
-    assert job.request_id == "launch-request-0"
+@pytest.mark.parametrize("name", ["setup_timeout_s", "shutdown_timeout_s", "poll_interval_s"])
+@pytest.mark.parametrize("value", [True, 0, -1, float("inf"), float("nan")])
+def test_lifecycle_timeouts_are_finite_and_positive(name: str, value: object) -> None:
+    with pytest.raises(ValueError, match=name):
+        SkyPilotExecutor(**{name: value})
 
 
-@pytest.mark.parametrize("timeout", [True, 0, -1, 1.5])
-def test_skypilot_validates_dask_startup_timeout_eagerly(timeout: Any) -> None:
-    with pytest.raises(ValueError, match="dask_startup_timeout must be a positive integer"):
-        SkyPilotExecutor(dask_startup_timeout=timeout)
-
-
-@pytest.mark.parametrize("port", [True, 1023, 65536, 1.5])
-def test_skypilot_validates_dask_scheduler_port_eagerly(port: Any) -> None:
-    with pytest.raises(ValueError, match="dask_scheduler_port must be an integer between 1024 and 65535"):
-        SkyPilotExecutor(dask_scheduler_port=port)
+@pytest.mark.parametrize("minutes", [True, 0, -1, 1.5])
+def test_run_lifetime_is_explicitly_bounded(minutes: object) -> None:
+    with pytest.raises(ValueError, match="max_run_minutes"):
+        SkyPilotExecutor(max_run_minutes=cast("Any", minutes))
 
 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"snapshot": False}, "requires snapshot=True"),
-        ({"prewarm_envs": True}, "requires prewarm_envs=False"),
+        ({"prewarm_envs": True}, "prewarm_envs=False"),
     ],
 )
 def test_remote_only_snapshot_modes_are_rejected_at_configuration(kwargs, message) -> None:
@@ -1009,7 +756,7 @@ def test_remote_only_snapshot_modes_are_rejected_at_configuration(kwargs, messag
 @pytest.mark.parametrize(
     ("transport", "temp_dir", "message"),
     [
-        (None, Path(".cache/misen"), "remotely fetchable workspace transport"),
+        (None, Path(".cache/misen"), "remotely fetchable workspace"),
         ("fetch", Path("/submitter-only/cache"), "relative workspace cache_dir"),
     ],
 )
@@ -1054,7 +801,7 @@ def test_workspace_without_coordination_reads_fails_before_sdk_load(monkeypatch)
 
     monkeypatch.setattr(skypilot_module, "_load_skypilot", unexpected_sdk)
 
-    with pytest.raises(ConfigError, match="submission-file coordination reads"):
+    with pytest.raises(ConfigError, match="job-file coordination"):
         SkyPilotExecutor()._validate_submission(
             work_graph=graph,
             pending_work_units=[work_unit],
@@ -1520,8 +1267,28 @@ def test_reattach_persists_resolved_id_when_later_status_query_fails(tmp_path, m
         snapshot_key="SNAPSHOT",
         prepare_job=MagicMock(return_value=("local-1", ["python", "worker.py"], {}, tmp_path / "job.log")),
     )
+
+    class NativeRecordExecutor(executor_module.Executor[SkyPilotJob]):
+        """Exercise generic native-record restoration without graph submission."""
+
+        _job_class: ClassVar[type[executor_module.Job] | None] = SkyPilotJob
+
+        def _dispatch(self, work_unit, dependencies, workspace, snapshot) -> SkyPilotJob:
+            del dependencies
+            return SkyPilotJob(
+                work_unit=work_unit,
+                job_id="local-1",
+                managed_job_id=None,
+                request_id=str(fake_sky.jobs.launch(None, name="native-allocation", pool=None)),
+                managed_job_name="native-allocation",
+                submission_id=snapshot.submission_id,
+                deadline_minutes=60,
+                log_path=tmp_path / "job.log",
+                workspace=workspace,
+            )
+
     work_unit = _work_unit(Task(_chain_task, value=1))
-    executor = SkyPilotExecutor()
+    executor = NativeRecordExecutor()
     monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
 
     first = executor._dispatch_or_reattach(work_unit, set(), workspace, cast("Any", snapshot))

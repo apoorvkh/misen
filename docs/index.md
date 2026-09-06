@@ -17,6 +17,7 @@ The intended public API is:
 - `Workspace` (`DiskWorkspace` by default; `CloudWorkspace` for remote data)
 - `Executor` (`LocalExecutor`, `InProcessExecutor`, `SlurmExecutor`,
   and optional `SkyPilotExecutor`)
+- `SkyPilotCapacity` for explicit bounded SkyPilot resource profiles
 - `Experiment`
 
 Most user code should only import from `misen.__init__`.
@@ -45,6 +46,17 @@ Executors do not schedule individual tasks directly. They schedule `WorkUnit`s:
 
 This keeps backend scheduling aligned with cache semantics.
 
+`SkyPilotExecutor` keeps these logical/cache boundaries while reusing physical
+workers across many work units. A run coordinator schedules only ready work
+onto explicit capacity profiles, with one subprocess per agent at a time.
+Dedicated profiles handle work requiring its own allocation. The current
+worker protocol uses known workspace mailbox keys, not SSH task RPC.
+
+The [SkyPilot usage guide](skypilot.md) describes the implemented API and
+lifecycle. The [architecture plan](design_skypilot_graph_execution.md) records
+the design and remaining validation/optimization work; the new graph path has
+not yet been validated on AWS.
+
 ## Locking Contract
 
 `Workspace` is the source of truth for concurrency control:
@@ -53,7 +65,9 @@ This keeps backend scheduling aligned with cache semantics.
   with a given resolved identity.
 - `namespace="result"` locks serialize result materialization.
 
-Backends remain simple because they do not implement custom cache-lock logic.
+Executors reuse those cache locks. SkyPilot additionally uses job-namespace
+execution claims and durable run/attempt records to prevent deliberate replay
+of uncertain work; they do not guarantee exactly-once external side effects.
 
 ## Backend/Storage Separation
 
@@ -87,14 +101,14 @@ the raw sentinel object into the function body.
 `DASK_CLIENT` requires a task request with `nodes > 1` and is realized by
 `SlurmExecutor` and `SkyPilotExecutor`. Misen starts one worker per allocated
 node and executes the task body once on the coordinator. With SkyPilot, this
-runtime is contained within one `num_nodes` managed job: rank 0 hosts the
+runtime is contained within one dedicated `num_nodes` allocation: rank 0 hosts the
 scheduler and coordinator, and every rank hosts one worker. `LocalExecutor`
 and `InProcessExecutor` intentionally remain single-node executors.
 This is intra-work-unit parallelism: the executor still schedules the Misen
 DAG as separate work units, and each Dask-backed work unit owns an isolated
-temporary runtime. When `SkyPilotExecutor.pool` is configured, SkyPilot may
-reuse the underlying worker cluster after one work unit exits; live Dask
-runtimes are never shared between work units.
+temporary runtime. A compatible SkyPilot pool capacity profile may reuse the
+underlying worker cluster after one work unit exits; live Dask runtimes are
+never shared between work units.
 
 To discover the resources allotted to a task at runtime, read what the
 runtime sees: `os.sched_getaffinity(0)` for CPU cores and the accelerator's

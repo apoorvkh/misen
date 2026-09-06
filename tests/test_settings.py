@@ -245,17 +245,22 @@ class TestConfigurable:
             (
                 "[executor]\n"
                 'type = "skypilot"\n'
-                'infra = ["aws", "gcp/us-central1"]\n'
-                "use_spot = true\n"
                 'name_prefix = "research"\n'
-                'pool = "misen-dev"\n'
                 "manage_api_server = true\n"
                 'api_server_namespace = "dev"\n'
-                "[executor.accelerators]\n"
-                'cuda = ["A100", "L4"]\n'
-                "[executor.accelerator_memory]\n"
-                "A100 = 80\n"
-                "L4 = 24\n"
+                "[executor.capacity.cpu]\n"
+                'pool = "misen-dev"\n'
+                "cpus = 2\n"
+                "memory = 8\n"
+                "max_workers = 3\n"
+                "[executor.capacity.gpu]\n"
+                'infra = ["aws", "gcp/us-central1"]\n'
+                "use_spot = true\n"
+                "cpus = 8\n"
+                "memory = 32\n"
+                "accelerator_memory = 24\n"
+                "[executor.capacity.gpu.accelerators]\n"
+                "L4 = 1\n"
             ),
             encoding="utf-8",
         )
@@ -266,14 +271,16 @@ class TestConfigurable:
         executor = Executor.auto(settings=Settings(config_file=config))
 
         assert isinstance(executor, SkyPilotExecutor)
-        assert executor.infra == ["aws", "gcp/us-central1"]
-        assert executor.use_spot is True
         assert executor.name_prefix == "research"
-        assert executor.pool == "misen-dev"
         assert executor.manage_api_server is True
         assert executor.api_server_namespace == "dev"
-        assert executor.accelerators == {"cuda": ["A100", "L4"]}
-        assert executor.accelerator_memory == {"A100": 80, "L4": 24}
+        assert executor.capacity["cpu"].pool == "misen-dev"
+        assert executor.capacity["cpu"].cpus == 2
+        assert executor.capacity["cpu"].max_workers == 3
+        assert executor.capacity["gpu"].infra == ["aws", "gcp/us-central1"]
+        assert executor.capacity["gpu"].use_spot is True
+        assert executor.capacity["gpu"].accelerators == {"L4": 1}
+        assert executor.capacity["gpu"].accelerator_memory == 24
 
     def test_resolve_type_with_alias(self) -> None:
         from misen.executor import Executor

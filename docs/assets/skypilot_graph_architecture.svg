@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="890" viewBox="0 0 1240 890" role="img" aria-labelledby="title desc">
+  <title id="title">Graph-aware SkyPilot architecture</title>
+  <desc id="desc">Misen submits a graph to a run coordinator. The coordinator schedules ready work onto reusable CPU and GPU agents and dedicated multi-node jobs. A separate SkyPilot capacity manager reserves and monitors those allocations. Authenticated workspace mailboxes carry commands and outcomes. Attached coordination stays inside the caller; detached coordination requires a remote owner and stable API.</desc>
+  <defs>
+    <marker id="blue" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#2563eb"/></marker>
+    <marker id="purple" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#7c3aed"/></marker>
+    <marker id="green" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4L0 8Z" fill="#087f5b"/></marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #17243a; }
+      .heading { font-size: 28px; font-weight: 700; }
+      .title { font-size: 20px; font-weight: 700; }
+      .body { font-size: 16px; }
+      .small { font-size: 14px; fill: #49566c; }
+      .label { font-size: 14px; font-weight: 700; letter-spacing: 1px; }
+      .schedule { fill: none; stroke: #2563eb; stroke-width: 2.5; }
+      .capacity { fill: none; stroke: #7c3aed; stroke-width: 2.5; stroke-dasharray: 7 5; }
+      .data { fill: none; stroke: #087f5b; stroke-width: 2; }
+    </style>
+  </defs>
+  <rect width="1240" height="890" rx="20" fill="#f6f8fc"/>
+  <text x="40" y="49" class="heading">SkyPilot allocates. Misen schedules.</text>
+  <text x="40" y="79" class="body">Many work units per allocation · per-task caching stays intact · AWS validation pending</text>
+  <rect x="1060" y="28" width="140" height="32" rx="16" fill="#e9e3ff"/>
+  <text x="1130" y="49" text-anchor="middle" class="label" fill="#5b21b6">GRAPH RUN</text>
+
+  <rect x="40" y="116" width="290" height="183" rx="14" fill="#fff" stroke="#cbd5e1"/>
+  <text x="62" y="149" class="label">SUBMITTER</text>
+  <text x="62" y="184" class="title">Experiment / CLI</text>
+  <text x="62" y="215" class="body">Deduplicate DAG; inspect cache</text>
+  <text x="62" y="241" class="body">Publish immutable snapshot</text>
+  <text x="62" y="273" class="small">Logical handles share a durable run ID</text>
+
+  <rect x="410" y="116" width="430" height="183" rx="14" fill="#eff6ff" stroke="#93b4ef"/>
+  <text x="432" y="149" class="label">MISEN RUN COORDINATOR</text>
+  <text x="432" y="184" class="title">Ready queues + attempt leases</text>
+  <text x="432" y="215" class="body">Readiness · placement · completion events</text>
+  <text x="432" y="241" class="body">Cancellation · capacity bounds · run records</text>
+  <text x="432" y="273" class="small">Progress is independent of Job.state() polling</text>
+  <path d="M330 200H405" class="schedule" marker-end="url(#blue)"/>
+  <text x="370" y="186" text-anchor="middle" class="small">DAG</text>
+
+  <rect x="920" y="116" width="280" height="183" rx="14" fill="#f4efff" stroke="#c4b5fd"/>
+  <text x="942" y="149" class="label">CAPACITY ADAPTER</text>
+  <text x="942" y="184" class="title">SkyPilot</text>
+  <text x="942" y="215" class="body">Reserve / launch / reuse</text>
+  <text x="942" y="241" class="body">Health / exact-target teardown</text>
+  <text x="942" y="273" class="small">Reusable tasks skip Sky submission</text>
+  <path d="M840 200H915" class="capacity" marker-end="url(#purple)"/>
+  <text x="880" y="186" text-anchor="middle" class="small">demand</text>
+
+  <rect x="40" y="332" width="1160" height="53" rx="10" fill="#e9eef7"/>
+  <text x="60" y="354" class="small">COORDINATOR LIFETIME</text>
+  <text x="60" y="376" class="body">Attached: inside the Python session. Detached: remote owner with a stable API; no laptop dependency.</text>
+
+  <path d="M625 299V317H26V444H198V476" class="schedule" marker-end="url(#blue)"/>
+  <path d="M198 444H568V476" class="schedule" marker-end="url(#blue)"/>
+  <path d="M568 444H938V476" class="schedule" marker-end="url(#blue)"/>
+  <text x="50" y="433" class="small">Assignments / outcomes · authenticated workspace mailboxes</text>
+  <path d="M1060 299V315H1214V460H1020V476" class="capacity" marker-end="url(#purple)"/>
+  <path d="M1020 460H650V476" class="capacity" marker-end="url(#purple)"/>
+  <path d="M650 460H280V476" class="capacity" marker-end="url(#purple)"/>
+  <text x="750" y="433" class="small">Reserved capacity, not raw access to pool VMs</text>
+
+  <rect x="40" y="480" width="350" height="164" rx="14" fill="#fff" stroke="#93b4ef"/>
+  <text x="62" y="514" class="title">CPU worker agents</text>
+  <text x="62" y="547" class="body">Preparation / analysis / plots</text>
+  <text x="62" y="575" class="body">Fresh subprocess per work unit</text>
+  <text x="62" y="617" class="small">Environment + artifact caches stay warm</text>
+  <rect x="410" y="480" width="350" height="164" rx="14" fill="#fff" stroke="#93b4ef"/>
+  <text x="432" y="514" class="title">GPU worker agents</text>
+  <text x="432" y="547" class="body">Training / GPU computations</text>
+  <text x="432" y="575" class="body">Explicit device / CPU / RAM budgets</text>
+  <text x="432" y="617" class="small">Each branch advances when its inputs do</text>
+  <rect x="780" y="480" width="420" height="164" rx="14" fill="#fff" stroke="#c4b5fd"/>
+  <text x="802" y="514" class="title">Dedicated multi-node jobs</text>
+  <text x="802" y="547" class="body">Reserve the whole topology together</text>
+  <text x="802" y="575" class="body">Managed-job fallback; isolated Dask</text>
+  <text x="802" y="617" class="small">Many graph nodes ≠ one multi-node task</text>
+
+  <path d="M215 648V704" class="data" marker-end="url(#green)"/>
+  <path d="M585 648V704" class="data" marker-end="url(#green)"/>
+  <path d="M990 648V704" class="data" marker-end="url(#green)"/>
+  <path d="M207 664L215 648L223 664ZM577 664L585 648L593 664ZM982 664L990 648L998 664Z" fill="#087f5b"/>
+  <text x="623" y="681" class="small">Read inputs; commit outputs before notifying dependents</text>
+  <rect x="40" y="710" width="1160" height="82" rx="14" fill="#eaf7f1" stroke="#8bc6af"/>
+  <text x="62" y="743" class="title">Durable workspace</text>
+  <text x="62" y="772" class="body">Snapshots · existing task results / logs · run manifest · attempt outcomes · allocation ownership</text>
+  <path d="M185 299V314H13V752H35" class="data" marker-end="url(#green)"/>
+  <path d="M800 299V307H1227V752H1205" class="data" marker-end="url(#green)"/>
+
+  <path d="M42 834H83" class="schedule"/>
+  <text x="95" y="839" class="small">Task control</text>
+  <path d="M257 834H298" class="capacity"/>
+  <text x="310" y="839" class="small">Allocation lifecycle</text>
+  <path d="M516 834H557" class="data"/>
+  <text x="569" y="839" class="small">Durable data / records</text>
+  <text x="1200" y="866" text-anchor="end" class="small">Borrowed capacity is never deleted by run cleanup.</text>
+</svg>
