@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import subprocess
 import sys
@@ -464,8 +465,13 @@ def _diamond_graph() -> tuple[DependencyGraph[WorkUnit], tuple[WorkUnit, WorkUni
     return graph, (base, left, right, root)
 
 
-def test_control_payload_is_staged_once_and_invokes_the_internal_role() -> None:
-    callback = MagicMock()
+def test_control_payload_is_staged_once_and_invokes_the_internal_role(tmp_path: Path) -> None:
+    marker = tmp_path / "control-called"
+
+    def callback(value: str) -> None:
+        marker.write_text(value)
+
+    function = functools.partial(callback, "called")
     workspace = MagicMock()
     expected = ("control-job", ["python", "control.py"], {"SAFE": "1"}, Path("logs/control.log"))
     prepared: list[WorkUnit] = []
@@ -476,11 +482,12 @@ def test_control_payload_is_staged_once_and_invokes_the_internal_role() -> None:
             prepared.append(work_unit)
             return expected
 
-    assert graph_module._prepare_control(cast("Any", Snapshot()), cast("Any", workspace), callback) == expected
+    assert graph_module._prepare_control(cast("Any", Snapshot()), cast("Any", workspace), function) == expected
     assert len(prepared) == 1
     control = prepared[0]
+    assert isinstance(control.root.kwargs["payload"], bytes)
     control.root.func(**dict(control.root.kwargs))
-    callback.assert_called_once_with()
+    assert marker.read_text() == "called"
     workspace.put_job_file.assert_not_called()
 
 

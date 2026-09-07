@@ -1729,13 +1729,18 @@ def _prepare_control(
     from misen.tasks import Task
     from misen.utils.work_unit import WorkUnit
 
-    return snapshot.prepare_job(WorkUnit(Task(_control_placeholder, function=function), set()), workspace)
+    payload = cloudpickle.dumps(function)
+    return snapshot.prepare_job(WorkUnit(Task(_control_placeholder, payload=payload), set()), workspace)
 
 
-@meta(id="misen-skypilot-control-v1", exclude={"function"})
-def _control_placeholder(function: Callable[[], None] | None = None) -> None:
+@meta(id="misen-skypilot-control-v2")
+def _control_placeholder(payload: bytes | None = None) -> None:
     """Invoke a trusted internal role through a stable work-unit identity."""
-    if function is not None:
+    if payload is not None:
+        function = cloudpickle.loads(payload)
+        if not callable(function):
+            msg = "SkyPilot control payload did not decode to a callable."
+            raise TypeError(msg)
         function()
 
 
