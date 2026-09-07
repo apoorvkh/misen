@@ -491,26 +491,31 @@ class _AgentFleet:
         self.wakeup.set()
 
     def acquire(self, key: _FleetKey, run_id: str, *, required_runtime_s: float) -> _Allocation | None:
-        """Lease one ready, compatible idle allocation with enough lifetime."""
+        """Lease one ready compatible allocation, preferring this run's idle worker."""
         with self.lock:
             if self.stopped.is_set():
                 return None
             now = time.monotonic()
-            for worker in self.allocations.values():
-                if (
-                    not self._matches(worker, key)
-                    or worker.owner_run_id is not None
-                    or worker.generation is None
-                    or worker.job_id is not None
-                    or worker.retired
-                    or worker.maintenance
-                ):
-                    continue
-                if worker.expires_at is not None and worker.expires_at - now <= required_runtime_s:
-                    self._retire(worker)
-                    continue
-                worker.owner_run_id = run_id
-                return worker
+            # A coordinator keeps its allocation leased between nodes. Check
+            # that worker first, then fall back to unowned compatible capacity.
+            # Both paths revalidate the finite native lifetime before every
+            # assignment.
+            for owner in (run_id, None):
+                for worker in self.allocations.values():
+                    if (
+                        not self._matches(worker, key)
+                        or worker.owner_run_id != owner
+                        or worker.generation is None
+                        or worker.job_id is not None
+                        or worker.retired
+                        or worker.maintenance
+                    ):
+                        continue
+                    if worker.expires_at is not None and worker.expires_at - now <= required_runtime_s:
+                        self._retire(worker)
+                        continue
+                    worker.owner_run_id = run_id
+                    return worker
             return None
 
     def release(self, worker: _Allocation, run_id: str) -> bool:

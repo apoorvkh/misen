@@ -324,6 +324,112 @@ def test_explicit_session_reuses_compatible_agent_across_graphs_then_tears_it_do
     assert graph_module._runs.get() is None
 
 
+def test_session_graph_reuses_its_owned_idle_agent_for_a_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    backend = _Backend()
+    calls = _Calls()
+    monkeypatch.setattr(graph_module, "_async_call", calls)
+    executor = graph_module.SkyPilotExecutor(
+        capacity={"cpu": SkyPilotCapacity(pool="cpu", memory=1, max_workers=1)},
+        manage_api_server=False,
+        shutdown_timeout_s=1,
+        poll_interval_s=0.01,
+    )
+
+    with executor.session():
+        execution = graph_module._runs.get()
+        assert execution is not None
+        run_id = "two-node-graph"
+        agent = AgentWork("worker", "cpu", "agent", ["unused"], {}, "logs/agent.log")
+        coordinator = GraphCoordinator(
+            executor,
+            RunManifest(
+                run_id,
+                "snapshot",
+                [_work("first", direct=True, payload_name="first.pkl"), _work("second", "first")],
+                [agent],
+                control_id=execution.session_id,
+                runtime_key="runtime",
+            ),
+            workspace,
+            backend,
+            fleet=execution.fleet,
+        )
+        coordinator.step()
+        _write_run(
+            workspace,
+            execution.session_id,
+            "worker-worker.state.json",
+            worker_id="worker",
+            generation="generation",
+            state="idle",
+        )
+        coordinator.step()
+        worker = coordinator.allocations["worker"]
+        first_attempt = worker.attempt_id
+        assert isinstance(first_attempt, str)
+        _write_run(workspace, run_id, f"attempt-{first_attempt}.result.json", attempt_id=first_attempt, state="done")
+        _write_run(
+            workspace,
+            run_id,
+            f"attempt-{first_attempt}.json",
+            attempt_id=first_attempt,
+            job_id="first",
+            worker_id="worker",
+            generation="generation",
+            state="done",
+        )
+        _write_run(
+            workspace,
+            execution.session_id,
+            "worker-worker.state.json",
+            worker_id="worker",
+            generation="generation",
+            state="idle",
+        )
+
+        coordinator.step()
+
+        assert worker.job_id == "second"
+        assert worker.attempt_id != first_attempt
+        assert worker.owner_run_id == run_id
+        assert backend.worker_launches == ["worker"]
+
+        second_attempt = worker.attempt_id
+        assert isinstance(second_attempt, str)
+        _write_run(
+            workspace,
+            run_id,
+            f"attempt-{second_attempt}.result.json",
+            attempt_id=second_attempt,
+            state="done",
+        )
+        _write_run(
+            workspace,
+            run_id,
+            f"attempt-{second_attempt}.json",
+            attempt_id=second_attempt,
+            job_id="second",
+            worker_id="worker",
+            generation="generation",
+            state="done",
+        )
+        _write_run(
+            workspace,
+            execution.session_id,
+            "worker-worker.state.json",
+            worker_id="worker",
+            generation="generation",
+            state="idle",
+        )
+        coordinator.step()
+        assert coordinator.graph.complete
+        assert execution.fleet.release(worker, run_id)
+
+
 def test_implicit_blocking_submit_tears_down_its_finished_graph_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1237,6 +1343,39 @@ def test_fleet_refuses_a_worker_without_enough_remaining_lifetime(tmp_path: Path
         control_id="fleet-control",
         runtime_key=key.runtime_key,
         profile_key=key.profile_key,
+        expires_at=time.monotonic() + 9,
+    )
+    fleet.allocations[worker.worker_id] = worker
+
+    assert fleet.acquire(key, "run", required_runtime_s=10) is None
+    assert worker.retired
+    assert worker.owner_run_id is None
+
+
+def test_fleet_refuses_an_owned_successor_without_enough_remaining_lifetime(tmp_path: Path) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    profile = SkyPilotCapacity(pool="cpu", memory=1, max_workers=1)
+    executor = SimpleNamespace(
+        capacity={"cpu": profile},
+        max_run_minutes=1,
+        setup_timeout_s=10,
+        shutdown_timeout_s=2,
+        poll_interval_s=0.01,
+    )
+    fleet = graph_module._AgentFleet(executor)
+    key = fleet.key(workspace, "runtime", "cpu", profile)
+    launch: Future[Any] = Future()
+    launch.set_result(None)
+    worker = graph_module._Allocation(
+        "worker",
+        "cpu",
+        launch,
+        generation="generation",
+        workspace=workspace,
+        control_id="fleet-control",
+        runtime_key=key.runtime_key,
+        profile_key=key.profile_key,
+        owner_run_id="run",
         expires_at=time.monotonic() + 9,
     )
     fleet.allocations[worker.worker_id] = worker
