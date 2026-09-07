@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import shutil
 from abc import abstractmethod
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Iterable, Iterator, MutableMapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar, cast
 
@@ -239,6 +239,75 @@ class Workspace(Configurable):
             raise StorageError(msg) from exc
         self._result_hashes.pop(task.task_hash(), None)
         logger.debug("Cleared result hash for task %s.", task)
+
+    def prefetch_result_metadata(self, tasks: Iterable[Task[Any]]) -> None:
+        """Warm session hash caches using an optional backend bulk-read path.
+
+        Missing entries are deliberately not negative-cached: a concurrent
+        producer may publish them after this hint runs. Backends without a
+        bulk accessor keep the existing lazy behavior.
+        """
+        tasks_by_hash = {task.task_hash(): task for task in tasks}
+        pending_resolved = [
+            task_hash
+            for task_hash in tasks_by_hash
+            if task_hash not in self._resolved_hashes and task_hash not in self._result_hashes
+        ]
+        resolved_get_many = getattr(self._resolved_hash_cache, "get_many", None)
+        if pending_resolved and callable(resolved_get_many):
+            with _storage_errors("Could not prefetch resolved task hashes"):
+                resolved = cast(
+                    "dict[TaskHash, ResolvedTaskHash]",
+                    resolved_get_many(pending_resolved),
+                )
+            self._resolved_hashes.update(resolved)
+
+        tasks_by_resolved: dict[ResolvedTaskHash, list[TaskHash]] = {}
+        for task_hash in tasks_by_hash:
+            if task_hash in self._result_hashes or task_hash not in self._resolved_hashes:
+                continue
+            tasks_by_resolved.setdefault(self._resolved_hashes[task_hash], []).append(task_hash)
+        result_get_many = getattr(self._result_hash_cache, "get_many", None)
+        if tasks_by_resolved and callable(result_get_many):
+            with _storage_errors("Could not prefetch task result hashes"):
+                result_hashes = cast(
+                    "dict[ResolvedTaskHash, ResultHash]",
+                    result_get_many(tasks_by_resolved),
+                )
+            self._result_hashes.update(
+                (task_hash, result_hash)
+                for resolved_hash, result_hash in result_hashes.items()
+                for task_hash in tasks_by_resolved[resolved_hash]
+            )
+
+    def prefetch_task_result_metadata(self, task: Task[Any]) -> None:
+        """Prefetch only the metadata needed to resolve one task efficiently.
+
+        A completed task normally has its own persisted resolved hash, so its
+        cache lookup does not need any parent metadata. Parents are prefetched
+        only when that direct index entry is absent and the resolved identity
+        must be derived for a new execution.
+        """
+        self.prefetch_result_metadata((task,))
+        if task.task_hash() not in self._resolved_hashes:
+            self.prefetch_result_metadata(task.dependencies)
+
+    def prefetch_results(self, tasks: Iterable[Task[Any]]) -> None:
+        """Materialize available cacheable task results through a bulk backend path.
+
+        This is a performance hint. Missing metadata or payloads remain absent
+        and are handled by the normal task-cache checks. Storage failures still
+        propagate so prefetching cannot conceal a corrupt durable result.
+        """
+        task_list = tuple(task for task in tasks if task.meta.cache)
+        self.prefetch_result_metadata(task_list)
+        result_hashes = {
+            result_hash for task in task_list if (result_hash := self._result_hashes.get(task.task_hash())) is not None
+        }
+        result_get_many = getattr(self.results.result_store, "get_many", None)
+        if result_hashes and callable(result_get_many):
+            with _storage_errors("Could not prefetch task result payloads"):
+                result_get_many(result_hashes)
 
     @property
     def results(self) -> ResultMap:
@@ -734,6 +803,10 @@ class ResultMap(MutableMapping[Task[Any], Any]):
             with result_lock.context(blocking=True, timeout=None):
                 if result_hash in self.result_store:
                     logger.debug("Result store already has payload for task %s.", task)
+                    # Remote stores may use ``__getitem__`` to seed their
+                    # deterministic host cache from the durable winner. Never
+                    # seed an existing hash from this producer's candidate.
+                    _ = self.result_store[result_hash]
                     return
                 tmp_dir = self.workspace.get_temp_dir() / "results" / result_hash.b32()
                 tmp_dir.mkdir(parents=True, exist_ok=True)

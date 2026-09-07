@@ -176,6 +176,20 @@ def test_env_files_become_submission_job_files(tmp_path: Path, project: Path) ->
         assert all(oct(p.stat().st_mode & 0o777) == "0o600" for p in paths)
         # Env-file copies are retained (0600) until pruning; nothing
         # deletes them when a submission ends.
+
+        identical = ProjectSnapshot(workspace=workspace, prewarm=False)
+        assert identical.snapshot_key == snapshot.snapshot_key
+        assert identical.runtime_key == snapshot.runtime_key
+
+        (project / ".env.local").write_text("SECRET=2\n")
+        changed_env = ProjectSnapshot(workspace=workspace, prewarm=False)
+        assert changed_env.snapshot_key == snapshot.snapshot_key
+        assert changed_env.runtime_key != snapshot.runtime_key
+
+        changed_store = ProjectSnapshot(workspace=workspace, env_store_dir="/different-worker-store", prewarm=False)
+        assert changed_store.snapshot_key == changed_env.snapshot_key
+        assert changed_store.runtime_key != changed_env.runtime_key
+        assert "SECRET" not in snapshot.runtime_key
     finally:
         (project / ".env").unlink()
         (project / ".env.local").unlink()

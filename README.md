@@ -282,8 +282,10 @@ IP environment variables to coordinate the allocation.
 
 SkyPilot manages compute; Misen schedules the ready work in your graph.
 One reusable worker agent can execute many work units without another
-SkyPilot submission. Shared prerequisites, per-task caching, heterogeneous
-resources, and fan-out/fan-in remain Misen responsibilities.
+SkyPilot submission. An explicit executor session also keeps compatible agents
+warm across graph submissions; each task still runs in a fresh Python child.
+Shared prerequisites, per-task caching, heterogeneous resources, and
+fan-out/fan-in remain Misen responsibilities.
 
 Configure explicit capacity profiles in `.misen.toml`. Each profile selects
 exactly one existing `pool`, existing `cluster`, or provisioning `infra`,
@@ -310,14 +312,16 @@ bucket = "my-misen-workspace"
 prefix = "experiments"
 s3_region = "us-east-1"
 cache_dir = ".cache/misen"
+result_prefetch_workers = 16
 ```
 
 This example borrows a pool that you create explicitly in the same SkyPilot
 namespace. Misen neither creates, resizes, nor terminates borrowed pools or
 clusters. Add CPU/GPU profiles for incompatible hardware, or a
 `dedicated = true` profile for work requiring its own allocation, including
-multi-node tasks. Profile limits bound active allocations; there is no
-automatic worker replacement, application retry, or cross-run agent sharing.
+multi-node tasks. Profile limits bound active allocations across all graphs in
+one executor session; there is no automatic worker replacement or application
+retry.
 
 The default scoped local API requires the isolated-runtime nightly extra.
 Install it in the environment running Misen, together with the provider
@@ -360,11 +364,17 @@ Nonblocking Python submissions require a live session:
 
 ```python
 with executor.session():
-    jobs = task.submit(executor=executor, workspace=workspace)
-    for job in jobs.nodes():
-        job.wait()
-        job.raise_for_status()
+    first_jobs = first.submit(executor=executor, workspace=workspace, blocking=True)
+    second_jobs = second.submit(executor=executor, workspace=workspace, blocking=True)
 ```
+
+Keeping related submissions in the same explicit session amortizes agent
+startup. Reuse requires the same workspace object, snapshotted code and
+dependencies, dotenv contents, environment-store setting, and capacity
+profile. A compatible agent fetches only the new payload and launches it with
+its materialized interpreter; the full bootstrap remains a safe fallback.
+Without an explicit outer context, each blocking call owns a one-shot session
+and tears its agents down before returning.
 
 Leaving that session stops admission, cancels unfinished owned work, and
 attempts bounded cleanup; it does not silently detach the remaining graph.

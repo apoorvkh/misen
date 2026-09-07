@@ -114,8 +114,9 @@ generic `config` mapping cannot be embedded in worker bootstrap commands.
 `SkyPilotExecutor` schedules ready work units over explicit
 `capacity: dict[str, SkyPilotCapacity]` profiles. SkyPilot owns allocations;
 Misen owns graph readiness, logical jobs, attempt records, and completion.
-Reusable agents execute one fresh task subprocess at a time. Dedicated
-profiles provide one allocation per admitted work unit.
+Reusable agents execute one fresh task subprocess at a time. Compatible agents
+are retained across graph submissions inside an explicit executor session.
+Dedicated profiles provide one allocation per admitted work unit.
 
 See the [SkyPilot usage guide](skypilot.md) for installation, complete TOML
 examples, provider/workspace authentication, and the current validation limits.
@@ -133,9 +134,12 @@ examples, provider/workspace authentication, and the current validation limits.
 
 Attached `submit(..., blocking=False)` requires a live
 `with executor.session():` context. `submit(..., blocking=True)` scopes its own
-session. `Experiment.run()` waits by default for attached graph execution.
-Closing an unfinished session cancels/stops owned work and attempts bounded
-cleanup; it does not detach the graph or terminate borrowed pools/clusters.
+session. `Experiment.run()` waits by default for attached graph execution. An
+explicit session reuses agents only for the same workspace object, runtime
+fingerprint, and capacity profile; a one-shot blocking submission tears its
+fleet down before returning. Closing a session cancels/stops owned work and
+attempts bounded cleanup; it does not detach the graph or terminate borrowed
+pools/clusters.
 
 Detached execution requires `manage_api_server=False`, a stable remote API
 with service-account credential injection enabled, a compatible SDK in the

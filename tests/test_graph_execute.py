@@ -22,6 +22,8 @@ class _RecordingWorkspace:
         self.fail_state: str | None = None
         self.files: dict[tuple[str, str], bytes] = {}
         self.lock_held = True
+        self.lock_calls = 0
+        self.reads: list[tuple[str, str]] = []
 
     def put_job_file(self, run_id: str, name: str, data: bytes) -> None:
         record = json.loads(data)
@@ -33,12 +35,14 @@ class _RecordingWorkspace:
         self.files[run_id, name] = data
 
     def read_job_file(self, run_id: str, name: str) -> bytes:
+        self.reads.append((run_id, name))
         try:
             return self.files[run_id, name]
         except KeyError:
             raise FileNotFoundError(name) from None
 
     def lock(self, namespace: str, key: str):
+        self.lock_calls += 1
         assert namespace == "job"
         assert key.startswith("execution-")
         assert len(key) < _MAX_LOCK_KEY_LENGTH
@@ -64,6 +68,8 @@ def _clean_coordination_environment(monkeypatch):
     monkeypatch.delenv("MISEN_RUN_ID", raising=False)
     monkeypatch.delenv("MISEN_ATTEMPT_ID", raising=False)
     monkeypatch.delenv("MISEN_ENV_FILES_LOADED", raising=False)
+    for name in sky_mod._DIRECT_CLAIM_ENV:  # noqa: SLF001 -- isolate the private worker wire protocol
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(execute_mod, "run_role_from_env", lambda: False)
 
 
@@ -80,6 +86,25 @@ def execution(tmp_path, monkeypatch):
 def _enable_attempt(monkeypatch):
     monkeypatch.setenv("MISEN_RUN_ID", "run_123")
     monkeypatch.setenv("MISEN_ATTEMPT_ID", "attempt-456")
+
+
+def _enable_direct_attempt(monkeypatch, workspace, *, claim_token=None):
+    claim_token = claim_token or "capability-123"
+    _enable_attempt(monkeypatch)
+    claim = {
+        "worker_id": "worker-123",
+        "generation": "generation-123",
+        "attempt_id": "attempt-456",
+        "job_id": "job-123",
+        "claim_token": claim_token,
+    }
+    workspace.files["run_123", "attempt-attempt-456.accepted.json"] = json.dumps(
+        {"version": 1, "run_id": "run_123", **claim}
+    ).encode()
+    monkeypatch.setenv(sky_mod._DIRECT_WORKER_ID_ENV, claim["worker_id"])  # noqa: SLF001
+    monkeypatch.setenv(sky_mod._DIRECT_GENERATION_ENV, claim["generation"])  # noqa: SLF001
+    monkeypatch.setenv(sky_mod._DIRECT_JOB_ID_ENV, claim["job_id"])  # noqa: SLF001
+    monkeypatch.setenv(sky_mod._DIRECT_CLAIM_TOKEN_ENV, claim_token)  # noqa: SLF001
 
 
 def test_execution_without_attempt_environment_has_no_new_workspace_requirements(execution):
@@ -122,6 +147,74 @@ def test_attempt_markers_bracket_payload_and_precede_log_finalization(execution,
             {"version": 1, "run_id": "run_123", "attempt_id": "attempt-456", "state": "done"},
         ),
     ]
+    assert workspace.lock_calls == 1
+
+
+def test_direct_agent_claim_replaces_generic_execution_lock_and_round_trips(execution, monkeypatch):
+    """Direct children validate one durable acceptance and emit only runtime markers."""
+    payload, workspace, bundle = execution
+    _enable_direct_attempt(monkeypatch, workspace)
+
+    def payload_fn():
+        assert "MISEN_RUN_ID" not in os.environ
+        assert "MISEN_ATTEMPT_ID" not in os.environ
+        assert all(name not in os.environ for name in sky_mod._DIRECT_CLAIM_ENV)  # noqa: SLF001
+        workspace.events.append("execute")
+
+    bundle["fn"] = payload_fn
+    execute_mod.execute(payload)
+
+    assert workspace.lock_calls == 0
+    assert workspace.reads == [("run_123", "attempt-attempt-456.accepted.json")]
+    assert workspace.events == ["running", "execute", "done"]
+    assert [(run_id, name, record["state"]) for run_id, name, record in workspace.records] == [
+        ("run_123", "attempt-attempt-456.started.json", "running"),
+        ("run_123", "attempt-attempt-456.result.json", "done"),
+    ]
+    assert ("run_123", "attempt-attempt-456.execution.json") not in workspace.files
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing", "wrong-token", "wrong-worker", "malformed"],
+)
+def test_direct_agent_claim_fails_closed_before_user_code(execution, monkeypatch, corruption):
+    payload, workspace, _bundle = execution
+    _enable_direct_attempt(monkeypatch, workspace)
+    accepted = ("run_123", "attempt-attempt-456.accepted.json")
+    if corruption == "missing":
+        del workspace.files[accepted]
+    elif corruption == "malformed":
+        workspace.files[accepted] = b"not-json"
+    else:
+        record = json.loads(workspace.files[accepted])
+        record["claim_token" if corruption == "wrong-token" else "worker_id"] = "other"
+        workspace.files[accepted] = json.dumps(record).encode()
+
+    with pytest.raises(ExecutionError, match="durable agent acceptance"):
+        execute_mod.execute(payload)
+
+    assert workspace.lock_calls == 0
+    assert workspace.events == []
+    assert workspace.records == []
+
+
+@pytest.mark.parametrize("with_identity", [False, True])
+def test_partial_direct_claim_environment_fails_closed_without_workspace_access(
+    execution, monkeypatch, *, with_identity
+):
+    payload, workspace, _bundle = execution
+    if with_identity:
+        _enable_attempt(monkeypatch)
+    monkeypatch.setenv(sky_mod._DIRECT_WORKER_ID_ENV, "worker-123")  # noqa: SLF001
+
+    expected = "must be supplied together" if with_identity else "require a complete attempt identity"
+    with pytest.raises(ValueError, match=expected):
+        execute_mod.execute(payload)
+
+    assert workspace.reads == []
+    assert workspace.lock_calls == 0
+    assert workspace.events == []
 
 
 @pytest.mark.parametrize("exception_type", [RuntimeError, KeyboardInterrupt, SystemExit])

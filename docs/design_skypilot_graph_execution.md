@@ -19,8 +19,9 @@ that needs its own native allocation.
 | Submitter | Cache discovery, immutable snapshot and graph, logical handles |
 | Coordinator | Dependency counts, ready queues, bounded placement, attempts, cancellation, cleanup |
 | Capacity adapter | Native launch/status/cancel and durable allocation identities |
+| Agent fleet | Session lease, profile lookahead, compatible cross-graph reuse |
 | Agent | Finite lease, one fresh subprocess at a time, device visibility, process outcomes |
-| Workspace | Existing caches/payloads plus known-key control and outcome records |
+| Workspace | Durable caches/payloads, bounded dependency prefetch, control and outcome records |
 
 An attached coordinator runs in a thread inside the invoking Python process.
 It advances independently of `Job.state()` and UI polling. Blocking SkyPilot
@@ -56,7 +57,8 @@ dependency scheduling so it can be optimized without changing graph semantics.
 6. Publish callable completion and release successors when that record is read,
    without waiting for native SkyPilot completion. Track process exit and log
    draining separately; late failures are reported without deleting valid results.
-7. Reuse the idle agent for the next compatible ready node.
+7. Reuse the idle agent for the next compatible ready node or graph in the
+   same explicit session.
 
 Run IDs, logical job IDs, attempt IDs, native allocation IDs, and worker
 generations are distinct. Stale outcomes cannot complete a new attempt. Public
@@ -66,7 +68,7 @@ Failures propagate to descendants, not unrelated branches.
 There is no automatic retry, coordinator takeover, or uncertain replay.
 `attach()` reconstructs observation/cancellation handles, not scheduling ownership.
 A durable owner record rejects remote coordinator restart. Missing heartbeats
-expose uncertainty, not proof that code never ran. Across independent runs,
+expose uncertainty, not proof that code never ran. Across independent sessions,
 existing cache locks remain, but agents and active logical jobs are not shared;
 non-cacheable work may execute twice. Arbitrary side effects are not exactly-once.
 
@@ -81,9 +83,11 @@ Capacity profiles declare reservations, not inferred pool inventory. SkyPilot
 validates native resource availability. Misen matches CPU, memory, node count,
 accelerator backend/count, and declared per-device memory. It prefers CPU-only
 capacity for CPU work, then reusable and smaller fitting shapes. Unfit requests
-fail before submission. Time limits are not runtime estimates.
+fail before submission. `max_workers` is a hard ceiling rather than a target;
+initial reusable capacity is also capped by the exact dependency-poset width for
+that profile. Time limits are not runtime estimates.
 
-Each agent runs one subprocess. Thread limits and supported device masks are
+Each agent runs one subprocess at a time. Thread limits and supported device masks are
 cooperative controls, not cgroup/security isolation. Masks preserve actual
 SkyPilot-assigned IDs and fail closed for unsupported or insufficient visibility.
 Multi-node profiles are dedicated; `DASK_CLIENT` tasks require an exact node-count
@@ -91,7 +95,7 @@ match, with Dask scoped to that work unit rather than the global scheduler.
 
 | Lifecycle | Owner | Submitter exit |
 | --- | --- | --- |
-| Attached, default | Coordinator in a live session | Cancel unfinished work, drain, stop owned local API lifecycle |
+| Attached, default | Coordinators and compatible agent fleet in a live session | Cancel unfinished work, drain, stop fleet and owned local API lifecycle |
 | Detached | Dedicated remote coordinator and stable remote API | May exit after native coordinator acceptance |
 
 `Experiment.run()` defaults to waiting for attached SkyPilot runs. Nonblocking
@@ -143,9 +147,12 @@ CPU→GPU→CPU, multi-node Dask, detached completion after submitter exit, fail
 injection, and exact teardown. Measure ready-to-start and result-to-successor
 latency, environment builds, native submissions, makespan, and allocated resources.
 
-Not implemented: automatic worker replacement, concurrent slots, dynamic scaling,
-critical-path priority, locality scoring, shared cross-run agents, or takeover.
-Next optimizations should follow measurement: reduce mailbox requests/state
-serialization, consider a lower-latency channel, improve critical-path routing,
-and prewarm near-ready capacity. Automatic replay needs fencing at assignment,
-record updates, and result publication before it can safely be enabled.
+Implemented optimizations include session-scoped cross-graph agents, profile
+lookahead, a verified direct-child path, producer write-through, bounded cloud
+dependency prefetch, and coalesced run-state publication. Not implemented:
+automatic worker replacement, concurrent slots within one allocation, dynamic
+scaling, critical-path priority, locality scoring beyond the host result cache,
+or takeover. Further transport work should consider a lower-latency event
+channel while keeping object storage as the durable authority. Automatic replay
+needs stronger fencing at assignment, record updates, and result publication
+before it can safely be enabled.

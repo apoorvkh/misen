@@ -1,10 +1,11 @@
 """Graph coordination through real workspace records and fake capacity APIs."""
-# ruff: noqa: D103, PLR2004, S101
+# ruff: noqa: D103, PLR2004, S101, SLF001
 
 from __future__ import annotations
 
 import sys
 import threading
+import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 import msgspec
 import pytest
 
+import misen.executor as executor_module
 import misen.executors.skypilot as graph_module
 import misen.executors.skypilot as worker_module
 from misen.executors.skypilot import (
@@ -36,7 +38,14 @@ if TYPE_CHECKING:
 _RUN = "coordinator-test"
 
 
-def _work(job_id: str, *parents: str, profile: str = "cpu", script: str = "pass") -> GraphWork:
+def _work(
+    job_id: str,
+    *parents: str,
+    profile: str = "cpu",
+    script: str = "pass",
+    direct: bool = False,
+    payload_name: str | None = None,
+) -> GraphWork:
     return GraphWork(
         job_id,
         list(parents),
@@ -45,15 +54,25 @@ def _work(job_id: str, *parents: str, profile: str = "cpu", script: str = "pass"
         {},
         f"logs/{job_id}.log",
         aggregate_resources([Resources(cpus=1, memory=1, time=1)]),
+        direct=direct,
+        payload_name=payload_name,
     )
 
 
+def _write_run(workspace: DiskWorkspace, run_id: str, name: str, **record: Any) -> None:
+    workspace.put_job_file(run_id, name, msgspec.json.encode({"version": 1, "run_id": run_id, **record}))
+
+
 def _write(workspace: DiskWorkspace, name: str, **record: Any) -> None:
-    workspace.put_job_file(_RUN, name, msgspec.json.encode({"version": 1, "run_id": _RUN, **record}))
+    _write_run(workspace, _RUN, name, **record)
+
+
+def _read_run(workspace: DiskWorkspace, run_id: str, name: str) -> dict[str, Any]:
+    return msgspec.json.decode(workspace.read_job_file(run_id, name))
 
 
 def _read(workspace: DiskWorkspace, name: str) -> dict[str, Any]:
-    return msgspec.json.decode(workspace.read_job_file(_RUN, name))
+    return _read_run(workspace, _RUN, name)
 
 
 @dataclass
@@ -176,6 +195,387 @@ def _harness(
         monkeypatch.setattr(graph_module, "_async_call", calls)
     coordinator = GraphCoordinator(cast("Any", executor), manifest, workspace, backend)
     return _Harness(coordinator, workspace, backend, calls)
+
+
+def _complete_fleet_graph(
+    executor: Any,
+    execution: Any,
+    workspace: DiskWorkspace,
+    backend: _Backend,
+    *,
+    run_id: str,
+    runtime_key: str,
+    profile: str = "cpu",
+    bootstrap_id: str,
+) -> str:
+    """Drive one direct graph through the session fleet without calling fleet methods."""
+    manifest = RunManifest(
+        run_id,
+        "snapshot-key",
+        [_work(f"job-{run_id}", profile=profile, direct=True, payload_name=f"job-{run_id}.pkl")],
+        [AgentWork(bootstrap_id, profile, f"agent-{bootstrap_id}", ["unused"], {}, f"logs/{bootstrap_id}.log")],
+        control_id=execution.session_id,
+        runtime_key=runtime_key,
+    )
+    coordinator = GraphCoordinator(executor, manifest, workspace, backend, fleet=execution.fleet)
+    execution.runs.append(coordinator)
+
+    coordinator.step()
+    for allocation in execution.fleet.allocations.values():
+        if allocation.generation is None:
+            assert allocation.workspace is not None
+            assert allocation.control_id is not None
+            _write_run(
+                allocation.workspace,
+                allocation.control_id,
+                f"worker-{allocation.worker_id}.state.json",
+                worker_id=allocation.worker_id,
+                generation=f"generation-{allocation.worker_id}",
+                state="idle",
+            )
+    coordinator.step()
+
+    assert len(coordinator.allocations) == 1
+    worker = next(iter(coordinator.allocations.values()))
+    assert worker.attempt_id is not None
+    command = _read_run(workspace, execution.session_id, f"worker-{worker.worker_id}.command.json")
+    assert command["target_run_id"] == run_id
+    assert command["direct"] is True
+    assert command["payload_name"] == f"job-{run_id}.pkl"
+
+    _write_run(
+        workspace,
+        run_id,
+        f"attempt-{worker.attempt_id}.result.json",
+        attempt_id=worker.attempt_id,
+        state="done",
+    )
+    _write_run(
+        workspace,
+        run_id,
+        f"attempt-{worker.attempt_id}.json",
+        attempt_id=worker.attempt_id,
+        job_id=worker.job_id,
+        worker_id=worker.worker_id,
+        generation=worker.generation,
+        state="done",
+    )
+    _write_run(
+        workspace,
+        execution.session_id,
+        f"worker-{worker.worker_id}.state.json",
+        worker_id=worker.worker_id,
+        generation=worker.generation,
+        state="idle",
+    )
+    coordinator.step()
+    assert coordinator.graph.complete
+    coordinator.run()
+    assert coordinator.finished.is_set()
+    assert not coordinator.errors
+    return worker.worker_id
+
+
+def test_explicit_session_reuses_compatible_agent_across_graphs_then_tears_it_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    backend = _Backend()
+    calls = _Calls()
+    monkeypatch.setattr(graph_module, "_async_call", calls)
+    executor = graph_module.SkyPilotExecutor(
+        capacity={"cpu": SkyPilotCapacity(pool="cpu", memory=1)},
+        manage_api_server=False,
+        shutdown_timeout_s=1,
+        poll_interval_s=0.01,
+    )
+
+    with executor.session() as yielded:
+        assert yielded is graph_module.active_session()
+        execution = graph_module._runs.get()
+        assert execution is not None
+        first = _complete_fleet_graph(
+            executor,
+            execution,
+            workspace,
+            backend,
+            run_id="graph-one",
+            runtime_key="same-runtime",
+            bootstrap_id="first-bootstrap",
+        )
+        assert backend.cancelled == []
+        second = _complete_fleet_graph(
+            executor,
+            execution,
+            workspace,
+            backend,
+            run_id="graph-two",
+            runtime_key="same-runtime",
+            bootstrap_id="unused-second-bootstrap",
+        )
+        assert second == first
+        assert backend.worker_launches == ["first-bootstrap"]
+        assert backend.cancelled == []
+        assert not execution.fleet.stopped.is_set()
+
+    assert execution.fleet.stopped.is_set()
+    assert backend.cancelled == ["first-bootstrap"]
+    assert graph_module._runs.get() is None
+
+
+def test_implicit_blocking_submit_tears_down_its_finished_graph_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    backend = _Backend()
+    calls = _Calls()
+    monkeypatch.setattr(graph_module, "_async_call", calls)
+    executor = graph_module.SkyPilotExecutor(
+        capacity={"cpu": SkyPilotCapacity(pool="cpu", memory=1)},
+        manage_api_server=False,
+        shutdown_timeout_s=1,
+        poll_interval_s=0.01,
+    )
+    expected = object()
+    execution = None
+
+    def submit(self: Any, tasks: object, target: DiskWorkspace, *, blocking: bool = False) -> object:
+        nonlocal execution
+        del tasks
+        assert self is executor
+        assert target is workspace
+        assert blocking
+        execution = graph_module._runs.get()
+        assert execution is not None
+        _complete_fleet_graph(
+            executor,
+            execution,
+            workspace,
+            backend,
+            run_id="implicit-graph",
+            runtime_key="runtime",
+            bootstrap_id="implicit-bootstrap",
+        )
+        assert backend.cancelled == []
+        return expected
+
+    monkeypatch.setattr(executor_module.Executor, "submit", submit)
+    assert executor.submit(set(), workspace, blocking=True) is expected
+    assert execution is not None
+    assert execution.fleet.stopped.is_set()
+    assert backend.worker_launches == ["implicit-bootstrap"]
+    assert backend.cancelled == ["implicit-bootstrap"]
+    assert graph_module._runs.get() is None
+
+
+def test_session_fleet_looks_ahead_and_launches_downstream_profiles_on_first_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    backend = _Backend()
+    calls = _Calls()
+    monkeypatch.setattr(graph_module, "_async_call", calls)
+    executor = graph_module.SkyPilotExecutor(
+        capacity={
+            "cpu": SkyPilotCapacity(pool="cpu", memory=1),
+            "gpu": SkyPilotCapacity(pool="gpu", memory=1, accelerators={"L4": 1}),
+        },
+        manage_api_server=False,
+        shutdown_timeout_s=1,
+        poll_interval_s=0.01,
+    )
+
+    with executor.session():
+        execution = graph_module._runs.get()
+        assert execution is not None
+        manifest = RunManifest(
+            "lookahead-graph",
+            "snapshot-key",
+            [_work("cpu-root"), _work("gpu-child", "cpu-root", profile="gpu")],
+            [
+                AgentWork("cpu-bootstrap", "cpu", "cpu-agent", ["unused"], {}, "logs/cpu-agent.log"),
+                AgentWork("gpu-bootstrap", "gpu", "gpu-agent", ["unused"], {}, "logs/gpu-agent.log"),
+            ],
+            control_id=execution.session_id,
+            runtime_key="runtime",
+        )
+        coordinator = GraphCoordinator(executor, manifest, workspace, backend, fleet=execution.fleet)
+
+        coordinator.step()
+
+        assert set(backend.worker_launches) == {"cpu-bootstrap", "gpu-bootstrap"}
+        assert len(backend.worker_launches) == 2
+        assert coordinator.graph.states["cpu-root"].attempt_id is None
+        assert coordinator.graph.states["gpu-child"].attempt_id is None
+        assert backend.dedicated_launches == []
+
+    assert sorted(backend.cancelled) == ["cpu-bootstrap", "gpu-bootstrap"]
+
+
+def test_wide_ready_batch_coalesces_run_state_after_durable_assignment_fences(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    width = 8
+    run_id = "wide-ready-graph"
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    backend = _Backend()
+    calls = _Calls()
+    monkeypatch.setattr(graph_module, "_async_call", calls)
+    executor = graph_module.SkyPilotExecutor(
+        capacity={"cpu": SkyPilotCapacity(pool="cpu", memory=1, max_workers=width)},
+        manage_api_server=False,
+        shutdown_timeout_s=1,
+        poll_interval_s=0.01,
+    )
+
+    with executor.session():
+        execution = graph_module._runs.get()
+        assert execution is not None
+        nodes = [_work(f"ready-{index}", direct=True, payload_name=f"ready-{index}.pkl") for index in range(width)]
+        agents = [
+            AgentWork(
+                f"worker-{index}",
+                "cpu",
+                f"agent-{index}",
+                ["unused"],
+                {},
+                f"logs/agent-{index}.log",
+            )
+            for index in range(width)
+        ]
+        manifest = RunManifest(
+            run_id,
+            "snapshot-key",
+            nodes,
+            agents,
+            control_id=execution.session_id,
+            runtime_key="runtime",
+        )
+        coordinator = GraphCoordinator(executor, manifest, workspace, backend, fleet=execution.fleet)
+        coordinator.step()  # submit all bootstraps before any agent reports ready
+        assert len(backend.worker_launches) == width
+        for allocation in execution.fleet.allocations.values():
+            _write_run(
+                workspace,
+                execution.session_id,
+                f"worker-{allocation.worker_id}.state.json",
+                worker_id=allocation.worker_id,
+                generation=f"generation-{allocation.worker_id}",
+                state="idle",
+            )
+
+        writes: list[tuple[str, str, bytes]] = []
+        original_write = DiskWorkspace.put_job_file
+
+        def recording_write(self: DiskWorkspace, namespace: str, name: str, data: bytes) -> str:
+            writes.append((namespace, name, data))
+            return original_write(self, namespace, name, data)
+
+        monkeypatch.setattr(DiskWorkspace, "put_job_file", recording_write)
+        coordinator.step()
+
+        assert len(coordinator.allocations) == width
+        index_writes = [data for namespace, name, data in writes if namespace == run_id and name == "run-state.json"]
+        assert len(index_writes) == 1
+        indexed = msgspec.json.decode(index_writes[0])
+        assert set(indexed["jobs"]) == {node.job_id for node in nodes}
+        assert all(record["attempt_id"] is not None for record in indexed["jobs"].values())
+        lease_writes = [
+            name
+            for namespace, name, _data in writes
+            if namespace == execution.session_id and name.endswith(".lease.json")
+        ]
+        assert len(lease_writes) == width
+        assert len(set(lease_writes)) == width
+
+        for worker in coordinator.allocations.values():
+            assert worker.attempt_id is not None
+            assignment_name = f"attempt-{worker.attempt_id}.assignment.json"
+            command_name = f"worker-{worker.worker_id}.command.json"
+            assignment_position = next(
+                index
+                for index, (namespace, name, _data) in enumerate(writes)
+                if namespace == run_id and name == assignment_name
+            )
+            command_position = next(
+                index
+                for index, (namespace, name, _data) in enumerate(writes)
+                if namespace == execution.session_id and name == command_name
+            )
+            assert assignment_position < command_position
+            assignment = _read_run(workspace, run_id, assignment_name)
+            command = _read_run(workspace, execution.session_id, command_name)
+            for field in ("job_id", "attempt_id", "worker_id", "generation"):
+                assert command[field] == assignment[field]
+            assert command["target_run_id"] == run_id
+
+    assert len(backend.cancelled) == width
+
+
+@pytest.mark.parametrize(
+    "difference",
+    ["snapshot-runtime", "env-runtime", "workspace-identity", "profile-name", "profile-config"],
+)
+def test_session_fleet_does_not_reuse_incompatible_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, difference: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    backend = _Backend()
+    calls = _Calls()
+    monkeypatch.setattr(graph_module, "_async_call", calls)
+    executor = graph_module.SkyPilotExecutor(
+        capacity={
+            "cpu": SkyPilotCapacity(pool="cpu", memory=1),
+            "other": SkyPilotCapacity(pool="other", memory=1),
+        },
+        manage_api_server=False,
+        shutdown_timeout_s=1,
+        poll_interval_s=0.01,
+    )
+
+    with executor.session():
+        execution = graph_module._runs.get()
+        assert execution is not None
+        first = _complete_fleet_graph(
+            executor,
+            execution,
+            workspace,
+            backend,
+            run_id="graph-one",
+            runtime_key="runtime-a",
+            bootstrap_id="first-bootstrap",
+        )
+        second_workspace = workspace
+        second_runtime = "runtime-a"
+        second_profile = "cpu"
+        if difference in {"snapshot-runtime", "env-runtime"}:
+            second_runtime = f"runtime-b-{difference}"
+        elif difference == "workspace-identity":
+            second_workspace = DiskWorkspace(directory=str(tmp_path / "other-workspace"))
+        elif difference == "profile-name":
+            second_profile = "other"
+        else:
+            executor.capacity["cpu"] = SkyPilotCapacity(pool="cpu-with-new-config", memory=1)
+
+        second = _complete_fleet_graph(
+            executor,
+            execution,
+            second_workspace,
+            backend,
+            run_id="graph-two",
+            runtime_key=second_runtime,
+            profile=second_profile,
+            bootstrap_id="second-bootstrap",
+        )
+        assert second != first
+        assert backend.worker_launches == ["first-bootstrap", "second-bootstrap"]
+
+    assert sorted(backend.cancelled) == ["first-bootstrap", "second-bootstrap"]
 
 
 def test_completed_attempt_can_be_reconciled_after_agent_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -354,6 +754,74 @@ def test_cancel_harvests_accepted_launch_before_first_status_observation(
     assert _read(harness.workspace, "worker-cpu-0.lease.json")["stop"] is True
 
 
+def test_post_acceptance_launch_failure_cancellation_is_retained_and_awaited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = _harness(tmp_path, monkeypatch, [_work("task")])
+    harness.coordinator.step()
+    worker = harness.coordinator.allocations["cpu-0"]
+    accepted_error = RuntimeError("record persistence failed")
+    accepted_error.submitted_jobs = ("accepted-native",)  # type: ignore[attr-defined]
+    failed_launch: Future[Any] = Future()
+    failed_launch.set_exception(accepted_error)
+    worker.launch = failed_launch
+
+    awaited: list[float | None] = []
+    requested: list[str] = []
+
+    class RecordingCancellation(Future[Any]):
+        def result(self, timeout: float | None = None) -> Any:
+            awaited.append(timeout)
+            if not self.done():
+                self.set_result(None)
+            return super().result(timeout)
+
+    cancellation = RecordingCancellation()
+
+    def pending_cancel(function: Callable[..., Any], *args: Any) -> Future[Any]:
+        if function.__name__ == "cancel":
+            requested.append(args[0])
+            return cancellation
+        return harness.calls(function, *args)
+
+    monkeypatch.setattr(graph_module, "_async_call", pending_cancel)
+    harness.coordinator.step()
+    harness.coordinator.run()
+
+    assert requested == ["accepted-native"]
+    assert awaited
+    assert awaited[0] is not None
+    assert awaited[0] > 0
+    assert cancellation.done()
+    assert any("Accepted allocation" in error for error in harness.coordinator.errors)
+
+
+def test_retired_bootstrap_still_reconciles_and_cancels_late_acceptance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(graph_module.time, "monotonic", lambda: clock.now)
+    harness = _harness(tmp_path, monkeypatch, [_work("task")])
+    pending_launch: Future[Any] = Future()
+
+    def delayed_launch(function: Callable[..., Any], *args: Any) -> Future[Any]:
+        return pending_launch if function.__name__ == "launch_worker" else harness.calls(function, *args)
+
+    monkeypatch.setattr(graph_module, "_async_call", delayed_launch)
+    harness.coordinator.step()
+    worker = harness.coordinator.allocations["cpu-0"]
+    clock.now += harness.coordinator.executor.setup_timeout_s + 1
+    harness.coordinator.step()
+    assert worker.retired
+    assert worker.native is None
+
+    pending_launch.set_result("accepted-after-timeout")
+    harness.coordinator.step()
+
+    assert worker.native == "accepted-after-timeout"
+    assert harness.backend.cancelled == ["accepted-after-timeout"]
+
+
 def test_stale_generation_cannot_commit_and_changed_generation_is_not_readmitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -485,7 +953,7 @@ def test_cancel_before_agent_admission_never_starts_the_cancelled_callable(
     harness = _harness(tmp_path, monkeypatch, [_work("cancelled"), _work("unrelated")])
     harness.prime()
     worker = harness.coordinator.allocations["cpu-0"]
-    agent = worker_module._Agent(  # noqa: SLF001 -- control the pre-admission race deterministically
+    agent = worker_module._Agent(
         harness.workspace,
         _RUN,
         "cpu-0",
@@ -502,8 +970,8 @@ def test_cancel_before_agent_admission_never_starts_the_cancelled_callable(
         pytest.fail("A cancellation observed before admission must prevent the task process from starting.")
 
     monkeypatch.setattr(worker_module.subprocess, "Popen", forbidden_process)
-    assert agent._lease() is None  # noqa: SLF001 -- cancellation arrives while no subprocess exists
-    agent._admit(graph_module.time.monotonic() + 5)  # noqa: SLF001 -- then the already-written command is read
+    assert agent._lease() is None
+    agent._admit(graph_module.time.monotonic() + 5)
     outcome = _read(harness.workspace, f"attempt-{worker.attempt_id}.json")
     assert outcome["state"] == "failed"
     assert agent.active is None
@@ -645,6 +1113,240 @@ def test_timed_out_pending_dedicated_launch_is_cancelled_when_acceptance_arrives
     harness.coordinator.step()
     assert harness.backend.cancelled == ["accepted-late"]
     assert harness.coordinator.graph.states["second"].attempt_id is None
+
+
+def test_fleet_close_surfaces_pending_launch_and_cancels_late_acceptance(
+    tmp_path: Path,
+) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    executor = SimpleNamespace(shutdown_timeout_s=0.02, poll_interval_s=0.01)
+    fleet = graph_module._AgentFleet(executor)
+    pending_launch: Future[Any] = Future()
+    cancelled = threading.Event()
+    backend = SimpleNamespace(cancel=lambda _native: cancelled.set())
+    worker = graph_module._Allocation(
+        "worker",
+        "cpu",
+        pending_launch,
+        backend=backend,
+        workspace=workspace,
+        control_id="fleet-control",
+    )
+    fleet.allocations[worker.worker_id] = worker
+
+    with pytest.raises(Exception, match="Unresolved launch for fleet allocation worker"):
+        fleet.close()
+    assert worker.late_cancel_registered
+
+    pending_launch.set_result("accepted-late")
+    assert cancelled.wait(1)
+    assert worker.native == "accepted-late"
+
+
+def test_fleet_close_does_not_block_forever_on_ownership_lock() -> None:
+    executor = SimpleNamespace(shutdown_timeout_s=0.02, poll_interval_s=0.01)
+    fleet = graph_module._AgentFleet(executor)
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_lock() -> None:
+        with fleet.lock:
+            locked.set()
+            release.wait(1)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert locked.wait(1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(Exception, match="Fleet ownership lock"):
+            fleet.close()
+    finally:
+        release.set()
+        holder.join(1)
+    assert time.monotonic() - started < 0.5
+
+
+def test_fleet_stop_lease_cannot_be_overwritten_by_a_late_renewal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    executor = SimpleNamespace(shutdown_timeout_s=1, poll_interval_s=0.01)
+    fleet = graph_module._AgentFleet(executor)
+    launch: Future[Any] = Future()
+    launch.set_result(None)
+    worker = graph_module._Allocation(
+        "worker",
+        "cpu",
+        launch,
+        workspace=workspace,
+        control_id="fleet-control",
+        owner_run_id="run",
+    )
+    fleet.allocations[worker.worker_id] = worker
+    renewal_started = threading.Event()
+    release_renewal = threading.Event()
+    original_write = DiskWorkspace.put_job_file
+
+    def blocking_write(self: DiskWorkspace, namespace: str, name: str, data: bytes) -> str:
+        record = msgspec.json.decode(data)
+        if name.endswith(".lease.json") and record["stop"] is False and not renewal_started.is_set():
+            renewal_started.set()
+            assert release_renewal.wait(1)
+        return original_write(self, namespace, name, data)
+
+    monkeypatch.setattr(DiskWorkspace, "put_job_file", blocking_write)
+    renewal = threading.Thread(target=fleet.write_lease, kwargs={"worker": worker, "owner_run_id": "run"})
+    renewal.start()
+    assert renewal_started.wait(1)
+    stopped: list[bool] = []
+    stop = threading.Thread(target=lambda: stopped.append(fleet.write_lease(worker, owner_run_id="run", stop=True)))
+    stop.start()
+    release_renewal.set()
+    renewal.join(1)
+    stop.join(1)
+
+    assert stopped == [True]
+    lease = _read_run(workspace, "fleet-control", "worker-worker.lease.json")
+    assert lease["sequence"] == 2
+    assert lease["stop"] is True
+    assert fleet.write_lease(worker, owner_run_id="run") is False
+    assert _read_run(workspace, "fleet-control", "worker-worker.lease.json")["stop"] is True
+
+
+def test_fleet_refuses_a_worker_without_enough_remaining_lifetime(tmp_path: Path) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    profile = SkyPilotCapacity(pool="cpu", memory=1, max_workers=1)
+    executor = SimpleNamespace(
+        capacity={"cpu": profile},
+        max_run_minutes=1,
+        setup_timeout_s=10,
+        shutdown_timeout_s=2,
+        poll_interval_s=0.01,
+    )
+    fleet = graph_module._AgentFleet(executor)
+    key = fleet.key(workspace, "runtime", "cpu", profile)
+    launch: Future[Any] = Future()
+    launch.set_result(None)
+    worker = graph_module._Allocation(
+        "worker",
+        "cpu",
+        launch,
+        generation="generation",
+        workspace=workspace,
+        control_id="fleet-control",
+        runtime_key=key.runtime_key,
+        profile_key=key.profile_key,
+        expires_at=time.monotonic() + 9,
+    )
+    fleet.allocations[worker.worker_id] = worker
+
+    assert fleet.acquire(key, "run", required_runtime_s=10) is None
+    assert worker.retired
+    assert worker.owner_run_id is None
+
+
+def test_incompatible_replacement_waits_for_exact_native_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    profile = SkyPilotCapacity(pool="cpu", memory=1, max_workers=1)
+    executor = SimpleNamespace(
+        capacity={"cpu": profile},
+        max_run_minutes=1,
+        setup_timeout_s=10,
+        shutdown_timeout_s=2,
+        poll_interval_s=0.01,
+    )
+    fleet = graph_module._AgentFleet(executor)
+    old_key = fleet.key(workspace, "old-runtime", "cpu", profile)
+    new_key = fleet.key(workspace, "new-runtime", "cpu", profile)
+    launch: Future[Any] = Future()
+    launch.set_result("old-native")
+    backend = _Backend()
+    old = graph_module._Allocation(
+        "old-worker",
+        "cpu",
+        launch,
+        native="old-native",
+        generation="generation",
+        launch_reconciled=True,
+        backend=backend,
+        workspace=workspace,
+        control_id="fleet-control",
+        runtime_key=old_key.runtime_key,
+        profile_key=old_key.profile_key,
+    )
+    fleet.allocations[old.worker_id] = old
+    cancellation: Future[Any] = Future()
+
+    def controlled_call(function: Callable[..., Any], *args: Any) -> Future[Any]:
+        if function.__name__ == "cancel":
+            return cancellation
+        future: Future[Any] = Future()
+        try:
+            future.set_result(function(*args))
+        except Exception as exc:  # noqa: BLE001 -- emulate the production future boundary
+            future.set_exception(exc)
+        return future
+
+    monkeypatch.setattr(graph_module, "_async_call", controlled_call)
+    agent = AgentWork("new-worker", "cpu", "new-agent", ["unused"], {}, "logs/new-agent.log")
+
+    fleet.ensure(new_key, [agent], backend, workspace, "fleet-control")
+    assert old.retired
+    assert backend.worker_launches == []
+    assert set(fleet.allocations) == {"old-worker"}
+
+    cancellation.set_result(None)
+    fleet.ensure(new_key, [agent], backend, workspace, "fleet-control")
+    assert backend.worker_launches == ["new-worker"]
+    assert set(fleet.allocations) == {"old-worker", "new-worker"}
+
+    fleet.stopped.set()
+    fleet.wakeup.set()
+    if fleet.thread is not None:
+        fleet.thread.join(1)
+
+
+def test_fleet_step_does_not_hold_ownership_lock_during_workspace_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = DiskWorkspace(directory=str(tmp_path / "workspace"))
+    executor = SimpleNamespace(shutdown_timeout_s=1, poll_interval_s=0.01, setup_timeout_s=10)
+    fleet = graph_module._AgentFleet(executor)
+    launch: Future[Any] = Future()
+    launch.set_result(None)
+    worker = graph_module._Allocation(
+        "worker",
+        "cpu",
+        launch,
+        generation="generation",
+        workspace=workspace,
+        control_id="fleet-control",
+        last_lease=time.monotonic(),
+    )
+    fleet.allocations[worker.worker_id] = worker
+    read_started = threading.Event()
+    release_read = threading.Event()
+
+    def blocked_read(_workspace: DiskWorkspace, _run_id: str, _name: str) -> None:
+        read_started.set()
+        assert release_read.wait(1)
+
+    monkeypatch.setattr(graph_module, "_read", blocked_read)
+    step = threading.Thread(target=fleet.step)
+    step.start()
+    assert read_started.wait(1)
+    acquired = fleet.lock.acquire(timeout=0.1)
+    try:
+        assert acquired
+    finally:
+        if acquired:
+            fleet.lock.release()
+        release_read.set()
+        step.join(1)
+    assert not step.is_alive()
 
 
 def test_shutdown_deadline_is_shared_across_all_capacity_cancellations(

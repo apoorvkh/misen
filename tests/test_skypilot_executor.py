@@ -464,8 +464,28 @@ def _diamond_graph() -> tuple[DependencyGraph[WorkUnit], tuple[WorkUnit, WorkUni
     return graph, (base, left, right, root)
 
 
+def test_control_payload_is_staged_once_and_invokes_the_internal_role() -> None:
+    callback = MagicMock()
+    workspace = MagicMock()
+    expected = ("control-job", ["python", "control.py"], {"SAFE": "1"}, Path("logs/control.log"))
+    prepared: list[WorkUnit] = []
+
+    class Snapshot:
+        def prepare_job(self, work_unit: WorkUnit, target: Workspace) -> tuple[str, list[str], dict[str, str], Path]:
+            assert target is workspace
+            prepared.append(work_unit)
+            return expected
+
+    assert graph_module._prepare_control(cast("Any", Snapshot()), cast("Any", workspace), callback) == expected
+    assert len(prepared) == 1
+    control = prepared[0]
+    control.root.func(**dict(control.root.kwargs))
+    callback.assert_called_once_with()
+    workspace.put_job_file.assert_not_called()
+
+
 @pytest.mark.parametrize("cached_parent", [False, True])
-def test_submit_builds_logical_diamond_and_one_bounded_agent_without_eager_launch(
+def test_submit_builds_logical_diamond_and_sizes_agents_to_dependency_width(
     monkeypatch, *, cached_parent: bool
 ) -> None:
     graph, work_units = _diamond_graph()
@@ -478,6 +498,7 @@ def test_submit_builds_logical_diamond_and_one_bounded_agent_without_eager_launc
     class FakeSnapshot:
         submission_id = "GRAPHABC"
         snapshot_key = "GRAPH-SNAPSHOT"
+        runtime_key = "PRIVATE-RUNTIME-DIGEST"
 
         def __init__(self, **_kwargs: object) -> None:
             pass
@@ -509,21 +530,31 @@ def test_submit_builds_logical_diamond_and_one_bounded_agent_without_eager_launc
 
     monkeypatch.setattr(WorkUnit, "done", done)
     monkeypatch.setattr(snapshot_module, "ProjectSnapshot", FakeSnapshot)
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
+    monkeypatch.setattr(skypilot_module, "_load_external_skypilot", lambda: fake_sky)
     monkeypatch.setattr(graph_module, "_prepare_control", prepare_agent)
-    monkeypatch.setattr(graph_module, "_SkyCapacityBackend", MagicMock())
+    backend_factory = MagicMock()
+    monkeypatch.setattr(graph_module, "_SkyCapacityBackend", backend_factory)
     start = MagicMock()
     close = MagicMock()
     monkeypatch.setattr(graph_module.GraphCoordinator, "start", start)
     monkeypatch.setattr(graph_module.GraphCoordinator, "close", close)
-    executor = SkyPilotExecutor(capacity={"cpu": {"pool": "misen-dev"}}, manage_api_server=False)
+    executor = SkyPilotExecutor(
+        capacity={"cpu": {"pool": "misen-dev", "max_workers": 20}},
+        manage_api_server=False,
+    )
 
     with executor.session():
+        owner = graph_module._runs.get()
+        assert owner is not None
         result = executor.submit({Task(_chain_task, value=99)}, cast("Workspace", workspace))
+        session_id = owner.session_id
+        opaque_runtime_token = owner.runtime_keys[FakeSnapshot.runtime_key]
 
     pending = [unit for unit in work_units if not (cached_parent and unit is parent)]
     assert prepared == [(unit, None) for unit in pending]
-    assert len(staged_agents) == 1
+    # The profile limit is a ceiling, not a launch target: the diamond's
+    # dependency poset can expose at most the two middle nodes concurrently.
+    assert len(staged_agents) == 2
     start.assert_called_once()
     close.assert_called_once()
     fake_sky.jobs.launch.assert_not_called()
@@ -540,7 +571,12 @@ def test_submit_builds_logical_diamond_and_one_bounded_agent_without_eager_launc
     assert nodes["logical-3"].dependencies == ([] if cached_parent else ["logical-1"])
     assert set(nodes["logical-4"].dependencies) == {"logical-2", "logical-3"}
     assert all(node.profile == "cpu" for node in nodes.values())
-    assert len(manifest.agents) == 1
+    assert all(node.direct and node.payload_name == f"{node.job_id}.pkl" for node in nodes.values())
+    assert len(manifest.agents) == 2
+    assert manifest.control_id == session_id
+    assert manifest.runtime_key == opaque_runtime_token
+    assert manifest.runtime_key != FakeSnapshot.runtime_key
+    assert backend_factory.call_args.kwargs == {"api_session": None, "sky": fake_sky}
     assert len(list(result)) == 4
     assert all(isinstance(result[work_units.index(unit)], SkyPilotTaskJob) for unit in pending)
     assert result.successors(1) == [result[0]]
@@ -667,16 +703,22 @@ def test_nested_sessions_preserve_owner_and_do_not_start_local_service(monkeypat
         owner = graph_module._runs.get()
         assert owner is not None
         assert owner[0] == id(executor)
+        fleet = owner.fleet
+        assert not fleet.stopped.is_set()
         with executor.session():
             assert graph_module._runs.get() is owner
+            assert not fleet.stopped.is_set()
         assert graph_module._runs.get() is owner
+        assert not fleet.stopped.is_set()
     assert graph_module._runs.get() is None
+    assert fleet.stopped.is_set()
     load.assert_not_called()
 
 
 def test_blocking_submit_owns_session_around_the_whole_graph(monkeypatch) -> None:
     executor = SkyPilotExecutor(manage_api_server=False)
     expected: DependencyGraph[Any] = DependencyGraph()
+    fleets = []
 
     def submit(self, tasks, workspace, *, blocking=False) -> DependencyGraph[Any]:
         del tasks, workspace
@@ -685,11 +727,15 @@ def test_blocking_submit_owns_session_around_the_whole_graph(monkeypatch) -> Non
         owner = graph_module._runs.get()
         assert owner is not None
         assert owner[0] == id(executor)
+        assert not owner.fleet.stopped.is_set()
+        fleets.append(owner.fleet)
         return expected
 
     monkeypatch.setattr(executor_module.Executor, "submit", submit)
     assert executor.submit(set(), cast("Workspace", _remote_workspace()), blocking=True) is expected
     assert graph_module._runs.get() is None
+    assert len(fleets) == 1
+    assert fleets[0].stopped.is_set()
 
 
 @pytest.mark.parametrize(
@@ -712,7 +758,7 @@ def test_detached_lifecycle_requires_explicit_run_owned_coordinator(kwargs: dict
 
 def test_detached_preflight_rejects_local_api_before_any_launch(monkeypatch) -> None:
     fake_sky = _fake_sky()
-    monkeypatch.setattr(skypilot_module, "_load_skypilot", lambda: fake_sky)
+    monkeypatch.setattr(skypilot_module, "_load_external_skypilot", lambda: fake_sky)
     executor = SkyPilotExecutor(
         capacity={"cpu": SkyPilotCapacity(pool="cpu", cpus=4, memory=32)},
         lifecycle="detached",

@@ -114,6 +114,38 @@ def test_capacity_profiles_do_not_change_namespace_session_isolation(monkeypatch
             assert active_session() is None
 
 
+def test_external_executor_masks_ambient_managed_sessions_and_binds_one_external_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    external_client = object()
+    load_external = MagicMock(return_value=external_client)
+    monkeypatch.setattr(executor_module, "_load_external_skypilot", load_external)
+    external = SkyPilotExecutor(manage_api_server=False)
+
+    with managed_session("ambient") as ambient:
+        assert active_session() is ambient
+        with external.session() as yielded:
+            assert yielded is None
+            assert active_session() is None
+            execution = executor_module._runs.get()
+            assert execution is not None
+            assert execution.api is None
+            assert execution.api_client() is external_client
+            assert execution.api_client() is external_client
+
+            with managed_session("unrelated") as unrelated:
+                assert active_session() is unrelated
+                with external.session() as nested:
+                    assert nested is None
+                    assert active_session() is None
+                    assert executor_module._runs.get() is execution
+                    assert execution.api_client() is external_client
+                assert active_session() is unrelated
+            assert active_session() is None
+        assert active_session() is ambient
+    assert active_session() is None
+    load_external.assert_called_once_with()
+
+
 def test_child_environment_isolated_without_hiding_credentials(monkeypatch, tmp_path):
     monkeypatch.setenv("SKYPILOT_API_SERVER_ENDPOINT", "https://ordinary.example")
     monkeypatch.setenv("SKYPILOT_DB_CONNECTION_URI", "test-database")

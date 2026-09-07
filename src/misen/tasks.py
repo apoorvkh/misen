@@ -386,6 +386,15 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
             _job_id,
         )
 
+        # Cloud workspaces can resolve the two-level dependency hash index in
+        # bounded parallel batches. This must precede this task's cache lookup:
+        # its resolved identity is derived from its parents' result hashes.
+        if self.dependencies:
+            if self.meta.cache:
+                workspace.prefetch_task_result_metadata(self)
+            else:
+                workspace.prefetch_result_metadata(self.dependencies)
+
         # Fast path: return cached payload for cacheable tasks.
         if self.meta.cache:
             try:
@@ -400,6 +409,12 @@ class Task(FrozenMixin, TaskOperatorsMixin, Generic[R]):
                 msg = f"{self} is not cached."
                 logger.warning("Task result requested without compute_if_uncached and cache is missing for %s.", self)
                 raise CacheError(msg)
+
+        # On a cache miss, dependency values will be consumed below. Let cloud
+        # backends overlap their payload downloads before the ordinary cache
+        # guard and deserialization path; local backends retain lazy behavior.
+        if self.dependencies:
+            workspace.prefetch_results(self.dependencies)
 
         # Guardrail: only recurse into dependencies when explicitly requested.
         if not compute_uncached_deps and (uncached_deps := list(self.uncached_deps(workspace=workspace))):

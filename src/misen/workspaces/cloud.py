@@ -18,7 +18,8 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Iterable, Iterator, MutableMapping
+from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Self, TextIO, TypeAlias, TypeVar, cast
@@ -49,11 +50,14 @@ __all__ = ("CloudBackend", "CloudWorkspace", "ObstoreMapping", "ObstoreResultSto
 
 KT = TypeVar("KT", bound=Hash)
 VT = TypeVar("VT", bound=Hash)
+FetchKT = TypeVar("FetchKT")
+FetchVT = TypeVar("FetchVT")
 CloudBackend: TypeAlias = Literal["s3", "gcs", "azure"]
 _CHUNKS = ".chunks"
 _STATE = ".state.json"
 _LOG_CHUNK_SIZE = 8 * 1024 * 1024
 _RESULT_POINTER_PREFIX = b"misen-result-v2:"
+_RESULT_PREFETCH_WORKERS = 16
 logger = logging.getLogger(__name__)
 
 
@@ -193,22 +197,53 @@ def _delete_prefix(store: Any, prefix: str) -> None:
         obs.delete(store, keys)
 
 
+def _bounded_get_many(
+    keys: Iterable[FetchKT],
+    fetch: Callable[[FetchKT], FetchVT],
+    *,
+    max_workers: int,
+) -> dict[FetchKT, FetchVT]:
+    """Fetch distinct keys concurrently, omitting ordinary cache misses."""
+    unique = tuple(dict.fromkeys(keys))
+    if not unique:
+        return {}
+
+    def fetch_one(key: FetchKT) -> tuple[FetchKT, FetchVT] | None:
+        try:
+            return key, fetch(key)
+        except KeyError:
+            return None
+
+    if len(unique) == 1:
+        item = fetch_one(unique[0])
+        return {} if item is None else {item[0]: item[1]}
+
+    workers = min(max_workers, len(unique))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="misen-cloud-prefetch") as executor:
+        items = executor.map(fetch_one, unique)
+        return {item[0]: item[1] for item in items if item is not None}
+
+
 class ObstoreMapping(MutableMapping[KT, VT], Generic[KT, VT]):
     """Typed hash->hash mapping stored as one object per key."""
 
     _key_type: type[KT]
     _value_type: type[VT]
-    __slots__ = ("_prefix", "_store")
+    __slots__ = ("_prefetch_workers", "_prefix", "_store")
 
     def __class_getitem__(cls, item: tuple[type[KT], type[VT]]) -> type[Self]:
         return _hash_mapping_type(cls, item)
 
-    def __init__(self, store: Any, prefix: str) -> None:
+    def __init__(self, store: Any, prefix: str, *, prefetch_workers: int = _RESULT_PREFETCH_WORKERS) -> None:
         if not hasattr(self, "_key_type") or not hasattr(self, "_value_type"):
             msg = "Construct as ObstoreMapping[KeyType, ValueType](...)"
             raise TypeError(msg)
+        if type(prefetch_workers) is not int or prefetch_workers <= 0:
+            msg = "prefetch_workers must be a positive integer"
+            raise ValueError(msg)
         self._store = store
         self._prefix = prefix.rstrip("/")
+        self._prefetch_workers = prefetch_workers
 
     def __getitem__(self, key: KT) -> VT:
         try:
@@ -260,6 +295,10 @@ class ObstoreMapping(MutableMapping[KT, VT], Generic[KT, VT]):
             return False
         return True
 
+    def get_many(self, keys: Iterable[KT]) -> dict[KT, VT]:
+        """Read distinct keys with bounded concurrency, omitting missing keys."""
+        return _bounded_get_many(keys, self.__getitem__, max_workers=self._prefetch_workers)
+
     def __iter__(self) -> Iterator[KT]:
         prefix = f"{self._prefix}/"
         with _cloud_errors(f"Could not list stored values under {self._prefix}"):
@@ -280,14 +319,60 @@ class ObstoreMapping(MutableMapping[KT, VT], Generic[KT, VT]):
 class ObstoreResultStore(MutableMapping[ResultHash, Path]):
     """Result payload store backed by cloud objects and a local materialization cache."""
 
-    __slots__ = ("_cache_dir", "_prefix", "_store")
+    __slots__ = ("_cache_dir", "_prefetch_workers", "_prefix", "_store")
 
-    def __init__(self, store: Any, prefix: str, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        store: Any,
+        prefix: str,
+        cache_dir: Path,
+        *,
+        prefetch_workers: int = _RESULT_PREFETCH_WORKERS,
+    ) -> None:
+        if type(prefetch_workers) is not int or prefetch_workers <= 0:
+            msg = "prefetch_workers must be a positive integer"
+            raise ValueError(msg)
         self._store = store
         self._prefix = prefix.rstrip("/")
         self._cache_dir = cache_dir
+        self._prefetch_workers = prefetch_workers
         with _storage_errors(f"Could not initialize result cache at {self._cache_dir}"):
             self._cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write_through(self, key: ResultHash, source: Path) -> None:
+        """Best-effort seed of the host cache after this payload wins remotely."""
+        local = self._cache_dir / key.b32()
+        try:
+            if local.exists():
+                return
+            try:
+                source.rename(local)
+            except OSError:
+                if local.is_dir():
+                    return
+            else:
+                return
+
+            # A caller outside the workspace may place its source on another
+            # filesystem. Fall back to an atomic staged copy in that case;
+            # normal ResultMap commits take the zero-copy rename above.
+            tmp = Path(tempfile.mkdtemp(dir=self._cache_dir, prefix=f".{key.b32()}.", suffix=".tmp"))
+            try:
+                shutil.copytree(source, tmp, dirs_exist_ok=True)
+                _require_result_manifest(tmp, key)
+                try:
+                    tmp.rename(local)
+                except OSError:
+                    # A reader or another canonical producer may publish the
+                    # identical cache entry concurrently. First rename wins.
+                    if not local.is_dir():
+                        raise
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+        except (OSError, shutil.Error, StorageError):
+            # Local cache population is an optimization after the durable
+            # commit point. Never turn its failure into an uncertain commit.
+            logger.warning("Committed result %s but could not seed its local cache.", key.b32(), exc_info=True)
 
     def __contains__(self, key: object) -> bool:
         if not isinstance(key, ResultHash):
@@ -344,11 +429,15 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
             raise
         return local
 
+    def get_many(self, keys: Iterable[ResultHash]) -> dict[ResultHash, Path]:
+        """Materialize distinct committed payloads with bounded concurrency."""
+        return _bounded_get_many(keys, self.__getitem__, max_workers=self._prefetch_workers)
+
     def __setitem__(self, key: ResultHash, value: Path) -> None:
         self.commit(key, value, before_commit=lambda: None)
 
     def commit(self, key: ResultHash, value: Path, *, before_commit: Callable[[], None]) -> None:
-        """Upload to an immutable generation, then atomically publish its pointer."""
+        """Publish remotely, then write the canonical winner through locally."""
         remote_prefix = f"{self._prefix}/{key.b32()}"
         try:
             with _cloud_errors(f"Could not inspect result {key.b32()}", passthrough=(FileNotFoundError,)):
@@ -356,6 +445,9 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
         except FileNotFoundError:
             pass
         else:
+            # The durable store may hold another producer's generation. Seed
+            # only from that authority, never from this uncommitted candidate.
+            _ = self[key]
             return
 
         manifest = value / MANIFEST_FILENAME
@@ -399,6 +491,14 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
                 )
         except AlreadyExistsError:
             discard_generation()
+            # A concurrent producer won the pointer race. Its generation is
+            # canonical even if this caller serialized different bytes.
+            _ = self[key]
+            return
+
+        # Only a producer that created the durable pointer may seed directly
+        # from its serialized candidate.
+        self._write_through(key, value)
 
     def __delitem__(self, key: ResultHash) -> None:
         prefix = f"{self._prefix}/{key.b32()}/"
@@ -708,6 +808,7 @@ class CloudWorkspace(Workspace):
     s3_region: str | None = None
     config: dict[str, str] = msgspec.field(default_factory=dict)
     cache_dir: str = ".cache/misen"
+    result_prefetch_workers: int = _RESULT_PREFETCH_WORKERS
     log_flush_interval_s: float = 1.0
     scratch_dir_sync_interval_s: float = 30.0
     _config_validation_errors: ClassVar[tuple[type[Exception], ...]] = (ValueError,)
@@ -718,6 +819,9 @@ class CloudWorkspace(Workspace):
             raise ValueError(msg)
         if self.scratch_dir_sync_interval_s <= 0:
             msg = "scratch_dir_sync_interval_s must be positive"
+            raise ValueError(msg)
+        if type(self.result_prefetch_workers) is not int or self.result_prefetch_workers <= 0:
+            msg = "result_prefetch_workers must be a positive integer"
             raise ValueError(msg)
         if self.s3_region is not None and self.backend != "s3":
             msg = f"s3_region is only supported for backend='s3', got backend={self.backend!r}."
@@ -755,12 +859,19 @@ class CloudWorkspace(Workspace):
             resolved_hash_cache=ObstoreMapping[TaskHash, ResolvedTaskHash](
                 self._store,
                 self._under("resolved_hash_cache"),
+                prefetch_workers=self.result_prefetch_workers,
             ),
             result_hash_cache=ObstoreMapping[ResolvedTaskHash, ResultHash](
                 self._store,
                 self._under("result_hash_cache"),
+                prefetch_workers=self.result_prefetch_workers,
             ),
-            result_store=ObstoreResultStore(self._store, self._under("results"), self._cache / "results_cache"),
+            result_store=ObstoreResultStore(
+                self._store,
+                self._under("results"),
+                self._cache / "results_cache",
+                prefetch_workers=self.result_prefetch_workers,
+            ),
         )
         logger.info(
             "Initialized CloudWorkspace id=%s backend=%s bucket=%s cache=%s.",

@@ -66,6 +66,18 @@ def cloud_test_task_b_for_filter() -> int:
     return 22
 
 
+@meta(id="cloud_test_prefetch_value", cache=True)
+def cloud_test_prefetch_value(value: int) -> int:
+    """Return a distinct scalar for dependency-prefetch tests."""
+    return value
+
+
+@meta(id="cloud_test_prefetch_sum", cache=True)
+def cloud_test_prefetch_sum(values: tuple[int, ...]) -> int:
+    """Consume a wide set of prefetched cloud results."""
+    return sum(values)
+
+
 @meta(id="cloud_test_writes_scratchdir", cache=True, exclude={"scratch_dir"})
 def cloud_test_writes_scratchdir(scratch_dir: Path, value: str) -> int:
     """Write ``value`` to a fixed file inside the runtime scratch_dir."""
@@ -166,6 +178,13 @@ def test_cloud_workspace_rejects_misapplied_locator_fields() -> None:
         _MemoryCloudWorkspace(backend="azure", bucket="b", s3_region="us-east-1")
     with pytest.raises(ValueError, match="endpoint"):
         _MemoryCloudWorkspace(backend="gcs", bucket="b", endpoint="https://example")
+
+
+@pytest.mark.parametrize("workers", [0, -1, True, 1.5])
+def test_cloud_workspace_rejects_invalid_result_prefetch_workers(workers: object) -> None:
+    """Result prefetch concurrency must remain a positive integer bound."""
+    with pytest.raises(ValueError, match="result_prefetch_workers"):
+        _MemoryCloudWorkspace(backend="s3", bucket="invalid-prefetch-workers", result_prefetch_workers=workers)  # type: ignore[arg-type]
 
 
 def test_cloud_workspace_rejects_duplicate_locator_in_config(tmp_path) -> None:
@@ -434,6 +453,48 @@ def test_obstore_mapping_corrupt_value_raises_storage_error() -> None:
     assert isinstance(raised.value.__cause__, ValueError)
 
 
+def test_obstore_mapping_get_many_is_parallel_bounded_and_omits_misses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bulk metadata reads overlap without exceeding their configured bound."""
+    store = MemoryStore()
+    mapping = ObstoreMapping[TaskHash, ResolvedTaskHash](store, "resolved", prefetch_workers=2)
+    keys = [TaskHash.from_object(("bulk-key", i)) for i in range(4)]
+    values = [ResolvedTaskHash.from_object(("bulk-value", i)) for i in range(4)]
+    for key, value in zip(keys, values, strict=True):
+        mapping[key] = value
+    missing = TaskHash.from_object("bulk-missing")
+
+    real_get = cloud_mod.obs.get
+    release = threading.Event()
+    guard = threading.Lock()
+    active = 0
+    peak = 0
+
+    def coordinated_get(store_arg: Any, path: str, **kwargs: Any) -> Any:
+        nonlocal active, peak
+        if not path.startswith("resolved/"):
+            return real_get(store_arg, path, **kwargs)
+        with guard:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                release.set()
+        try:
+            if not release.wait(timeout=2):
+                msg = "bulk reads did not overlap"
+                raise AssertionError(msg)
+            return real_get(store_arg, path, **kwargs)
+        finally:
+            with guard:
+                active -= 1
+
+    monkeypatch.setattr(cloud_mod.obs, "get", coordinated_get)
+
+    fetched = mapping.get_many([*keys, missing, keys[0]])
+
+    assert fetched == dict(zip(keys, values, strict=True))
+    assert peak == 2
+
+
 def test_obstore_result_store_setitem_skips_when_present(tmp_path) -> None:
     """Re-setting a result hash is a no-op so existing payloads are preserved."""
     store = MemoryStore()
@@ -453,6 +514,68 @@ def test_obstore_result_store_setitem_skips_when_present(tmp_path) -> None:
 
     materialized = rs[rh]
     assert (materialized / "manifest.json").read_text() == "first"
+
+
+def test_obstore_result_store_writes_remote_winner_through_local_cache(tmp_path) -> None:
+    """A producer seeds its deterministic cache only after durable publication."""
+    store = MemoryStore()
+    cache_dir = tmp_path / "cache"
+    rs = ObstoreResultStore(store, "results", cache_dir=cache_dir)
+    rh = ResultHash.from_object(("res", "write-through"))
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "manifest.json").write_text("canonical-manifest")
+    (source / "data.bin").write_text("canonical-data")
+    local = cache_dir / rh.b32()
+
+    def before_commit() -> None:
+        assert not local.exists()
+
+    rs.commit(rh, source, before_commit=before_commit)
+
+    assert local.is_dir()
+    assert {path.name: path.read_text() for path in local.iterdir()} == {
+        "data.bin": "canonical-data",
+        "manifest.json": "canonical-manifest",
+    }
+    assert rs[rh] == local
+
+
+def test_obstore_result_store_pointer_loser_caches_remote_winner(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A producer that loses pointer creation materializes only the durable winner."""
+    store = MemoryStore()
+    loser = ObstoreResultStore(store, "results", cache_dir=tmp_path / "loser-cache")
+    winner = ObstoreResultStore(store, "results", cache_dir=tmp_path / "winner-cache")
+    rh = ResultHash.from_object(("res", "pointer-race"))
+
+    loser_source = tmp_path / "loser"
+    winner_source = tmp_path / "winner"
+    for directory, label in ((loser_source, "loser"), (winner_source, "winner")):
+        directory.mkdir()
+        (directory / "manifest.json").write_text(f"{label}-manifest")
+        (directory / "data.bin").write_text(f"{label}-data")
+
+    real_put = cloud_mod.obs.put
+    pointer = f"results/{rh.b32()}/manifest.json"
+    raced = False
+
+    def put_with_pointer_race(store_arg: Any, path: str, payload: Any, **kwargs: Any) -> Any:
+        nonlocal raced
+        if not raced and path == pointer and kwargs.get("mode") == "create":
+            raced = True
+            winner.commit(rh, winner_source, before_commit=lambda: None)
+        return real_put(store_arg, path, payload, **kwargs)
+
+    monkeypatch.setattr(cloud_mod.obs, "put", put_with_pointer_race)
+
+    loser.commit(rh, loser_source, before_commit=lambda: None)
+
+    materialized = loser[rh]
+    assert raced
+    assert {path.name: path.read_text() for path in materialized.iterdir()} == {
+        "data.bin": "winner-data",
+        "manifest.json": "winner-manifest",
+    }
 
 
 def test_obstore_result_store_ignores_uncommitted_payloads(tmp_path) -> None:
@@ -533,6 +656,67 @@ def test_obstore_result_store_reads_and_deletes_legacy_layout(tmp_path) -> None:
 
     del rs[rh]
     assert list(obs.list(store, prefix=f"{prefix}/")) == []
+
+
+def test_task_result_bulk_prefetches_cloud_dependency_metadata_and_payloads(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wide child overlaps both hash-index reads and result materialization."""
+    bucket = "test-task-result-prefetch"
+    producer = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        cache_dir=str(tmp_path / "producer-cache"),
+        result_prefetch_workers=2,
+    )
+    parents = tuple(Task(cloud_test_prefetch_value, value=index) for index in range(4))
+    for parent in parents:
+        assert parent.result(workspace=producer, compute_if_uncached=True, compute_uncached_deps=False) in range(4)
+
+    consumer = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        cache_dir=str(tmp_path / "consumer-cache"),
+        result_prefetch_workers=2,
+    )
+    metadata_batches: list[int] = []
+    payload_batches: list[int] = []
+    real_metadata_get_many = ObstoreMapping.get_many
+    real_payload_get_many = ObstoreResultStore.get_many
+
+    def record_metadata_batch(self: ObstoreMapping[Any, Any], keys: Any) -> dict[Any, Any]:
+        batch = tuple(keys)
+        metadata_batches.append(len(batch))
+        return real_metadata_get_many(self, batch)
+
+    def record_payload_batch(self: ObstoreResultStore, keys: Any) -> dict[ResultHash, Path]:
+        batch = tuple(keys)
+        payload_batches.append(len(batch))
+        return real_payload_get_many(self, batch)
+
+    monkeypatch.setattr(ObstoreMapping, "get_many", record_metadata_batch)
+    monkeypatch.setattr(ObstoreResultStore, "get_many", record_payload_batch)
+
+    join = Task(cloud_test_prefetch_sum, values=tuple(parent.T for parent in parents))
+    assert join.result(workspace=consumer, compute_if_uncached=True, compute_uncached_deps=False) == 6
+
+    assert metadata_batches == [1, 4, 4]
+    assert payload_batches == [4]
+    assert all((consumer._cache / "results_cache" / parent.result_hash(consumer).b32()).is_dir() for parent in parents)
+
+    # A completed wide child has its own resolved-hash entry. A fresh reader
+    # must not fetch all parent metadata or payloads merely to retrieve it.
+    metadata_batches.clear()
+    payload_batches.clear()
+    reader = _MemoryCloudWorkspace(
+        backend="s3",
+        bucket=bucket,
+        cache_dir=str(tmp_path / "reader-cache"),
+        result_prefetch_workers=2,
+    )
+    assert join.result(workspace=reader) == 6
+    assert metadata_batches == [1, 1]
+    assert payload_batches == []
 
 
 def test_obstore_mapping_fenced_commit_does_not_overwrite_winner() -> None:

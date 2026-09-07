@@ -239,7 +239,8 @@ package).
 - **SkyPilotExecutor (implemented first adapter)**: SkyPilot reserves compute
   from explicit cluster, pool, or run-owned infrastructure profiles. Misen's
   run coordinator schedules only ready work units, reusing an agent and its
-  environment cache across many fresh task subprocesses. Known workspace
+  environment cache across many fresh task subprocesses and compatible graphs
+  in one explicit executor session. Known workspace
   mailbox keys carry assignments and durable outcomes; one reusable work unit
   does not require one SkyPilot submission. Dedicated profiles reserve an
   allocation per admitted work unit, including multi-node work. `DASK_CLIENT`

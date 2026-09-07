@@ -94,7 +94,6 @@ def setup(monkeypatch):
             self._resolve_managed_job_id(sky)
             self.cancelled = True
 
-    monkeypatch.setattr(sky_mod, "_load_skypilot", lambda: sky)
     monkeypatch.setattr(sky_mod, "SkyPilotJob", ManagedJob)
     executor = SimpleNamespace(
         capacity={"cpu": SkyPilotCapacity(cluster="existing-cpu", cpus=4, memory=8)},
@@ -102,15 +101,50 @@ def setup(monkeypatch):
         name_prefix="misen",
         max_run_minutes=60,
         setup_timeout_s=120,
+        shutdown_timeout_s=30,
     )
     manifest = RunManifest("run-id", "snapshot-key", [], [])
-    backend = graph_mod._SkyCapacityBackend(executor, manifest, store)
+    backend = graph_mod._SkyCapacityBackend(executor, manifest, store, api_session=None, sky=sky)
     agent = AgentWork("worker-id", "cpu", "job-id", ["python", "worker.py"], {}, "logs/job.log")
     return backend, agent, store, sky, responses
 
 
 def _allocation_record(store, allocation_id="worker-id"):
     return msgspec.json.decode(store.files["run-id", f"allocation-{allocation_id}.json"])
+
+
+def test_external_backend_masks_an_ambient_managed_session_when_constructing_native_handle(setup, monkeypatch):
+    backend, _agent, _store, _sky, _responses = setup
+    captured = []
+
+    class CapturingJob:
+        def __init__(self, **values) -> None:
+            self.__dict__.update(values)
+            self._api_session = sky_mod.active_session()
+            captured.append(self._api_session)
+
+    monkeypatch.setattr(sky_mod, "SkyPilotJob", CapturingJob)
+    ambient = SimpleNamespace(jobs=[])
+    token = sky_mod._active_session.set(ambient)
+    try:
+        native = backend._native(
+            SkyPilotCapacity(pool="external-pool"),
+            {
+                "allocation_id": "external-allocation",
+                "request_id": "external-request",
+                "native_job_id": None,
+                "name": "external-name",
+                "job_id": "external-job",
+                "time_minutes": 1,
+            },
+            Path("logs/external.log"),
+        )
+        assert sky_mod.active_session() is ambient
+    finally:
+        sky_mod._active_session.reset(token)
+
+    assert captured == [None]
+    assert native._api_session is None
 
 
 def test_cluster_submission_is_recorded_before_and_after_acceptance(setup):
@@ -132,6 +166,8 @@ def test_cluster_submission_is_recorded_before_and_after_acceptance(setup):
     assert record["request_id"] == "cluster-request"
     assert type(native.request_id) is str
     assert record["native_job_id"] is None
+    assert record["time_minutes"] == 64
+    assert "64m bash" in sky.Task.call_args.kwargs["run"]
     sky.jobs.launch.assert_not_called()
     assert sky.Task.call_args.kwargs["api_server_access"] is False
 
@@ -227,6 +263,27 @@ def test_post_acceptance_storage_failure_retains_the_native_cancel_handle(setup)
     assert native.request_id == "cluster-request"
     native.cancel()
     sky.cancel.assert_called_once_with(cluster_name="existing-cpu", job_ids=[17])
+
+
+def test_accepted_request_is_durable_before_native_handle_construction(setup, monkeypatch):
+    backend, agent, store, sky, _responses = setup
+
+    class BrokenAllocation:
+        def __init__(self, *_args: object, **_kwargs) -> None:
+            record = _allocation_record(store)
+            assert record["launch_state"] == "accepted"
+            assert record["request_id"] == "cluster-request"
+            msg = "handle construction failed"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(graph_mod, "_ClusterAllocation", BrokenAllocation)
+
+    with pytest.raises(SubmissionError, match="request identity is durable"):
+        backend.launch_worker(agent)
+    with pytest.raises(SubmissionError, match="durably accepted allocation"):
+        backend.launch_worker(agent)
+
+    sky.exec.assert_called_once()
 
 
 def test_cleanup_can_repair_previously_failed_acceptance_record(setup):

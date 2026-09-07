@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 _ENV_FILES_LOADED = "MISEN_ENV_FILES_LOADED"
 
 
+_DIRECT_CLAIM_ENV_PREFIX = "MISEN_SKYPILOT_DIRECT_"
+
+
 def execute(
     payload: Path,
     *,
@@ -68,8 +71,9 @@ def execute(
         return
 
     attempt_identity = None
-    if "MISEN_RUN_ID" in os.environ or "MISEN_ATTEMPT_ID" in os.environ:
-        from misen.executors.skypilot import _consume_attempt_identity, _execute_attempt
+    has_direct_claim = any(name.startswith(_DIRECT_CLAIM_ENV_PREFIX) for name in os.environ)
+    if "MISEN_RUN_ID" in os.environ or "MISEN_ATTEMPT_ID" in os.environ or has_direct_claim:
+        from misen.executors._skypilot.worker import _consume_attempt_identity, _execute_attempt
 
         attempt_identity = _consume_attempt_identity()
     if "MISEN_ACCELERATOR_COUNT" in os.environ:

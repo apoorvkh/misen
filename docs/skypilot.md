@@ -68,9 +68,12 @@ one source:
 | `infra` | One managed job provisions the declared resource shape | Run-owned managed allocation; SkyPilot controls its infrastructure lifecycle |
 
 An existing cluster profile requires `max_workers = 1`. For pool or `infra`
-profiles, `max_workers` limits simultaneous allocations from that profile.
-One reusable agent executes one task subprocess at a time. This is a fixed
-bounded fleet, not a demand-driven autoscaler or a multi-slot worker scheduler.
+profiles, `max_workers` is a ceiling on simultaneous allocations, not a launch
+target. Misen stages at most the exact dependency-permitted width of that
+profile's work in the submitted DAG, including ordering paths that cross other
+profiles. One reusable agent executes one task subprocess at a time. This is a
+fixed bounded fleet, not a demand-driven autoscaler or a multi-slot worker
+scheduler.
 
 For a small CPU workload, use an explicitly created pool:
 
@@ -98,11 +101,15 @@ bucket = "my-misen-workspace"
 prefix = "experiments"
 s3_region = "us-east-1"
 cache_dir = ".cache/misen"
+result_prefetch_workers = 16
 ```
 
 The workspace must support remotely fetchable snapshots/payloads and job-file
 coordination. Use a relative `cache_dir`, `snapshot = true`, and
 `prewarm_envs = false`; these are required, not optional optimizations.
+`result_prefetch_workers` bounds concurrent cloud reads for dependency hashes
+and result payloads. A producer writes its canonical result through to the
+worker-local cache so a same-host successor need not download it again.
 
 Profiles specify CPU, memory, and accelerator quantities **per node**. They
 must match the real borrowed capacity; setting `cpus` does not resize a VM.
@@ -209,10 +216,36 @@ with executor.session():
         job.raise_for_status()
 ```
 
+An explicit session is also the warm-agent lifetime. Related blocking graphs
+can reuse the same compatible native allocations:
+
+```python
+with executor.session():
+    first.run(executor=executor, workspace=workspace)
+    second.run(executor=executor, workspace=workspace)
+```
+
+Compatibility requires the same workspace object, snapshotted code and
+dependencies, `.env` / `.env.local` contents, environment-store setting, and
+capacity profile. The persisted manifest contains only an opaque session token,
+not the dotenv digest. Capacity for every reusable profile is launched when the
+graph starts, including a downstream GPU profile whose dependencies are still
+running. Its count is capped by both `max_workers` and the profile's exact DAG
+width. This reduces critical-path startup at the cost of potentially idle
+billable capacity.
+
+On a compatible warm agent, Misen stages the task payload directly and starts a
+fresh child with the already-materialized Python interpreter. It skips the
+per-task Bash/uv/environment bootstrap while preserving process isolation,
+attempt fencing, timeouts, and the original bootstrap as a fallback. A blocking
+submission without an explicit outer session remains one-shot and cancels its
+agent jobs before returning.
+
 Leaving the session stops admitting work, requests cancellation of unfinished
-owned attempts, and tries to stop its agents/native jobs within the configured
-shutdown grace. Unresolved outcomes/cleanup are reported, not silently treated
-as successful teardown. A session exit does not detach the remaining graph.
+owned attempts, and tries to stop every session-owned agent/native job within
+the configured shutdown grace. Unresolved outcomes/cleanup are reported, not
+silently treated as successful teardown. A session exit does not detach the
+remaining graph.
 
 The isolated local API has its own configuration, identity, runtime directory,
 and ports under `$XDG_STATE_HOME/misen/skypilot/<namespace>` (normally
@@ -336,12 +369,13 @@ Worker identity/package access must work on every node.
   workspace keys. This implementation polls mailboxes (default 0.2 seconds);
   it does not use bucket-wide listing, SSH-forwarded task RPC, or push events.
 - Durable execution/result markers release descendants without waiting for
-  SkyPilot allocation-health polling. Fresh subprocesses use cached project
-  environments; a persistent user-code interpreter is not shared between tasks.
+  SkyPilot allocation-health polling. A compatible session agent launches
+  fresh subprocesses directly from its materialized environment; a persistent
+  user-code interpreter is not shared between tasks.
 - Execution claims prevent deliberate replay of an uncertain attempt. A valid
   committed success can be reconciled; a lost/failed/incomplete attempt is not
   automatically retried. There is no coordinator takeover, dynamic replacement,
-  speculative execution, or cross-run agent sharing.
+  speculative execution, or sharing beyond one explicit executor session.
 - Logical deduplication is within a run. Separate runs retain existing
   cache-lock protection, but do not share live logical jobs; non-cacheable
   work can execute independently in each run. Arbitrary external side effects

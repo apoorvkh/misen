@@ -37,7 +37,7 @@ def _sky(monkeypatch: pytest.MonkeyPatch, health: Any, *, local: bool = False) -
         server=SimpleNamespace(common=SimpleNamespace(is_api_server_local=MagicMock(return_value=local))),
         api_info=MagicMock(return_value=health),
     )
-    monkeypatch.setattr(sky_module, "_load_skypilot", MagicMock(return_value=sky))
+    monkeypatch.setattr(sky_module, "_load_external_skypilot", MagicMock(return_value=sky))
     return sky
 
 
@@ -90,7 +90,7 @@ def test_remote_entry_missing_injection_cannot_initialize_backend(
     monkeypatch.delenv(missing)
     loader = MagicMock(side_effect=AssertionError("SDK must not load without injected credentials"))
     backend = MagicMock()
-    monkeypatch.setattr(sky_module, "_load_skypilot", loader)
+    monkeypatch.setattr(sky_module, "_load_external_skypilot", loader)
     monkeypatch.setattr(graph_module, "_SkyCapacityBackend", backend)
     workspace = _workspace()
     with pytest.raises(ExecutionError, match="missing its injected"):

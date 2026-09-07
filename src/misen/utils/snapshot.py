@@ -180,6 +180,7 @@ class ProjectSnapshot:
         "pixi_bin",
         "prewarmed",
         "project_dir",
+        "runtime_key",
         "snapshot_key",
         "submission_id",
         "transport",
@@ -253,11 +254,24 @@ class ProjectSnapshot:
             f"Could not stage environment files for snapshot {self.snapshot_key}",
             OSError,
         ):
-            self.env_file_refs: list[str] = [
-                workspace.put_job_file(self.submission_id, src.name, src.read_bytes())
-                for src in _env_file_paths()
-                if src.exists()
+            env_files = [(src.name, src.read_bytes()) for src in _env_file_paths() if src.exists()]
+            self.env_file_refs = [
+                workspace.put_job_file(self.submission_id, name, contents) for name, contents in env_files
             ]
+            # Session-owned executors may reuse an already materialized
+            # interpreter only for this exact code/dependency/dotenv state.
+            # Session executors compare this digest only in memory and persist
+            # an opaque per-session token; dotenv plaintext remains solely in
+            # submission-scoped job files.
+            self.runtime_key = _store_key(
+                (
+                    "misen-runtime-v1",
+                    self.snapshot_key,
+                    self.env_store_dir,
+                    sys.version_info[:2],
+                    tuple(env_files),
+                )
+            )
 
         self.prewarmed: _MaterializedEnvs | None = None
         store_root = _resolve_store_root(env_store_dir)

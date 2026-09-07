@@ -99,12 +99,13 @@ retain a separate per-work-unit execution mode.
 - Logical work units retain the existing cache boundaries. The coordinator
   releases a successor only after its own prerequisites commit success.
 - Reusable agents are started once per allocation and execute one fresh task
-  subprocess at a time. Existing-cluster reservations use `sky.exec()`;
+  subprocess at a time. Compatible agents persist across graphs within one
+  explicit executor session. Existing-cluster reservations use `sky.exec()`;
   pools and run-owned infrastructure use managed jobs. Dedicated profiles
   reserve a separate allocation for each admitted work unit.
 - Profiles declare per-node CPU/RAM, concrete accelerator hardware and memory,
   topology, source, and maximum worker count. There is no automatic replacement,
-  multi-slot scheduling, cross-run agent sharing, or dynamic autoscaling.
+  multi-slot scheduling, sharing across sessions, or dynamic autoscaling.
 - Versioned manifests distinguish runs, logical jobs, attempts, and allocations.
   Allocation records retain accepted request IDs and resolved native IDs.
   Exact-name recovery never broadens cancellation to unrelated jobs.

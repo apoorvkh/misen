@@ -12,8 +12,10 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import cloudpickle
 import pytest
 
+import misen.executors.skypilot as worker_module
 from misen.exceptions import StorageError
 from misen.executors.skypilot import (
     attempt_file_name,
@@ -30,12 +32,20 @@ _RUN = "test-run"
 _WORKER = "test-worker"
 
 
+def _put_in(workspace: DiskWorkspace, run_id: str, name: str, **record: Any) -> None:
+    workspace.put_job_file(run_id, name, json.dumps({"version": 1, "run_id": run_id, **record}).encode())
+
+
 def _put(workspace: DiskWorkspace, name: str, **record: Any) -> None:
-    workspace.put_job_file(_RUN, name, json.dumps({"version": 1, "run_id": _RUN, **record}).encode())
+    _put_in(workspace, _RUN, name, **record)
+
+
+def _get_in(workspace: DiskWorkspace, run_id: str, name: str) -> dict[str, Any]:
+    return json.loads(workspace.read_job_file(run_id, name))
 
 
 def _get(workspace: DiskWorkspace, name: str) -> dict[str, Any]:
-    return json.loads(workspace.read_job_file(_RUN, name))
+    return _get_in(workspace, _RUN, name)
 
 
 def _wait(check: Callable[[], Any], timeout: float = 3) -> Any:
@@ -53,16 +63,16 @@ def _wait(check: Callable[[], Any], timeout: float = 3) -> Any:
 
 @contextlib.contextmanager
 def _running_agent(
-    workspace: DiskWorkspace, **options: float
+    workspace: DiskWorkspace, *, control_id: str = _RUN, **options: float
 ) -> Iterator[tuple[str, threading.Thread, list[BaseException]]]:
     failures: list[BaseException] = []
-    _put(workspace, worker_file_name(_WORKER, "lease"), worker_id=_WORKER, sequence=0, stop=False)
+    _put_in(workspace, control_id, worker_file_name(_WORKER, "lease"), worker_id=_WORKER, sequence=0, stop=False)
 
     def run() -> None:
         try:
             run_worker_agent(
                 workspace,
-                _RUN,
+                control_id,
                 _WORKER,
                 **{
                     "lease_timeout_s": 2,
@@ -78,10 +88,17 @@ def _running_agent(
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
     try:
-        state = _wait(lambda: _get(workspace, worker_file_name(_WORKER, "state")))
+        state = _wait(lambda: _get_in(workspace, control_id, worker_file_name(_WORKER, "state")))
         yield state["generation"], thread, failures
     finally:
-        _put(workspace, worker_file_name(_WORKER, "lease"), worker_id=_WORKER, sequence=2**31, stop=True)
+        _put_in(
+            workspace,
+            control_id,
+            worker_file_name(_WORKER, "lease"),
+            worker_id=_WORKER,
+            sequence=2**31,
+            stop=True,
+        )
         thread.join(timeout=3)
         assert not thread.is_alive(), "Worker did not stop within its finite grace period"
 
@@ -91,23 +108,32 @@ def _command(
     generation: str,
     attempt: str,
     script: str,
+    *,
+    control_id: str = _RUN,
+    target_run_id: str | None = None,
     **overrides: Any,
 ) -> None:
-    _put(
+    record = {
+        "worker_id": _WORKER,
+        "generation": generation,
+        "attempt_id": attempt,
+        "job_id": f"job-{attempt}",
+        "argv": [sys.executable, "-c", script],
+        "env": {},
+        "log_path": f"logs/{attempt}.log",
+        "execution_timeout_s": 1,
+        "setup_timeout_s": 1,
+        "direct": False,
+        "payload_name": None,
+        **overrides,
+    }
+    if target_run_id is not None:
+        record["target_run_id"] = target_run_id
+    _put_in(
         workspace,
+        control_id,
         worker_file_name(_WORKER, "command"),
-        **{
-            "worker_id": _WORKER,
-            "generation": generation,
-            "attempt_id": attempt,
-            "job_id": f"job-{attempt}",
-            "argv": [sys.executable, "-c", script],
-            "env": {},
-            "log_path": f"logs/{attempt}.log",
-            "execution_timeout_s": 1,
-            "setup_timeout_s": 1,
-            **overrides,
-        },
+        **record,
     )
 
 
@@ -120,6 +146,19 @@ def _child_marker(workspace: DiskWorkspace, attempt: str, kind: str, state: str)
         "from pathlib import Path; "
         f"p = Path({str(marker)!r}); q = p.with_suffix('.tmp'); "
         f"q.write_text({content!r}); q.replace(p); "
+    )
+
+
+def _direct_payload(workspace: DiskWorkspace, name: str, marker: Path, *, run_id: str = _RUN) -> None:
+    marker_path = str(marker)
+
+    def record_process() -> None:
+        Path(marker_path).write_text(json.dumps({"pid": os.getpid(), "executable": sys.executable}))
+
+    workspace.put_job_file(
+        run_id,
+        name,
+        cloudpickle.dumps({"workspace": workspace, "fn": record_process}),
     )
 
 
@@ -149,6 +188,129 @@ def test_worker_reuses_agent_with_fresh_environment_and_durable_results(workspac
     assert _get(workspace, worker_file_name(_WORKER, "state"))["state"] == "stopped"
 
 
+def test_direct_commands_stage_payloads_and_keep_one_fresh_python_process_per_attempt(
+    workspace: DiskWorkspace,
+) -> None:
+    markers = [Path("direct-first.json"), Path("direct-second.json")]
+    for index, marker in enumerate(markers):
+        _direct_payload(workspace, f"direct-{index}.pkl", marker)
+
+    with _running_agent(workspace) as (generation, _, failures):
+        for index, marker in enumerate(markers):
+            attempt = f"direct-{index}"
+            fallback = Path(f"fallback-{index}")
+            _command(
+                workspace,
+                generation,
+                attempt,
+                f"from pathlib import Path; Path({str(fallback)!r}).touch()",
+                direct=True,
+                payload_name=f"direct-{index}.pkl",
+            )
+            outcome = _wait(lambda current=attempt: _get(workspace, attempt_file_name(current)))
+            assert outcome["state"] == "done"
+            assert marker.exists()
+            assert not fallback.exists(), "compatible direct work unexpectedly used the bootstrap fallback"
+            accepted = _get(workspace, attempt_file_name(attempt, "accepted"))
+            assert accepted["worker_id"] == _WORKER
+            assert accepted["generation"] == generation
+            assert accepted["job_id"] == f"job-{attempt}"
+            assert isinstance(accepted["claim_token"], str)
+            assert accepted["claim_token"]
+            with pytest.raises(FileNotFoundError):
+                workspace.read_job_file(_RUN, f"attempt-{attempt}.execution.json")
+        assert not failures
+
+    processes = [json.loads(marker.read_text()) for marker in markers]
+    assert {record["executable"] for record in processes} == {sys.executable}
+    assert len({record["pid"] for record in processes}) == len(markers)
+    assert all(record["pid"] != os.getpid() for record in processes)
+
+
+def test_one_session_agent_executes_direct_payloads_from_distinct_graph_runs(workspace: DiskWorkspace) -> None:
+    control_id = "test-session"
+    runs = ("graph-one", "graph-two")
+    markers = [Path(f"{run_id}.json") for run_id in runs]
+    for run_id, marker in zip(runs, markers, strict=True):
+        _direct_payload(workspace, "payload.pkl", marker, run_id=run_id)
+
+    with _running_agent(workspace, control_id=control_id) as (generation, _, failures):
+        for run_id, marker in zip(runs, markers, strict=True):
+            attempt = f"attempt-{run_id}"
+            _command(
+                workspace,
+                generation,
+                attempt,
+                "raise RuntimeError('direct staging unexpectedly fell back')",
+                control_id=control_id,
+                target_run_id=run_id,
+                direct=True,
+                payload_name="payload.pkl",
+            )
+            outcome = _wait(lambda run=run_id, current=attempt: _get_in(workspace, run, attempt_file_name(current)))
+            assert outcome["state"] == "done"
+            assert outcome["generation"] == generation
+            assert marker.exists()
+            with pytest.raises(FileNotFoundError):
+                workspace.read_job_file(control_id, attempt_file_name(attempt))
+        assert not failures
+
+    state = _get_in(workspace, control_id, worker_file_name(_WORKER, "state"))
+    assert state["state"] == "stopped"
+    assert state["generation"] == generation
+
+
+@pytest.mark.parametrize("staging_failure", ["missing", "storage"])
+def test_direct_payload_staging_failure_uses_original_bootstrap_command(
+    workspace: DiskWorkspace, monkeypatch: pytest.MonkeyPatch, staging_failure: str
+) -> None:
+    attempt = "direct-fallback"
+    fallback = Path("direct-fallback-ran")
+    payload_name = "missing-direct-payload.pkl"
+    script = f"from pathlib import Path; Path({str(fallback)!r}).touch(); " + _child_marker(
+        workspace, attempt, "result", "done"
+    )
+    if staging_failure == "storage":
+        original_read = type(workspace).read_job_file
+
+        def failing_read(self: DiskWorkspace, run_id: str, name: str) -> bytes:
+            if run_id == _RUN and name == payload_name:
+                msg = "object store unavailable"
+                raise StorageError(msg)
+            return original_read(self, run_id, name)
+
+        monkeypatch.setattr(type(workspace), "read_job_file", failing_read)
+
+    with _running_agent(workspace) as (generation, _, failures):
+        _command(
+            workspace,
+            generation,
+            attempt,
+            script,
+            direct=True,
+            payload_name=payload_name,
+        )
+        outcome = _wait(lambda: _get(workspace, attempt_file_name(attempt)))
+        assert outcome["state"] == "done"
+        assert fallback.exists()
+        assert not failures
+
+
+def test_non_direct_command_uses_original_bootstrap_command(workspace: DiskWorkspace) -> None:
+    attempt = "incompatible-environment"
+    fallback = Path("incompatible-environment-ran")
+    script = f"from pathlib import Path; Path({str(fallback)!r}).touch(); " + _child_marker(
+        workspace, attempt, "result", "done"
+    )
+
+    with _running_agent(workspace) as (generation, _, failures):
+        _command(workspace, generation, attempt, script, direct=False, payload_name=None)
+        outcome = _wait(lambda: _get(workspace, attempt_file_name(attempt)))
+        assert outcome["state"] == "done"
+        assert fallback.exists()
+        assert not failures
+
+
 def test_stale_generation_and_duplicate_attempt_never_execute(workspace: DiskWorkspace) -> None:
     with _running_agent(workspace) as (generation, _, failures):
         _command(workspace, "stale", "duplicate", "raise RuntimeError('must not execute')")
@@ -169,6 +331,63 @@ def test_accepted_attempt_is_not_replayed_after_restart(workspace: DiskWorkspace
         time.sleep(0.08)
         assert not Path("logs/accepted.log").exists()
         assert not failures
+
+
+def test_agent_preclaim_writes_one_accepted_record_without_a_workspace_lock(
+    workspace: DiskWorkspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation = "preclaim-generation"
+    attempt = "preclaim"
+    _command(workspace, generation, attempt, "raise RuntimeError('must not execute')")
+    command = worker_module._Command.parse(  # noqa: SLF001 -- exercise the authenticated preclaim fence
+        _get(workspace, worker_file_name(_WORKER, "command"))
+    )
+    agent = worker_module._Agent(  # noqa: SLF001 -- isolate preclaim from subprocess admission
+        workspace,
+        _RUN,
+        _WORKER,
+        2,
+        0.1,
+        0.01,
+        5,
+        generation=generation,
+    )
+    writes: list[tuple[str, str]] = []
+    reads: list[tuple[str, str]] = []
+    original_write = DiskWorkspace.put_job_file
+    original_read = DiskWorkspace.read_job_file
+
+    def recording_write(self: DiskWorkspace, run_id: str, name: str, data: bytes) -> str:
+        writes.append((run_id, name))
+        return original_write(self, run_id, name, data)
+
+    def recording_read(self: DiskWorkspace, run_id: str, name: str) -> bytes:
+        reads.append((run_id, name))
+        return original_read(self, run_id, name)
+
+    def forbidden_lock(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("The generation-bound agent preclaim must not acquire a shared workspace lock.")
+
+    monkeypatch.setattr(DiskWorkspace, "put_job_file", recording_write)
+    monkeypatch.setattr(DiskWorkspace, "read_job_file", recording_read)
+    monkeypatch.setattr(DiskWorkspace, "lock", forbidden_lock)
+
+    claim_token = agent._claim(command)  # noqa: SLF001 -- first admission owns the durable fence
+    assert isinstance(claim_token, str)
+    assert claim_token
+    assert agent._claim(command) is None  # noqa: SLF001 -- an in-process duplicate cannot rewrite it
+    accepted_name = attempt_file_name(attempt, "accepted")
+    assert reads == [(_RUN, accepted_name)]
+    assert writes == [(_RUN, accepted_name)]
+    assert _get(workspace, accepted_name) == {
+        "version": 1,
+        "run_id": _RUN,
+        "worker_id": _WORKER,
+        "generation": generation,
+        "attempt_id": attempt,
+        "job_id": f"job-{attempt}",
+        "claim_token": claim_token,
+    }
 
 
 @pytest.mark.parametrize(("started", "reason"), [(False, "setup"), (True, "execution")])
@@ -333,7 +552,17 @@ def test_process_group_cleanup_stops_forked_descendants(workspace: DiskWorkspace
         assert not failures
 
 
-@pytest.mark.parametrize("invalid", [{"argv": []}, {"env": {"BAD=NAME": "value"}}, {"setup_timeout_s": True}])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"argv": []},
+        {"env": {"BAD=NAME": "value"}},
+        {"setup_timeout_s": True},
+        {"direct": True, "payload_name": None},
+        {"direct": False, "payload_name": "unused.pkl"},
+        {"direct": True, "payload_name": "../escape.pkl"},
+    ],
+)
 def test_malformed_commands_fail_closed(workspace: DiskWorkspace, invalid: dict[str, Any]) -> None:
     with _running_agent(workspace) as (generation, thread, failures):
         _command(workspace, generation, "bad-command", "raise RuntimeError('must not run')", **invalid)
