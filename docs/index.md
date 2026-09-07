@@ -54,8 +54,10 @@ worker protocol uses known workspace mailbox keys, not SSH task RPC.
 
 The [SkyPilot usage guide](skypilot.md) describes the implemented API and
 lifecycle. The [architecture plan](design_skypilot_graph_execution.md) records
-the design and remaining validation/optimization work; the new graph path has
-not yet been validated on AWS.
+the design and remaining validation/optimization work. The
+[AWS session benchmark](benchmarks/skypilot-session-aws-2026-09-07.md)
+validates attached CPU-pool reuse and a dependent chain; broader cloud coverage
+remains pending.
 
 ## Locking Contract
 

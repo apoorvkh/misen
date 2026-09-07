@@ -1,6 +1,7 @@
 # Graph-aware SkyPilot execution
 
-Status: **implemented replacement, pending AWS integration validation**.
+Status: **implemented replacement; attached AWS CPU-pool smoke and chain
+validated**. Broader AWS integration validation remains pending.
 The earlier staged rollout and eager managed-job default are superseded. There
 is one graph execution architecture, with no `execution` switch. See the
 [SkyPilot guide](skypilot.md) for supported configuration and lifecycle examples.
@@ -134,7 +135,19 @@ local API server does not prove that every cloud resource has been removed.
 
 The previous September 5 AWS smoke pair on `emergent-geometry` v5 took 216.5
 seconds cold and 113.2 seconds warm for two functions lasting 0.45–0.61 seconds.
-Those are motivation, not measurements or claimed speedups for this replacement.
+Those historical results motivated this replacement; they do not use its
+session-scoped agent fleet.
+
+A September 7 AWS session benchmark exercised the replacement with one
+`c6i.large` pool worker. Blocking graph submission took 179.62 seconds cold,
+4.36 and 4.13 seconds for warm two-task smoke repeats, and 70.22 seconds for a
+20-node chain containing 20.00 seconds of task work. The corresponding one-slot
+local times were 3.60, 1.13, 1.14, and 27.16 seconds. All AWS tasks used one
+hostname, one materialized environment, and one durable native-allocation
+record across the explicit session. The blocking pool-apply call returned in
+67.57 seconds separately while the worker replica was still pending; remaining
+worker readiness is part of the cold graph time. See the
+[full benchmark report](benchmarks/skypilot-session-aws-2026-09-07.md).
 
 Hermetic tests cover DAG readiness/scale, cache integration, config/lifecycle,
 subprocess agents, masks, duplicate claims, generation changes, cancellation
@@ -142,10 +155,10 @@ isolation, native recovery, and bounded cleanup. A real local subprocess test
 completes a dependent graph without `Job.state()` calls. Another test completes
 20 logical tasks with one native worker allocation.
 
-AWS validation remains necessary: capped cold/warm CPU smoke, chain, fan-out/join,
-CPU→GPU→CPU, multi-node Dask, detached completion after submitter exit, failure
-injection, and exact teardown. Measure ready-to-start and result-to-successor
-latency, environment builds, native submissions, makespan, and allocated resources.
+Remaining AWS validation includes fan-out/join, CPU→GPU→CPU, multi-node Dask,
+detached completion after submitter exit, injected failures, and failure-path
+teardown. Continue measuring ready-to-start and result-to-successor latency,
+environment builds, native submissions, makespan, and allocated resources.
 
 Implemented optimizations include session-scoped cross-graph agents, profile
 lookahead, a verified direct-child path, producer write-through, bounded cloud

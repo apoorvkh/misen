@@ -5,10 +5,13 @@ them. A reusable worker agent executes many work units without another
 SkyPilot submission for each one. Cache boundaries, shared prerequisites,
 task logs, and result identities remain unchanged.
 
-This page describes the current implementation. It has local and fake-backend
-coverage, but this graph architecture has **not yet been rerun on AWS**. The
-previous cold/warm smoke timings measured the older per-work-unit managed-job
-adapter, not the implementation described here.
+This page describes the current implementation. It has local, fake-backend,
+and end-to-end AWS CPU-pool coverage. In the September 7 session benchmark,
+one pool-backed allocation and hostname served a cold smoke graph, two warm
+repeats, and a 20-node chain in one explicit session. GPU, multi-node,
+detached, and failure-path validation remain pending. The earlier September 5
+timings measured the superseded per-work-unit adapter. See the
+[AWS session benchmark](benchmarks/skypilot-session-aws-2026-09-07.md).
 
 ## Install and authenticate
 
@@ -224,6 +227,10 @@ with executor.session():
     first.run(executor=executor, workspace=workspace)
     second.run(executor=executor, workspace=workspace)
 ```
+
+The AWS session benchmark verified this behavior across four graphs with one
+durable native-allocation record, one worker hostname, and one materialized
+Python environment.
 
 Compatibility requires the same workspace object, snapshotted code and
 dependencies, `.env` / `.env.local` contents, environment-store setting, and

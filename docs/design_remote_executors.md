@@ -153,10 +153,13 @@ retain a separate per-work-unit execution mode.
   release descendants before SkyPilot observes terminal allocation state;
   cleanup still tracks owned processes and reports unresolved work.
 
-The implementation is locally tested, not AWS-validated as a graph executor.
-The earlier pool smoke benchmark covers its predecessor. See the
-[architecture plan](design_skypilot_graph_execution.md) for remaining timeout,
-recovery, resource-isolation, cleanup, transport, and performance gates.
+The implementation has attached AWS CPU-pool coverage for warm cross-graph
+reuse and a dependent chain. GPU, multi-node, detached, and injected-failure
+coverage remains pending. See the
+[session benchmark](benchmarks/skypilot-session-aws-2026-09-07.md) and
+[architecture plan](design_skypilot_graph_execution.md) for the remaining
+timeout, recovery, resource-isolation, cleanup, transport, and performance
+gates.
 
 ## Authentication and trust
 

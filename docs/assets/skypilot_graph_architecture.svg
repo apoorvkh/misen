@@ -19,7 +19,7 @@
   </defs>
   <rect width="1240" height="890" rx="20" fill="#f6f8fc"/>
   <text x="40" y="49" class="heading">SkyPilot allocates. Misen schedules.</text>
-  <text x="40" y="79" class="body">Many work units per allocation · per-task caching stays intact · AWS validation pending</text>
+  <text x="40" y="79" class="body">Many work units per allocation · per-task caching stays intact · AWS CPU smoke + chain validated</text>
   <rect x="1060" y="28" width="140" height="32" rx="16" fill="#e9e3ff"/>
   <text x="1130" y="49" text-anchor="middle" class="label" fill="#5b21b6">GRAPH RUN</text>
 

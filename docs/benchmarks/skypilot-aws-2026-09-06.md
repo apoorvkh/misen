@@ -1,5 +1,9 @@
 # SkyPilot graph execution on AWS — 2026-09-06
 
+> Historical benchmark: these runs created fresh native agents for each graph.
+> The current explicit-session fleet is measured in the
+> [September 7 follow-up](skypilot-session-aws-2026-09-07.md).
+
 Status: complete. All ten measurements and both namespaces' scoped cleanup
 are verified. In total, 470 logical work units completed using 17 native
 allocations, with no initial result-cache hits. Training infrastructure

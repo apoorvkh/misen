@@ -1,5 +1,9 @@
 # Local versus SkyPilot/AWS graph execution — 2026-09-06
 
+> Historical benchmark: the AWS side created fresh native agents for each
+> graph. The current explicit-session fleet is measured in the
+> [September 7 follow-up](skypilot-session-aws-2026-09-07.md).
+
 Status: complete. Eleven planned local measurements plus one supplemental
 control executed 574 logical work units; all finished successfully, all began
 with zero cached results, and all used the same Misen snapshot as the
