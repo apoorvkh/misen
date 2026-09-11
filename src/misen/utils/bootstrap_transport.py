@@ -176,6 +176,7 @@ def worker_bootstrap_script(
     payload: str,
     env_files: list[str],
     worker_args: list[str],
+    reuse_env: bool = False,
 ) -> str:
     """Return the complete Bash bootstrap submitted to a worker.
 
@@ -323,6 +324,24 @@ def worker_bootstrap_script(
             )
         )
 
+    if reuse_env:
+        # Snapshot identity includes dependency metadata and exact local artifacts.
+        # Runtime interpreter selection and host platform also partition launchers.
+        launch_key = hashlib.sha256(
+            repr(("launch-v1", project_dir, snapshot_key, python_version, pixi_bin, misen_requirement)).encode()
+        ).hexdigest()
+        blocks.append(
+            _shell_block(f"""
+            launch_host="$(printf '%s\\n' "${{UV_PYTHON:-}}" "$(uname -sm)" | sha256sum)"
+            prepared_command="$store_root/launchers/{launch_key}-${{launch_host%% *}}"
+            if [[ -f "$prepared_command" ]]; then
+                if [[ -n "${{MISEN_PREPARE_ONLY:-}}" ]]; then exit 0; fi
+                exec bash "$prepared_command" "$payload_path" {_array(worker_args)} \\
+                    --env-file "${{env_file_paths[@]}}"
+            fi
+        """)
+        )
+
     materialize = _shell_block(
         f"""
         materialize=(
@@ -343,6 +362,8 @@ def worker_bootstrap_script(
         materialize += '\nmaterialize+=(--snapshot-key "$snapshot_key")'
     if requires_pixi:
         materialize += '\nmaterialize+=(--pixi-bin "$MISEN_PIXI_BIN")'
+    if reuse_env:
+        materialize += '\nmaterialize+=(--prepared-command "$prepared_command")'
     materialize += f'\nmaterialize+=({_array(worker_args)})\nexec "${{materialize[@]}}"'
     blocks.append(materialize)
 

@@ -111,56 +111,58 @@ generic `config` mapping cannot be embedded in worker bootstrap commands.
 
 # SkyPilotExecutor
 
-`SkyPilotExecutor` is an optional remote adapter for SkyPilot managed jobs.
-Install Misen's provider-neutral extra into the environment that runs
-Misen (rather than only as an isolated `uv tool`), compose it with the
-upstream extras for the compute backends used by a local SkyPilot API server,
-then verify provider access. A configured remote SkyPilot API server owns its
-provider dependencies, so its Misen clients need only the base extra. The
-integration declares `skypilot>=0.12.1` without an upper bound; compatibility
-CI tests both that minimum and the newest stable release on Python 3.14. Misen
-supports Python 3.11–3.14; individual SkyPilot releases and provider extras may
-impose additional constraints.
+`SkyPilotExecutor` schedules ready WorkUnits on reusable cloud or cluster
+allocations. `workers` is a required non-empty list of `SkyPilotWorker`
+entries (`[[executor.workers]]` in TOML), with per-type and per-session
+`max_workers` limits. The CLI accepts the same list as JSON through
+`--executor.workers '[{"infra":"aws","cpus":4,"memory":16}]'`.
+CPU, RAM, node count, accelerator type/count, and
+per-device GPU memory determine eligibility. Single-node work shares declared
+capacity; multi-node work reserves a complete group. Idle groups retire after
+`idle_timeout_minutes`, or when another required type needs their slot.
+`reuse_workers=true` shares workers and environments across graphs in the same
+executor and workspace. `lookahead_seconds=90` enables bounded advance
+provisioning; zero disables it. Close the executor before changing workspaces.
+Preparation uses the worker's full declared CPU allocation. Prepared launch
+commands reuse environments while keeping each WorkUnit in a fresh process.
 
 ```bash
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
-# For example, instead target existing Kubernetes, SSH, and Slurm clusters:
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
-sky check
-# From a Misen source checkout:
-uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[kubernetes,ssh,slurm]>=0.12.1" sky check
+uv pip install "misen[skypilot]" "skypilot-nightly[aws]>=1.0.0.dev20260905"
 ```
 
-`infra` accepts any compute infrastructure registered by the installed
-SkyPilot version, including Azure, OCI, Lambda Cloud, RunPod, Kubernetes,
-existing SSH machines, and Slurm. Install the corresponding named SkyPilot
-extra rather than `skypilot[all]`; backend capabilities such as multi-node
-support still vary. See [Installation and backend selection](design_remote_executors.md#installation-and-backend-selection)
-for the provider matrix. Compute selection is independent of workspace
-storage: every worker may use any supported `CloudWorkspace` object store it
-can reach and authenticate to.
+Install provider extras and configure credentials on the submitting host.
+VM provisioning also requires `rsync` and SSH on the host's `PATH`.
+Workers require SSH-accessible Linux nodes with Python 3 and `taskset`. The
+runtime checks the declared clouds' credentials before provisioning workers.
+Misen owns an isolated foreground local API server and a supervised graph
+controller per executor session. No remote API server or managed controller VM is
+needed. Existing SkyPilot endpoints, daemons, and runtime state remain separate.
+`startup_timeout` bounds API startup and resource preflight (default 300 seconds).
 
-The implementation eagerly submits one managed job per pending work unit and
-uses durable workspace markers to gate dependencies, so arbitrary DAGs are
-supported and independent branches run in parallel. Descendants may provision
-while waiting; failures before a worker can publish its marker propagate only
-when the submitting Misen process observes SkyPilot status, or at the
-dependent job's cumulative timeout. Multi-node requests use SkyPilot
-`num_nodes`. A work unit that binds `DASK_CLIENT` gets one private Dask
-scheduler on rank 0, one worker per node, and one rank-0 task coordinator;
-without the sentinel, the Misen payload runs only on rank 0 and user code may
-orchestrate the remaining nodes itself. The managed cluster has fixed
-membership, uses the allocation's private TCP network, and waits up to
-`dask_startup_timeout` for startup. `dask_scheduler_port` (default 8786) must
-be in the range 1024–65535, free on rank 0, and reachable from every node; this
-internal Dask connection is neither authenticated nor encrypted and therefore
-requires a trusted network isolated from untrusted workloads. The project
-environment must include `distributed`. The adapter requires worker-side snapshots
-(`prewarm_envs = false`) and a remotely fetchable workspace such as
-`CloudWorkspace` with a relative `cache_dir`. See the
-[remote executor design](design_remote_executors.md) for the control/data-plane
-contract and planned adapters.
+The submitting process must remain alive. Use the executor as a context
+manager or call `close()` to clean up unfinished work; normal process exit
+also requests cleanup. SkyPilot autodown backs up abrupt shutdown after active
+agents stop their subprocesses on connection loss or lease expiry. Job handles support individual
+cancellation and local status queries; checkpoints and results remain durable in the workspace. Matching graphs reattach within
+the same live executor; uncertain execution or cleanup after controller loss
+blocks replay. Detached scheduling and automatic WorkUnit retries are not
+supported.
+
+Worker entries own `infra`, `instance_type`, `use_spot`, `image_id`, `disk_size`,
+and `max_hourly_cost`. GPU memory comes from pinned catalog offerings;
+`accelerator_memory` supplies fallback capacities in GiB/device without
+inflating known values. Assigned device memory is checked before task startup.
+See the [design contract](design_remote_executors.md#reusable-workers)
+and README for complete configuration and scheduling details.
+
+The adapter requires `snapshot = true`, `prewarm_envs = false`, a remotely
+fetchable workspace such as `CloudWorkspace`, and a relative `cache_dir`.
+Every worker needs independent object-store access. `DASK_CLIENT` creates a
+private fixed-membership Dask cluster with one worker per node, a rank-zero
+scheduler, and one task coordinator. The project must include `distributed`.
+`dask_startup_timeout` bounds readiness; `dask_scheduler_port` (default 8786,
+range 1024–65535) must be free and reachable on the allocation's trusted private
+network. Without `DASK_CLIENT`, only rank zero executes the Misen payload.
 
 ::: misen.executors.skypilot.SkyPilotExecutor
     options:

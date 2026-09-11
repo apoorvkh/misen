@@ -65,6 +65,12 @@ def execute(
         os.execve(sys.executable, [sys.executable, "-m", "misen.utils.execute", *sys.argv[1:]], env)  # noqa: S606
         return
 
+    if preflight := os.environ.pop("MISEN_WORKER_PREFLIGHT", ""):
+        import importlib
+
+        module, function = preflight.split(":", 1)
+        getattr(importlib.import_module(module), function)()
+
     if run_role_from_env():
         return
 

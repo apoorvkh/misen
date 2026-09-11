@@ -1,0 +1,563 @@
+[
+  {
+    "label": "aws-chain-5",
+    "mode": "aws",
+    "workload": "chain",
+    "seed": 911101,
+    "units": 20,
+    "edges": 19,
+    "gpu_units": 0,
+    "initial_cache_hits": 0,
+    "submit_seconds": 556.9409076543525,
+    "result_fetch_seconds": 4.845405370928347,
+    "close_seconds": 6.407389245927334,
+    "total_seconds": 568.1937920381315,
+    "prewarm_envs": false,
+    "snapshot_seconds": 0.43629026412963867,
+    "local_environment_seconds": 0,
+    "api_start_seconds": 4.251542101148516,
+    "api_to_controller_ready": 6.306891191750765,
+    "workers": [
+      {
+        "cluster": "egb0911-75ydhxhn5a-w1",
+        "offering": 0,
+        "request_wall": 1789142080.3296611,
+        "ready_wall": 1789142137.6973426,
+        "provision_seconds": 57.3676815032959,
+        "ready_to_drain": 478.91633439064026
+      }
+    ],
+    "stats": {
+      "dispatch_to_bootstrap": {
+        "n": 20,
+        "min": 10.126381397247314,
+        "median": 13.17931067943573,
+        "max": 13.520925521850586,
+        "sum": 259.99876642227173
+      },
+      "completion_observation": {
+        "n": 20,
+        "min": 3.0479273796081543,
+        "median": 5.622040152549744,
+        "max": 10.291209697723389,
+        "sum": 122.82921957969666
+      },
+      "environment": {
+        "n": 20,
+        "min": 0.0032022139999980936,
+        "median": 0.003364977999993357,
+        "max": 39.957096858,
+        "sum": 40.022697092000016
+      },
+      "payload_load": {
+        "n": 20,
+        "min": 0.02209662900000353,
+        "median": 0.022935662999984174,
+        "max": 0.042256632999993826,
+        "sum": 0.4778664539999937
+      },
+      "work_unit": {
+        "n": 20,
+        "min": 1.6905700229999923,
+        "median": 1.8735989380000007,
+        "max": 2.689878891000035,
+        "sum": 38.16075106300012
+      },
+      "function_seconds": {
+        "n": 20,
+        "min": 1.0002139990000103,
+        "median": 1.0002365550000007,
+        "max": 1.000326396999995,
+        "sum": 20.00495423799991
+      }
+    },
+    "cold_bootstrap": {
+      "n": 1,
+      "min": 43.56394958496094,
+      "median": 43.56394958496094,
+      "max": 43.56394958496094,
+      "sum": 43.56394958496094
+    },
+    "warm_bootstrap": {
+      "n": 19,
+      "min": 0.42954182624816895,
+      "median": 0.45233583450317383,
+      "max": 0.5328540802001953,
+      "sum": 8.735349178314209
+    },
+    "function_span": 410.76097989082336,
+    "function_busy_wall": 20.00496196746826,
+    "peak_function_concurrency": 1
+  },
+  {
+    "label": "aws-fanout-1",
+    "mode": "aws",
+    "workload": "fanout",
+    "seed": 911201,
+    "units": 102,
+    "edges": 200,
+    "gpu_units": 0,
+    "initial_cache_hits": 0,
+    "submit_seconds": 1051.347576821223,
+    "result_fetch_seconds": 24.494287570938468,
+    "close_seconds": 7.198983803391457e-05,
+    "total_seconds": 1075.8420940781944,
+    "prewarm_envs": false,
+    "snapshot_seconds": 0.4093301296234131,
+    "local_environment_seconds": 0,
+    "api_start_seconds": 4.250485810916871,
+    "api_to_controller_ready": 6.543076431378722,
+    "workers": [
+      {
+        "cluster": "egb0911-acfioqh52a-w1",
+        "offering": 0,
+        "request_wall": 1789142683.8519003,
+        "ready_wall": 1789142737.1000352,
+        "provision_seconds": 53.24813485145569,
+        "ready_to_drain": 970.5061683654785
+      },
+      {
+        "cluster": "egb0911-acfioqh52a-w2",
+        "offering": 0,
+        "request_wall": 1789142804.9995003,
+        "ready_wall": 1789142859.3757198,
+        "provision_seconds": 54.376219511032104,
+        "ready_to_drain": 848.9591507911682
+      }
+    ],
+    "stats": {
+      "dispatch_to_bootstrap": {
+        "n": 102,
+        "min": 9.891379117965698,
+        "median": 12.872885704040527,
+        "max": 14.907873630523682,
+        "sum": 1301.8669402599335
+      },
+      "completion_observation": {
+        "n": 102,
+        "min": 1.0121545791625977,
+        "median": 10.972505569458008,
+        "max": 30.067407369613647,
+        "sum": 1303.3077116012573
+      },
+      "environment": {
+        "n": 102,
+        "min": 0.0031457770000145047,
+        "median": 0.0032840814999985923,
+        "max": 39.275179218000005,
+        "sum": 117.23124616300015
+      },
+      "payload_load": {
+        "n": 102,
+        "min": 0.02113592900002459,
+        "median": 0.022224857000026077,
+        "max": 0.040123593999993545,
+        "sum": 2.3528419619999283
+      },
+      "work_unit": {
+        "n": 102,
+        "min": 1.6803082999999788,
+        "median": 1.7607102069999883,
+        "max": 17.331990146000066,
+        "sum": 196.42438533400036
+      },
+      "function_seconds": {
+        "n": 102,
+        "min": 1.0002170569999862,
+        "median": 1.000235380499987,
+        "max": 1.0040227430000073,
+        "sum": 102.02870125299964
+      }
+    },
+    "cold_bootstrap": {
+      "n": 2,
+      "min": 42.21759271621704,
+      "median": 42.40261125564575,
+      "max": 42.58762979507446,
+      "sum": 84.8052225112915
+    },
+    "warm_bootstrap": {
+      "n": 100,
+      "min": 0.4178731441497803,
+      "median": 0.44999921321868896,
+      "max": 39.99043416976929,
+      "sum": 85.53693127632141
+    },
+    "function_span": 908.2009983062744,
+    "function_busy_wall": 93.33963108062744,
+    "peak_function_concurrency": 2
+  },
+  {
+    "label": "aws-training-2",
+    "mode": "aws",
+    "workload": "training",
+    "seed": 911302,
+    "units": 68,
+    "edges": 108,
+    "gpu_units": 5,
+    "initial_cache_hits": 0,
+    "submit_seconds": 690.4712429246865,
+    "result_fetch_seconds": 2.200591469183564,
+    "close_seconds": 9.805747417267412,
+    "total_seconds": 702.4777193199843,
+    "prewarm_envs": false,
+    "snapshot_seconds": 0.41567325592041016,
+    "local_environment_seconds": 0,
+    "api_start_seconds": 4.351817145012319,
+    "api_to_controller_ready": 6.960900261066854,
+    "workers": [
+      {
+        "cluster": "egb0911-gl3sjiul4a-w1",
+        "offering": 0,
+        "request_wall": 1789143906.0666776,
+        "ready_wall": 1789143958.218429,
+        "provision_seconds": 52.15175151824951,
+        "ready_to_drain": 612.9912531375885
+      },
+      {
+        "cluster": "egb0911-gl3sjiul4a-w2",
+        "offering": 0,
+        "request_wall": 1789143907.0918403,
+        "ready_wall": 1789143962.9651825,
+        "provision_seconds": 55.87334227561951,
+        "ready_to_drain": 106.37521576881409
+      },
+      {
+        "cluster": "egb0911-gl3sjiul4a-w3",
+        "offering": 1,
+        "request_wall": 1789144044.7622445,
+        "ready_wall": 1789144112.9891007,
+        "provision_seconds": 68.22685623168945,
+        "ready_to_drain": 458.55136942863464
+      },
+      {
+        "cluster": "egb0911-gl3sjiul4a-w4",
+        "offering": 0,
+        "request_wall": 1789144180.2142823,
+        "ready_wall": 1789144236.6024187,
+        "provision_seconds": 56.38813638687134,
+        "ready_to_drain": 335.2591791152954
+      }
+    ],
+    "stats": {
+      "dispatch_to_bootstrap": {
+        "n": 68,
+        "min": 10.79642128944397,
+        "median": 12.866960048675537,
+        "max": 20.420289754867554,
+        "sum": 939.2537310123444
+      },
+      "completion_observation": {
+        "n": 68,
+        "min": 1.7730987071990967,
+        "median": 9.871928572654724,
+        "max": 28.37015438079834,
+        "sum": 827.1499485969543
+      },
+      "environment": {
+        "n": 68,
+        "min": 0.0031365849999929196,
+        "median": 0.004409485000010704,
+        "max": 38.70550575400001,
+        "sum": 144.1283779589997
+      },
+      "payload_load": {
+        "n": 68,
+        "min": 0.33043850900000393,
+        "median": 1.3761854309999961,
+        "max": 1.9686500949999868,
+        "sum": 102.13521812799982
+      },
+      "work_unit": {
+        "n": 68,
+        "min": 0.7803249600000015,
+        "median": 1.087240069499984,
+        "max": 3.4276307770000045,
+        "sum": 87.69299699799993
+      },
+      "function_seconds": {
+        "n": 68,
+        "min": 5.43339999978798e-05,
+        "median": 0.007093024999988984,
+        "max": 1.9245081730000066,
+        "sum": 9.692437726999785
+      }
+    },
+    "cold_bootstrap": {
+      "n": 4,
+      "min": 36.38287377357483,
+      "median": 39.28607714176178,
+      "max": 41.770848751068115,
+      "sum": 156.7258768081665
+    },
+    "warm_bootstrap": {
+      "n": 64,
+      "min": 0.41373729705810547,
+      "median": 0.5221743583679199,
+      "max": 0.7784984111785889,
+      "sum": 33.22748589515686
+    },
+    "function_span": 538.0782053470612,
+    "function_busy_wall": 9.692447185516357,
+    "peak_function_concurrency": 1
+  },
+  {
+    "label": "aws-training-3",
+    "mode": "aws",
+    "workload": "training",
+    "seed": 911302,
+    "units": 68,
+    "edges": 108,
+    "gpu_units": 5,
+    "initial_cache_hits": 0,
+    "submit_seconds": 669.3548658150248,
+    "result_fetch_seconds": 2.2724187280982733,
+    "close_seconds": 9.605729956645519,
+    "total_seconds": 681.2331206658855,
+    "prewarm_envs": false,
+    "snapshot_seconds": 0.372647762298584,
+    "local_environment_seconds": 0,
+    "api_start_seconds": 4.252778559923172,
+    "api_to_controller_ready": 7.36912554083392,
+    "workers": [
+      {
+        "cluster": "egb0911-mjnd3ie6me-w1",
+        "offering": 0,
+        "request_wall": 1789144893.6336043,
+        "ready_wall": 1789144977.6971123,
+        "provision_seconds": 84.06350803375244,
+        "ready_to_drain": 560.2092583179474
+      },
+      {
+        "cluster": "egb0911-mjnd3ie6me-w2",
+        "offering": 0,
+        "request_wall": 1789144894.6403265,
+        "ready_wall": 1789144972.9822104,
+        "provision_seconds": 78.34188389778137,
+        "ready_to_drain": 565.4377048015594
+      },
+      {
+        "cluster": "egb0911-mjnd3ie6me-w3",
+        "offering": 1,
+        "request_wall": 1789145069.8404212,
+        "ready_wall": 1789145130.646095,
+        "provision_seconds": 60.80567383766174,
+        "ready_to_drain": 408.11652159690857
+      }
+    ],
+    "stats": {
+      "dispatch_to_bootstrap": {
+        "n": 68,
+        "min": 8.060710906982422,
+        "median": 13.202277541160583,
+        "max": 19.489383459091187,
+        "sum": 908.8721718788147
+      },
+      "completion_observation": {
+        "n": 68,
+        "min": 2.372554063796997,
+        "median": 14.227036237716675,
+        "max": 24.099667072296143,
+        "sum": 916.8323101997375
+      },
+      "environment": {
+        "n": 68,
+        "min": 0.0031458160000283897,
+        "median": 0.0034441095000090627,
+        "max": 35.58174462299999,
+        "sum": 101.54520521600035
+      },
+      "payload_load": {
+        "n": 68,
+        "min": 0.3341704370000116,
+        "median": 1.5813754320000015,
+        "max": 1.9386668339999886,
+        "sum": 103.95428061899992
+      },
+      "work_unit": {
+        "n": 68,
+        "min": 0.7478266450000035,
+        "median": 1.0260936579999935,
+        "max": 3.593803182000002,
+        "sum": 83.37793058900014
+      },
+      "function_seconds": {
+        "n": 68,
+        "min": 6.598400000257243e-05,
+        "median": 0.005769477499995901,
+        "max": 2.2570628029999966,
+        "sum": 9.872557263999937
+      }
+    },
+    "cold_bootstrap": {
+      "n": 3,
+      "min": 35.382184743881226,
+      "median": 37.35544943809509,
+      "max": 38.975924491882324,
+      "sum": 111.71355867385864
+    },
+    "warm_bootstrap": {
+      "n": 65,
+      "min": 0.42147254943847656,
+      "median": 0.5082051753997803,
+      "max": 0.6934728622436523,
+      "sum": 33.67858147621155
+    },
+    "function_span": 495.13728165626526,
+    "function_busy_wall": 9.68090033531189,
+    "peak_function_concurrency": 2
+  },
+  {
+    "label": "local-chain-1",
+    "mode": "local",
+    "workload": "chain",
+    "seed": 911101,
+    "units": 20,
+    "edges": 19,
+    "gpu_units": 0,
+    "initial_cache_hits": 0,
+    "submit_seconds": 29.756228153128177,
+    "result_fetch_seconds": 0.7567919986322522,
+    "close_seconds": 1.0717194527387619e-05,
+    "total_seconds": 30.513199652079493,
+    "prewarm_envs": null,
+    "snapshot_seconds": 2.686920642852783,
+    "local_environment_seconds": 0,
+    "api_start_seconds": null,
+    "api_to_controller_ready": null,
+    "workers": [],
+    "stats": {
+      "dispatch_to_bootstrap": null,
+      "completion_observation": null,
+      "environment": null,
+      "payload_load": {
+        "n": 20,
+        "min": 0.009642234072089195,
+        "median": 0.00981550244614482,
+        "max": 0.010102217085659504,
+        "sum": 0.1965014347806573
+      },
+      "work_unit": {
+        "n": 20,
+        "min": 1.072573799174279,
+        "median": 1.0788212148472667,
+        "max": 1.1206503603607416,
+        "sum": 21.62907820707187
+      },
+      "function_seconds": {
+        "n": 20,
+        "min": 1.0001673880033195,
+        "median": 1.0003993001300842,
+        "max": 1.0004185452125967,
+        "sum": 20.007120757363737
+      }
+    },
+    "cold_bootstrap": null,
+    "warm_bootstrap": null,
+    "function_span": 26.668148040771484,
+    "function_busy_wall": 20.00711226463318,
+    "peak_function_concurrency": 1
+  },
+  {
+    "label": "local-fanout-1",
+    "mode": "local",
+    "workload": "fanout",
+    "seed": 911201,
+    "units": 102,
+    "edges": 200,
+    "gpu_units": 0,
+    "initial_cache_hits": 0,
+    "submit_seconds": 36.2814041050151,
+    "result_fetch_seconds": 0.1430097809061408,
+    "close_seconds": 3.4090131521224976e-05,
+    "total_seconds": 36.42456112196669,
+    "prewarm_envs": null,
+    "snapshot_seconds": 0.20331740379333496,
+    "local_environment_seconds": 0,
+    "api_start_seconds": null,
+    "api_to_controller_ready": null,
+    "workers": [],
+    "stats": {
+      "dispatch_to_bootstrap": null,
+      "completion_observation": null,
+      "environment": null,
+      "payload_load": {
+        "n": 102,
+        "min": 0.009783183224499226,
+        "median": 0.009995139203965664,
+        "max": 0.01095803128555417,
+        "sum": 1.021053632721305
+      },
+      "work_unit": {
+        "n": 102,
+        "min": 1.0742572410963476,
+        "median": 1.0796152038965374,
+        "max": 1.111893321853131,
+        "sum": 110.18071000603959
+      },
+      "function_seconds": {
+        "n": 102,
+        "min": 1.0001489268615842,
+        "median": 1.0003926390781999,
+        "max": 1.0005110213533044,
+        "sum": 102.03777879523113
+      }
+    },
+    "cold_bootstrap": null,
+    "warm_bootstrap": null,
+    "function_span": 35.684520959854126,
+    "function_busy_wall": 27.142727613449097,
+    "peak_function_concurrency": 4
+  },
+  {
+    "label": "local-training-2",
+    "mode": "local",
+    "workload": "training",
+    "seed": 911302,
+    "units": 68,
+    "edges": 108,
+    "gpu_units": 5,
+    "initial_cache_hits": 0,
+    "submit_seconds": 32.28402065904811,
+    "result_fetch_seconds": 0.12608757195994258,
+    "close_seconds": 2.728588879108429e-05,
+    "total_seconds": 32.410221927799284,
+    "prewarm_envs": true,
+    "snapshot_seconds": 0.20256853103637695,
+    "local_environment_seconds": 0.0010418891906738281,
+    "api_start_seconds": null,
+    "api_to_controller_ready": null,
+    "workers": [],
+    "stats": {
+      "dispatch_to_bootstrap": null,
+      "completion_observation": null,
+      "environment": null,
+      "payload_load": {
+        "n": 68,
+        "min": 0.24080063495784998,
+        "median": 1.176310939481482,
+        "max": 1.2907005529850721,
+        "sum": 78.4253821503371
+      },
+      "work_unit": {
+        "n": 68,
+        "min": 0.04516293713822961,
+        "median": 0.30489546712487936,
+        "max": 1.4151950352825224,
+        "sum": 22.113150973804295
+      },
+      "function_seconds": {
+        "n": 68,
+        "min": 2.9108021408319473e-05,
+        "median": 0.00509518850594759,
+        "max": 1.3636523629538715,
+        "sum": 6.3034956776537
+      }
+    },
+    "cold_bootstrap": null,
+    "warm_bootstrap": null,
+    "function_span": 30.911964178085327,
+    "function_busy_wall": 6.081281423568726,
+    "peak_function_concurrency": 4
+  }
+]

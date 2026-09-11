@@ -1,0 +1,1119 @@
+{
+  "workflow_revision": "440d009fb9082a71371c79b675861d9919c73eed",
+  "comparisons": [
+    {
+      "workflow": "chain",
+      "local_seconds": 29.36384397186339,
+      "previous_aws_seconds": 568.1937920381315,
+      "aws_seconds": 200.9323124610819,
+      "speedup": 2.827787054648981,
+      "cloud": {
+        "label": "aws-chain-2",
+        "mode": "aws",
+        "workload": "chain",
+        "seed": 911101,
+        "units": 20,
+        "initial_cache_hits": 0,
+        "submit_seconds": 184.90319707477465,
+        "result_fetch_seconds": 5.116850571706891,
+        "close_seconds": 10.912039813119918,
+        "total_seconds": 200.9323666319251,
+        "cold_total_seconds": 200.9323124610819,
+        "unique_sessions": null,
+        "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+        "stats": {
+          "dispatch_to_bootstrap": {
+            "n": 20,
+            "min": 0.06946301460266113,
+            "median": 0.07656693458557129,
+            "max": 0.20616531372070312,
+            "sum": 1.7092008590698242
+          },
+          "completion_observation": {
+            "n": 20,
+            "min": 0.2108614444732666,
+            "median": 0.28228485584259033,
+            "max": 0.40421032905578613,
+            "sum": 5.842279434204102
+          },
+          "bootstrap": {
+            "n": 20,
+            "min": 0.3282756805419922,
+            "median": 0.42057836055755615,
+            "max": 0.5091593265533447,
+            "sum": 8.459059953689575
+          },
+          "environment": {
+            "n": 20,
+            "min": 0.003091791000002786,
+            "median": 0.003179657999993424,
+            "max": 0.0032431820000056177,
+            "sum": 0.063655020000013
+          },
+          "payload_load": {
+            "n": 20,
+            "min": 0.020863552999998092,
+            "median": 0.021258540000005155,
+            "max": 0.035856644999995524,
+            "sum": 0.4410143600000396
+          },
+          "work_unit": {
+            "n": 20,
+            "min": 1.6639554399999952,
+            "median": 1.8327414759999954,
+            "max": 2.090303266999996,
+            "sum": 37.06081796799998
+          },
+          "function_seconds": {
+            "n": 20,
+            "min": 1.000189767000009,
+            "median": 1.000199049999999,
+            "max": 1.002518250999998,
+            "sum": 20.006346654000026
+          }
+        },
+        "peak_function_concurrency": 1,
+        "function_span": 53.732078313827515,
+        "function_busy_wall": 20.006356239318848,
+        "job_logs_found": 20,
+        "workers": [
+          {
+            "cluster": "egp0911-5gsfgsurre-w1",
+            "offering": 0,
+            "provision_seconds": 51.2867636680603,
+            "prepare_seconds": 57.428680419921875,
+            "provision_wall": 1789148397.0643606,
+            "prepared_wall": 1789148506.0281236
+          }
+        ],
+        "api_start_seconds": 4.262894202023745,
+        "api_preflight_seconds": 5.789992779958993,
+        "snapshot_seconds": 0.41263723373413086,
+        "local_environment_seconds": 0
+      }
+    },
+    {
+      "workflow": "fanout",
+      "local_seconds": 36.42064340505749,
+      "previous_aws_seconds": 1075.8420940781944,
+      "aws_seconds": 270.52705212309957,
+      "speedup": 3.9768373833040824,
+      "cloud": {
+        "label": "aws-fanout-2",
+        "mode": "aws",
+        "workload": "fanout",
+        "seed": 911201,
+        "units": 102,
+        "initial_cache_hits": 0,
+        "submit_seconds": 234.04875094396994,
+        "result_fetch_seconds": 24.76456266734749,
+        "close_seconds": 11.713192372117192,
+        "total_seconds": 402.1661401200108,
+        "cold_total_seconds": 270.52705212309957,
+        "unique_sessions": null,
+        "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+        "stats": {
+          "dispatch_to_bootstrap": {
+            "n": 102,
+            "min": 0.057119131088256836,
+            "median": 0.08045172691345215,
+            "max": 0.27434539794921875,
+            "sum": 8.63908863067627
+          },
+          "completion_observation": {
+            "n": 102,
+            "min": 0.1635878086090088,
+            "median": 0.2934997081756592,
+            "max": 0.4449164867401123,
+            "sum": 30.21323800086975
+          },
+          "bootstrap": {
+            "n": 102,
+            "min": 0.3551599979400635,
+            "median": 0.451440691947937,
+            "max": 0.679112434387207,
+            "sum": 47.08902716636658
+          },
+          "environment": {
+            "n": 102,
+            "min": 0.003233224000013024,
+            "median": 0.0034380420000061918,
+            "max": 0.004939633000006438,
+            "sum": 0.35407905100009884
+          },
+          "payload_load": {
+            "n": 102,
+            "min": 0.021889887000014596,
+            "median": 0.0229271774999944,
+            "max": 0.03977308500000731,
+            "sum": 2.403900016999998
+          },
+          "work_unit": {
+            "n": 102,
+            "min": 1.6749042790000033,
+            "median": 1.7535557170000118,
+            "max": 17.507186539999992,
+            "sum": 195.41333678200002
+          },
+          "function_seconds": {
+            "n": 102,
+            "min": 1.0001706689999992,
+            "median": 1.0002129584999935,
+            "max": 1.0002975059999812,
+            "sum": 102.02238540299982
+          }
+        },
+        "peak_function_concurrency": 4,
+        "function_span": 89.31695055961609,
+        "function_busy_wall": 53.33065342903137,
+        "job_logs_found": 102,
+        "workers": [
+          {
+            "cluster": "egp0911-5yvo7della-w1",
+            "offering": 0,
+            "provision_seconds": 53.84509634971619,
+            "prepare_seconds": 64.72932577133179,
+            "provision_wall": 1789148609.7383468,
+            "prepared_wall": 1789148728.3143861
+          },
+          {
+            "cluster": "egp0911-5yvo7della-w2",
+            "offering": 0,
+            "provision_seconds": 58.96468997001648,
+            "prepare_seconds": 60.96955919265747,
+            "provision_wall": 1789148609.8489242,
+            "prepared_wall": 1789148729.7835064
+          }
+        ],
+        "api_start_seconds": 4.268487934954464,
+        "api_preflight_seconds": 6.305062612053007,
+        "snapshot_seconds": 0.417278528213501,
+        "local_environment_seconds": 0
+      }
+    },
+    {
+      "workflow": "training",
+      "local_seconds": 33.41009480273351,
+      "previous_aws_seconds": 681.2331206658855,
+      "aws_seconds": 342.95545041933656,
+      "speedup": 1.9863603853880496,
+      "cloud": {
+        "label": "aws-training-2",
+        "mode": "aws",
+        "workload": "training",
+        "seed": 911302,
+        "units": 68,
+        "initial_cache_hits": 0,
+        "submit_seconds": 327.97169120889157,
+        "result_fetch_seconds": 2.169616332743317,
+        "close_seconds": 12.813751560635865,
+        "total_seconds": 342.95546624809504,
+        "cold_total_seconds": 342.95545041933656,
+        "unique_sessions": null,
+        "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+        "stats": {
+          "dispatch_to_bootstrap": {
+            "n": 68,
+            "min": 0.05544257164001465,
+            "median": 0.07749640941619873,
+            "max": 0.257352352142334,
+            "sum": 5.813729286193848
+          },
+          "completion_observation": {
+            "n": 68,
+            "min": 0.5458455085754395,
+            "median": 0.7904523611068726,
+            "max": 1.3608934879302979,
+            "sum": 57.25308847427368
+          },
+          "bootstrap": {
+            "n": 68,
+            "min": 0.331939697265625,
+            "median": 0.465828537940979,
+            "max": 0.7096965312957764,
+            "sum": 34.36799120903015
+          },
+          "environment": {
+            "n": 68,
+            "min": 0.0031179079999787973,
+            "median": 0.0033519415000071717,
+            "max": 0.0050713620000237825,
+            "sum": 0.2560713109999284
+          },
+          "payload_load": {
+            "n": 68,
+            "min": 0.2785529129999986,
+            "median": 1.3756720944999756,
+            "max": 2.1388463779999825,
+            "sum": 100.31815698399981
+          },
+          "work_unit": {
+            "n": 68,
+            "min": 0.7407154129999896,
+            "median": 1.0341019899999964,
+            "max": 3.4919549659999944,
+            "sum": 84.69225411599973
+          },
+          "function_seconds": {
+            "n": 68,
+            "min": 5.18199999959279e-05,
+            "median": 0.005515275499988093,
+            "max": 2.095975519999996,
+            "sum": 10.477482414999798
+          }
+        },
+        "peak_function_concurrency": 2,
+        "function_span": 191.45917296409607,
+        "function_busy_wall": 10.406332731246948,
+        "job_logs_found": 68,
+        "workers": [
+          {
+            "cluster": "egp0911-dxx6r4tgpi-w1",
+            "offering": 0,
+            "provision_seconds": 51.18868279457092,
+            "prepare_seconds": 58.56773662567139,
+            "provision_wall": 1789149018.9100263,
+            "prepared_wall": 1789149128.9058468
+          },
+          {
+            "cluster": "egp0911-dxx6r4tgpi-w2",
+            "offering": 0,
+            "provision_seconds": 51.46308469772339,
+            "prepare_seconds": 65.73851776123047,
+            "provision_wall": 1789149019.0211816,
+            "prepared_wall": 1789149136.2230375
+          },
+          {
+            "cluster": "egp0911-dxx6r4tgpi-w3",
+            "offering": 1,
+            "provision_seconds": 60.75338840484619,
+            "prepare_seconds": 66.81626391410828,
+            "provision_wall": 1789149135.8210762,
+            "prepared_wall": 1789149263.3909643
+          }
+        ],
+        "api_start_seconds": 4.15083966916427,
+        "api_preflight_seconds": 7.306309501174837,
+        "snapshot_seconds": 0.5198967456817627,
+        "local_environment_seconds": 0
+      }
+    }
+  ],
+  "warm_fanout": {
+    "label": "aws-fanout-2-warm",
+    "mode": "aws",
+    "workload": "fanout",
+    "seed": 912201,
+    "units": 102,
+    "initial_cache_hits": 0,
+    "submit_seconds": 101.624152764678,
+    "result_fetch_seconds": 24.067944653797895,
+    "close_seconds": null,
+    "total_seconds": 125.69254995789379,
+    "cold_total_seconds": null,
+    "unique_sessions": 1,
+    "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+    "stats": {
+      "dispatch_to_bootstrap": {
+        "n": 102,
+        "min": 0.057802677154541016,
+        "median": 0.08084630966186523,
+        "max": 0.13330674171447754,
+        "sum": 8.380100727081299
+      },
+      "completion_observation": {
+        "n": 102,
+        "min": 0.17062807083129883,
+        "median": 0.3023512363433838,
+        "max": 0.4872596263885498,
+        "sum": 30.395610332489014
+      },
+      "bootstrap": {
+        "n": 102,
+        "min": 0.4335498809814453,
+        "median": 0.45146024227142334,
+        "max": 0.668837308883667,
+        "sum": 47.03486371040344
+      },
+      "environment": {
+        "n": 102,
+        "min": 0.003193231000011565,
+        "median": 0.0034532049999995706,
+        "max": 0.004706889999994246,
+        "sum": 0.35687572999975714
+      },
+      "payload_load": {
+        "n": 102,
+        "min": 0.021624943999995594,
+        "median": 0.022978205999976353,
+        "max": 0.03757449100001509,
+        "sum": 2.4021506309995573
+      },
+      "work_unit": {
+        "n": 102,
+        "min": 1.6748965719999944,
+        "median": 1.7474305869999966,
+        "max": 17.047060934,
+        "sum": 195.2772129700002
+      },
+      "function_seconds": {
+        "n": 102,
+        "min": 1.000166901,
+        "median": 1.0002119794999942,
+        "max": 1.002788862999978,
+        "sum": 102.0272331460003
+      }
+    },
+    "peak_function_concurrency": 4,
+    "function_span": 88.60120391845703,
+    "function_busy_wall": 46.95591425895691,
+    "job_logs_found": 102,
+    "new_workers": 0,
+    "preparations": 0
+  },
+  "runs": [
+    {
+      "label": "aws-chain-1",
+      "mode": "aws",
+      "workload": "chain",
+      "seed": 911101,
+      "units": 20,
+      "initial_cache_hits": 0,
+      "submit_seconds": 196.2164633977227,
+      "result_fetch_seconds": 5.246016337070614,
+      "close_seconds": 11.513999570161104,
+      "total_seconds": 212.97663213405758,
+      "cold_total_seconds": null,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "e916b270edc126dad4f9b7c4c81f2bbb1ecdc56a6d82d14b493de8b74141c9eb",
+      "stats": {
+        "dispatch_to_bootstrap": {
+          "n": 20,
+          "min": 0.07471704483032227,
+          "median": 0.08175742626190186,
+          "max": 0.15183019638061523,
+          "sum": 1.8056561946868896
+        },
+        "completion_observation": {
+          "n": 20,
+          "min": 0.2503073215484619,
+          "median": 0.31578922271728516,
+          "max": 0.36527347564697266,
+          "sum": 6.140294551849365
+        },
+        "bootstrap": {
+          "n": 20,
+          "min": 0.3434731960296631,
+          "median": 0.439189076423645,
+          "max": 0.6530721187591553,
+          "sum": 9.126119375228882
+        },
+        "environment": {
+          "n": 20,
+          "min": 0.0032511880000072324,
+          "median": 0.0033722004999887645,
+          "max": 0.004846084000007522,
+          "sum": 0.06895423200003847
+        },
+        "payload_load": {
+          "n": 20,
+          "min": 0.02181397000001084,
+          "median": 0.022559294499998828,
+          "max": 0.03900847599999224,
+          "sum": 0.4801017510000207
+        },
+        "work_unit": {
+          "n": 20,
+          "min": 1.6649736849999925,
+          "median": 1.864570528999998,
+          "max": 1.9720431930000188,
+          "sum": 37.19216881099997
+        },
+        "function_seconds": {
+          "n": 20,
+          "min": 1.000166452000002,
+          "median": 1.0002106839999954,
+          "max": 1.002556827999996,
+          "sum": 20.006579758
+        }
+      },
+      "peak_function_concurrency": 1,
+      "function_span": 55.0108847618103,
+      "function_busy_wall": 20.006590127944946,
+      "job_logs_found": 20,
+      "workers": [
+        {
+          "cluster": "egp0911-3e6qkqraki-w1",
+          "offering": 0,
+          "provision_seconds": 52.40385699272156,
+          "prepare_seconds": 66.18904972076416,
+          "provision_wall": 1789147688.1764271,
+          "prepared_wall": 1789147807.020777
+        }
+      ],
+      "api_start_seconds": 4.260603598784655,
+      "api_preflight_seconds": 5.979998437222093,
+      "snapshot_seconds": 0.3883655071258545,
+      "local_environment_seconds": 0
+    },
+    {
+      "label": "aws-chain-2",
+      "mode": "aws",
+      "workload": "chain",
+      "seed": 911101,
+      "units": 20,
+      "initial_cache_hits": 0,
+      "submit_seconds": 184.90319707477465,
+      "result_fetch_seconds": 5.116850571706891,
+      "close_seconds": 10.912039813119918,
+      "total_seconds": 200.9323666319251,
+      "cold_total_seconds": 200.9323124610819,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+      "stats": {
+        "dispatch_to_bootstrap": {
+          "n": 20,
+          "min": 0.06946301460266113,
+          "median": 0.07656693458557129,
+          "max": 0.20616531372070312,
+          "sum": 1.7092008590698242
+        },
+        "completion_observation": {
+          "n": 20,
+          "min": 0.2108614444732666,
+          "median": 0.28228485584259033,
+          "max": 0.40421032905578613,
+          "sum": 5.842279434204102
+        },
+        "bootstrap": {
+          "n": 20,
+          "min": 0.3282756805419922,
+          "median": 0.42057836055755615,
+          "max": 0.5091593265533447,
+          "sum": 8.459059953689575
+        },
+        "environment": {
+          "n": 20,
+          "min": 0.003091791000002786,
+          "median": 0.003179657999993424,
+          "max": 0.0032431820000056177,
+          "sum": 0.063655020000013
+        },
+        "payload_load": {
+          "n": 20,
+          "min": 0.020863552999998092,
+          "median": 0.021258540000005155,
+          "max": 0.035856644999995524,
+          "sum": 0.4410143600000396
+        },
+        "work_unit": {
+          "n": 20,
+          "min": 1.6639554399999952,
+          "median": 1.8327414759999954,
+          "max": 2.090303266999996,
+          "sum": 37.06081796799998
+        },
+        "function_seconds": {
+          "n": 20,
+          "min": 1.000189767000009,
+          "median": 1.000199049999999,
+          "max": 1.002518250999998,
+          "sum": 20.006346654000026
+        }
+      },
+      "peak_function_concurrency": 1,
+      "function_span": 53.732078313827515,
+      "function_busy_wall": 20.006356239318848,
+      "job_logs_found": 20,
+      "workers": [
+        {
+          "cluster": "egp0911-5gsfgsurre-w1",
+          "offering": 0,
+          "provision_seconds": 51.2867636680603,
+          "prepare_seconds": 57.428680419921875,
+          "provision_wall": 1789148397.0643606,
+          "prepared_wall": 1789148506.0281236
+        }
+      ],
+      "api_start_seconds": 4.262894202023745,
+      "api_preflight_seconds": 5.789992779958993,
+      "snapshot_seconds": 0.41263723373413086,
+      "local_environment_seconds": 0
+    },
+    {
+      "label": "aws-fanout-2",
+      "mode": "aws",
+      "workload": "fanout",
+      "seed": 911201,
+      "units": 102,
+      "initial_cache_hits": 0,
+      "submit_seconds": 234.04875094396994,
+      "result_fetch_seconds": 24.76456266734749,
+      "close_seconds": 11.713192372117192,
+      "total_seconds": 402.1661401200108,
+      "cold_total_seconds": 270.52705212309957,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+      "stats": {
+        "dispatch_to_bootstrap": {
+          "n": 102,
+          "min": 0.057119131088256836,
+          "median": 0.08045172691345215,
+          "max": 0.27434539794921875,
+          "sum": 8.63908863067627
+        },
+        "completion_observation": {
+          "n": 102,
+          "min": 0.1635878086090088,
+          "median": 0.2934997081756592,
+          "max": 0.4449164867401123,
+          "sum": 30.21323800086975
+        },
+        "bootstrap": {
+          "n": 102,
+          "min": 0.3551599979400635,
+          "median": 0.451440691947937,
+          "max": 0.679112434387207,
+          "sum": 47.08902716636658
+        },
+        "environment": {
+          "n": 102,
+          "min": 0.003233224000013024,
+          "median": 0.0034380420000061918,
+          "max": 0.004939633000006438,
+          "sum": 0.35407905100009884
+        },
+        "payload_load": {
+          "n": 102,
+          "min": 0.021889887000014596,
+          "median": 0.0229271774999944,
+          "max": 0.03977308500000731,
+          "sum": 2.403900016999998
+        },
+        "work_unit": {
+          "n": 102,
+          "min": 1.6749042790000033,
+          "median": 1.7535557170000118,
+          "max": 17.507186539999992,
+          "sum": 195.41333678200002
+        },
+        "function_seconds": {
+          "n": 102,
+          "min": 1.0001706689999992,
+          "median": 1.0002129584999935,
+          "max": 1.0002975059999812,
+          "sum": 102.02238540299982
+        }
+      },
+      "peak_function_concurrency": 4,
+      "function_span": 89.31695055961609,
+      "function_busy_wall": 53.33065342903137,
+      "job_logs_found": 102,
+      "workers": [
+        {
+          "cluster": "egp0911-5yvo7della-w1",
+          "offering": 0,
+          "provision_seconds": 53.84509634971619,
+          "prepare_seconds": 64.72932577133179,
+          "provision_wall": 1789148609.7383468,
+          "prepared_wall": 1789148728.3143861
+        },
+        {
+          "cluster": "egp0911-5yvo7della-w2",
+          "offering": 0,
+          "provision_seconds": 58.96468997001648,
+          "prepare_seconds": 60.96955919265747,
+          "provision_wall": 1789148609.8489242,
+          "prepared_wall": 1789148729.7835064
+        }
+      ],
+      "api_start_seconds": 4.268487934954464,
+      "api_preflight_seconds": 6.305062612053007,
+      "snapshot_seconds": 0.417278528213501,
+      "local_environment_seconds": 0
+    },
+    {
+      "label": "aws-fanout-2-warm",
+      "mode": "aws",
+      "workload": "fanout",
+      "seed": 912201,
+      "units": 102,
+      "initial_cache_hits": 0,
+      "submit_seconds": 101.624152764678,
+      "result_fetch_seconds": 24.067944653797895,
+      "close_seconds": null,
+      "total_seconds": 125.69254995789379,
+      "cold_total_seconds": null,
+      "unique_sessions": 1,
+      "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+      "stats": {
+        "dispatch_to_bootstrap": {
+          "n": 102,
+          "min": 0.057802677154541016,
+          "median": 0.08084630966186523,
+          "max": 0.13330674171447754,
+          "sum": 8.380100727081299
+        },
+        "completion_observation": {
+          "n": 102,
+          "min": 0.17062807083129883,
+          "median": 0.3023512363433838,
+          "max": 0.4872596263885498,
+          "sum": 30.395610332489014
+        },
+        "bootstrap": {
+          "n": 102,
+          "min": 0.4335498809814453,
+          "median": 0.45146024227142334,
+          "max": 0.668837308883667,
+          "sum": 47.03486371040344
+        },
+        "environment": {
+          "n": 102,
+          "min": 0.003193231000011565,
+          "median": 0.0034532049999995706,
+          "max": 0.004706889999994246,
+          "sum": 0.35687572999975714
+        },
+        "payload_load": {
+          "n": 102,
+          "min": 0.021624943999995594,
+          "median": 0.022978205999976353,
+          "max": 0.03757449100001509,
+          "sum": 2.4021506309995573
+        },
+        "work_unit": {
+          "n": 102,
+          "min": 1.6748965719999944,
+          "median": 1.7474305869999966,
+          "max": 17.047060934,
+          "sum": 195.2772129700002
+        },
+        "function_seconds": {
+          "n": 102,
+          "min": 1.000166901,
+          "median": 1.0002119794999942,
+          "max": 1.002788862999978,
+          "sum": 102.0272331460003
+        }
+      },
+      "peak_function_concurrency": 4,
+      "function_span": 88.60120391845703,
+      "function_busy_wall": 46.95591425895691,
+      "job_logs_found": 102,
+      "new_workers": 0,
+      "preparations": 0
+    },
+    {
+      "label": "aws-training-2",
+      "mode": "aws",
+      "workload": "training",
+      "seed": 911302,
+      "units": 68,
+      "initial_cache_hits": 0,
+      "submit_seconds": 327.97169120889157,
+      "result_fetch_seconds": 2.169616332743317,
+      "close_seconds": 12.813751560635865,
+      "total_seconds": 342.95546624809504,
+      "cold_total_seconds": 342.95545041933656,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+      "stats": {
+        "dispatch_to_bootstrap": {
+          "n": 68,
+          "min": 0.05544257164001465,
+          "median": 0.07749640941619873,
+          "max": 0.257352352142334,
+          "sum": 5.813729286193848
+        },
+        "completion_observation": {
+          "n": 68,
+          "min": 0.5458455085754395,
+          "median": 0.7904523611068726,
+          "max": 1.3608934879302979,
+          "sum": 57.25308847427368
+        },
+        "bootstrap": {
+          "n": 68,
+          "min": 0.331939697265625,
+          "median": 0.465828537940979,
+          "max": 0.7096965312957764,
+          "sum": 34.36799120903015
+        },
+        "environment": {
+          "n": 68,
+          "min": 0.0031179079999787973,
+          "median": 0.0033519415000071717,
+          "max": 0.0050713620000237825,
+          "sum": 0.2560713109999284
+        },
+        "payload_load": {
+          "n": 68,
+          "min": 0.2785529129999986,
+          "median": 1.3756720944999756,
+          "max": 2.1388463779999825,
+          "sum": 100.31815698399981
+        },
+        "work_unit": {
+          "n": 68,
+          "min": 0.7407154129999896,
+          "median": 1.0341019899999964,
+          "max": 3.4919549659999944,
+          "sum": 84.69225411599973
+        },
+        "function_seconds": {
+          "n": 68,
+          "min": 5.18199999959279e-05,
+          "median": 0.005515275499988093,
+          "max": 2.095975519999996,
+          "sum": 10.477482414999798
+        }
+      },
+      "peak_function_concurrency": 2,
+      "function_span": 191.45917296409607,
+      "function_busy_wall": 10.406332731246948,
+      "job_logs_found": 68,
+      "workers": [
+        {
+          "cluster": "egp0911-dxx6r4tgpi-w1",
+          "offering": 0,
+          "provision_seconds": 51.18868279457092,
+          "prepare_seconds": 58.56773662567139,
+          "provision_wall": 1789149018.9100263,
+          "prepared_wall": 1789149128.9058468
+        },
+        {
+          "cluster": "egp0911-dxx6r4tgpi-w2",
+          "offering": 0,
+          "provision_seconds": 51.46308469772339,
+          "prepare_seconds": 65.73851776123047,
+          "provision_wall": 1789149019.0211816,
+          "prepared_wall": 1789149136.2230375
+        },
+        {
+          "cluster": "egp0911-dxx6r4tgpi-w3",
+          "offering": 1,
+          "provision_seconds": 60.75338840484619,
+          "prepare_seconds": 66.81626391410828,
+          "provision_wall": 1789149135.8210762,
+          "prepared_wall": 1789149263.3909643
+        }
+      ],
+      "api_start_seconds": 4.15083966916427,
+      "api_preflight_seconds": 7.306309501174837,
+      "snapshot_seconds": 0.5198967456817627,
+      "local_environment_seconds": 0
+    },
+    {
+      "label": "local-chain-1",
+      "mode": "local",
+      "workload": "chain",
+      "seed": 911101,
+      "units": 20,
+      "initial_cache_hits": 0,
+      "submit_seconds": 29.214880323968828,
+      "result_fetch_seconds": 0.14890943421050906,
+      "close_seconds": 1.1059921234846115e-05,
+      "total_seconds": 29.36384397186339,
+      "cold_total_seconds": null,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "e916b270edc126dad4f9b7c4c81f2bbb1ecdc56a6d82d14b493de8b74141c9eb",
+      "stats": {
+        "dispatch_to_bootstrap": null,
+        "completion_observation": null,
+        "bootstrap": null,
+        "environment": null,
+        "payload_load": {
+          "n": 20,
+          "min": 0.009718639310449362,
+          "median": 0.009876474039629102,
+          "max": 0.01017767982557416,
+          "sum": 0.197742301505059
+        },
+        "work_unit": {
+          "n": 20,
+          "min": 1.0726899011060596,
+          "median": 1.0783808180131018,
+          "max": 1.0809423462487757,
+          "sum": 21.5499591906555
+        },
+        "function_seconds": {
+          "n": 20,
+          "min": 1.0001611621119082,
+          "median": 1.0003684819675982,
+          "max": 1.0004199123941362,
+          "sum": 20.006497628055513
+        }
+      },
+      "peak_function_concurrency": 1,
+      "function_span": 26.23397207260132,
+      "function_busy_wall": 20.006489515304565,
+      "job_logs_found": 20,
+      "workers": [],
+      "api_start_seconds": null,
+      "api_preflight_seconds": null,
+      "snapshot_seconds": 2.658505916595459,
+      "local_environment_seconds": 2.453275203704834
+    },
+    {
+      "label": "local-chain-2",
+      "mode": "local",
+      "workload": "chain",
+      "seed": 911101,
+      "units": 20,
+      "initial_cache_hits": 0,
+      "submit_seconds": 26.94415024900809,
+      "result_fetch_seconds": 0.15346325375139713,
+      "close_seconds": 1.1465046554803848e-05,
+      "total_seconds": 27.097675900906324,
+      "cold_total_seconds": 27.097667017951608,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+      "stats": {
+        "dispatch_to_bootstrap": null,
+        "completion_observation": null,
+        "bootstrap": null,
+        "environment": null,
+        "payload_load": {
+          "n": 20,
+          "min": 0.009698931127786636,
+          "median": 0.01007042289711535,
+          "max": 0.016450537834316492,
+          "sum": 0.2070415113121271
+        },
+        "work_unit": {
+          "n": 20,
+          "min": 1.0708365510217845,
+          "median": 1.0757173667661846,
+          "max": 1.085889205802232,
+          "sum": 21.531047294847667
+        },
+        "function_seconds": {
+          "n": 20,
+          "min": 1.0001498879864812,
+          "median": 1.0002071070484817,
+          "max": 1.0004107388667762,
+          "sum": 20.005248655565083
+        }
+      },
+      "peak_function_concurrency": 1,
+      "function_span": 26.078243732452393,
+      "function_busy_wall": 20.005245447158813,
+      "job_logs_found": 20,
+      "workers": [],
+      "api_start_seconds": null,
+      "api_preflight_seconds": null,
+      "snapshot_seconds": 0.3909492492675781,
+      "local_environment_seconds": 0.19193506240844727
+    },
+    {
+      "label": "local-fanout-1",
+      "mode": "local",
+      "workload": "fanout",
+      "seed": 911201,
+      "units": 102,
+      "initial_cache_hits": 0,
+      "submit_seconds": 36.27942683408037,
+      "result_fetch_seconds": 0.1410534898750484,
+      "close_seconds": 3.436766564846039e-05,
+      "total_seconds": 36.42064340505749,
+      "cold_total_seconds": null,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "e916b270edc126dad4f9b7c4c81f2bbb1ecdc56a6d82d14b493de8b74141c9eb",
+      "stats": {
+        "dispatch_to_bootstrap": null,
+        "completion_observation": null,
+        "bootstrap": null,
+        "environment": null,
+        "payload_load": {
+          "n": 102,
+          "min": 0.009565631859004498,
+          "median": 0.010027532000094652,
+          "max": 0.010865682736039162,
+          "sum": 1.0182695239782333
+        },
+        "work_unit": {
+          "n": 102,
+          "min": 1.070207417011261,
+          "median": 1.0786143890582025,
+          "max": 1.1113377641886473,
+          "sum": 110.02740736911073
+        },
+        "function_seconds": {
+          "n": 102,
+          "min": 1.0001465301029384,
+          "median": 1.0003763928543776,
+          "max": 1.0005119289271533,
+          "sum": 102.0335046518594
+        }
+      },
+      "peak_function_concurrency": 4,
+      "function_span": 35.68713402748108,
+      "function_busy_wall": 29.523093223571777,
+      "job_logs_found": 102,
+      "workers": [],
+      "api_start_seconds": null,
+      "api_preflight_seconds": null,
+      "snapshot_seconds": 0.19954848289489746,
+      "local_environment_seconds": 0.0015652179718017578
+    },
+    {
+      "label": "local-fanout-2",
+      "mode": "local",
+      "workload": "fanout",
+      "seed": 911201,
+      "units": 102,
+      "initial_cache_hits": 0,
+      "submit_seconds": 36.84537108568475,
+      "result_fetch_seconds": 0.14650502614676952,
+      "close_seconds": 3.5727862268686295e-05,
+      "total_seconds": 36.99244602303952,
+      "cold_total_seconds": 36.99243696173653,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+      "stats": {
+        "dispatch_to_bootstrap": null,
+        "completion_observation": null,
+        "bootstrap": null,
+        "environment": null,
+        "payload_load": {
+          "n": 102,
+          "min": 0.009505542926490307,
+          "median": 0.009986856486648321,
+          "max": 0.014704713132232428,
+          "sum": 1.039284246508032
+        },
+        "work_unit": {
+          "n": 102,
+          "min": 1.0701921829022467,
+          "median": 1.07601089309901,
+          "max": 1.12054980173707,
+          "sum": 109.943253074307
+        },
+        "function_seconds": {
+          "n": 102,
+          "min": 1.0001248097978532,
+          "median": 1.0001837112940848,
+          "max": 1.0004592123441398,
+          "sum": 102.02236662199721
+        }
+      },
+      "peak_function_concurrency": 4,
+      "function_span": 35.854663372039795,
+      "function_busy_wall": 32.43518090248108,
+      "job_logs_found": 102,
+      "workers": [],
+      "api_start_seconds": null,
+      "api_preflight_seconds": null,
+      "snapshot_seconds": 0.2718677520751953,
+      "local_environment_seconds": 0.001622915267944336
+    },
+    {
+      "label": "local-training-1",
+      "mode": "local",
+      "workload": "training",
+      "seed": 911302,
+      "units": 68,
+      "initial_cache_hits": 0,
+      "submit_seconds": 33.28347956482321,
+      "result_fetch_seconds": 0.1262553739361465,
+      "close_seconds": 2.7252361178398132e-05,
+      "total_seconds": 33.41009480273351,
+      "cold_total_seconds": null,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "e916b270edc126dad4f9b7c4c81f2bbb1ecdc56a6d82d14b493de8b74141c9eb",
+      "stats": {
+        "dispatch_to_bootstrap": null,
+        "completion_observation": null,
+        "bootstrap": null,
+        "environment": null,
+        "payload_load": {
+          "n": 68,
+          "min": 0.23984371405094862,
+          "median": 1.1770380500238389,
+          "max": 1.2976293838582933,
+          "sum": 78.3114815261215
+        },
+        "work_unit": {
+          "n": 68,
+          "min": 0.041529794689267874,
+          "median": 0.3043369189836085,
+          "max": 1.142900944687426,
+          "sum": 21.601435496937484
+        },
+        "function_seconds": {
+          "n": 68,
+          "min": 3.075413405895233e-05,
+          "median": 0.004954623524099588,
+          "max": 1.0925105903297663,
+          "sum": 5.897204235196114
+        }
+      },
+      "peak_function_concurrency": 2,
+      "function_span": 31.609424591064453,
+      "function_busy_wall": 5.735095500946045,
+      "job_logs_found": 68,
+      "workers": [],
+      "api_start_seconds": null,
+      "api_preflight_seconds": null,
+      "snapshot_seconds": 0.20209360122680664,
+      "local_environment_seconds": 0.000978231430053711
+    },
+    {
+      "label": "local-training-2",
+      "mode": "local",
+      "workload": "training",
+      "seed": 911302,
+      "units": 68,
+      "initial_cache_hits": 0,
+      "submit_seconds": 32.778785252943635,
+      "result_fetch_seconds": 0.16672753123566508,
+      "close_seconds": 3.2207928597927094e-05,
+      "total_seconds": 32.94592229183763,
+      "cold_total_seconds": 32.94591241469607,
+      "unique_sessions": null,
+      "misen_wheel_sha256": "d59cbee952ac226b2afca95b82be245f3f6c1146d05f8931101926ba3ec045e3",
+      "stats": {
+        "dispatch_to_bootstrap": null,
+        "completion_observation": null,
+        "bootstrap": null,
+        "environment": null,
+        "payload_load": {
+          "n": 68,
+          "min": 0.24059242894873023,
+          "median": 1.1870782286860049,
+          "max": 1.2622459158301353,
+          "sum": 78.83978086756542
+        },
+        "work_unit": {
+          "n": 68,
+          "min": 0.041068561375141144,
+          "median": 0.3039401329588145,
+          "max": 1.141448478680104,
+          "sum": 21.49580106837675
+        },
+        "function_seconds": {
+          "n": 68,
+          "min": 3.1585805118083954e-05,
+          "median": 0.004989607026800513,
+          "max": 1.0864080688916147,
+          "sum": 5.8607382690534
+        }
+      },
+      "peak_function_concurrency": 2,
+      "function_span": 31.12626552581787,
+      "function_busy_wall": 5.686816930770874,
+      "job_logs_found": 68,
+      "workers": [],
+      "api_start_seconds": null,
+      "api_preflight_seconds": null,
+      "snapshot_seconds": 0.20217132568359375,
+      "local_environment_seconds": 0.0010993480682373047
+    }
+  ],
+  "cleanup": {
+    "bucket_deleted": true,
+    "owned_vms": 9,
+    "baseline_states_unchanged": true
+  }
+}

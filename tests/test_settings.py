@@ -245,14 +245,16 @@ class TestConfigurable:
             (
                 "[executor]\n"
                 'type = "skypilot"\n'
-                'infra = ["aws", "gcp/us-central1"]\n'
-                "use_spot = true\n"
                 'name_prefix = "research"\n'
-                "[executor.accelerators]\n"
-                'cuda = ["A100", "L4"]\n'
                 "[executor.accelerator_memory]\n"
                 "A100 = 80\n"
                 "L4 = 24\n"
+                "[[executor.workers]]\n"
+                'infra = "aws"\n'
+                "cpus = 8\n"
+                "memory = 32\n"
+                "use_spot = true\n"
+                "accelerators = { L4 = 1 }\n"
             ),
             encoding="utf-8",
         )
@@ -263,10 +265,10 @@ class TestConfigurable:
         executor = Executor.auto(settings=Settings(config_file=config))
 
         assert isinstance(executor, SkyPilotExecutor)
-        assert executor.infra == ["aws", "gcp/us-central1"]
-        assert executor.use_spot is True
+        assert executor.workers[0].infra == "aws"
+        assert executor.workers[0].use_spot is True
         assert executor.name_prefix == "research"
-        assert executor.accelerators == {"cuda": ["A100", "L4"]}
+        assert executor.workers[0].accelerators == {"L4": 1}
         assert executor.accelerator_memory == {"A100": 80, "L4": 24}
 
     def test_resolve_type_with_alias(self) -> None:

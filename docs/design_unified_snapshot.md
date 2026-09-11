@@ -236,26 +236,26 @@ package).
   cannot work; `CloudWorkspace` (or a remote-mounted disk workspace) can.
   Content-addressed snapshots make repeat submissions cheap: the remote
   cache is keyed by hash, so unchanged code transfers nothing.
-- **SkyPilotExecutor (implemented first adapter)**: SkyPilot provisions or
-  selects compute on its supported clouds and clusters and owns the durable
-  managed-job lifecycle; Misen's
-  workspace remains the data plane. The adapter eagerly submits one managed
-  job per pending work unit and implements arbitrary DAG dependencies with
-  durable workspace state files; independent branches run concurrently, while
-  descendants may provision before their gates open. Multi-node requests use
-  SkyPilot `num_nodes`. Work units that bind `DASK_CLIENT` receive one private
-  Dask worker per node, with the scheduler and task coordinator on rank 0;
-  without that sentinel, the Misen payload runs only on rank 0 and user code
-  orchestrates the other nodes. The Dask scheduler uses the first
-  `SKYPILOT_NODE_IPS` address and configurable `dask_scheduler_port` on the
-  allocation's trusted private network. The adapter
-  requires `snapshot=true`, `prewarm_envs=false`, a non-path workspace
-  transport (normally `CloudWorkspace`), and a relative worker cache path.
-  Workers fetch snapshots, env files, payloads, results, and logs through that
-  workspace using ambient IAM/service-account credentials. Failures before a
-  worker starts need the submitting Misen process to observe their status and
-  publish dependency state; otherwise descendants eventually reach their
-  cumulative timeout.
+- **SkyPilotExecutor (implemented first adapter)**: Misen's local graph
+  controller schedules ready WorkUnits onto reusable SkyPilot allocations.
+  Each executor session owns an isolated foreground local API server; scheduling
+  lasts only while the submitting process remains alive. Unnamed worker types
+  declare capacity and provider settings. Single-node jobs share compatible
+  capacity; multi-node jobs reserve a group. `DASK_CLIENT` starts one private
+  worker per node with the scheduler and coordinator on rank zero; otherwise
+  only rank zero executes the payload. The adapter requires `snapshot=true`,
+  `prewarm_envs=false`, a remotely fetchable workspace (normally
+  `CloudWorkspace`), and a relative cache path. Workers fetch snapshots,
+  env files, payloads, and results through the workspace using ambient
+  credentials. The local controller checkpoints status, propagates failures,
+  and dispatches subprocesses through persistent SSH agents. Worker environments
+  are prepared ahead of execution and reused across submissions; idle expiry
+  or executor shutdown removes owned workers. Prepared launch commands are
+  partitioned by immutable snapshot, interpreter selection, platform, and
+  bootstrap requirement. They retain activation paths, not per-job settings.
+  Cloud result downloads use a local per-result process lock and up to eight
+  concurrent streaming transfers before atomic cache publication. SkyPilot
+  autodown backs up abrupt process loss.
 
 Compatibility (validated at submit, failing early with a clear error):
 

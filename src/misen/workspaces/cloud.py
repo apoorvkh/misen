@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import binascii
 import contextlib
+import errno
 import io
 import logging
 import shutil
+import sys
 import tarfile
 import tempfile
 import threading
 import uuid
 from collections.abc import Iterator, MutableMapping
+from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Self, TextIO, TypeAlias, TypeVar, cast
@@ -33,7 +36,7 @@ from xxhash import xxh3_64_hexdigest
 from misen.exceptions import ConfigError, LockUnavailableError, StorageError
 from misen.utils.bootstrap_transport import render_python_transport
 from misen.utils.hashing import Hash, ResolvedTaskHash, ResultHash, TaskHash
-from misen.utils.locks import ObjectStoreLock, _cleanup_on_exit
+from misen.utils.locks import NFSLock, ObjectStoreLock, _cleanup_on_exit
 from misen.utils.serde import MANIFEST_FILENAME
 from misen.workspace import Workspace, _hash_mapping_type, _storage_errors
 
@@ -306,10 +309,23 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
     def __getitem__(self, key: ResultHash) -> Path:
         local = self._cache_dir / key.b32()
         with _storage_errors(f"Could not inspect the local cache for result {key.b32()}"):
-            cached = local.exists()
-        if cached:
-            return local
+            if local.exists():
+                return local
+            locks = self._cache_dir / ".locks"
+            locks.mkdir(exist_ok=True)
+            # Retain lock files: unlinking can split concurrent readers across inodes.
+            with contextlib.ExitStack() as stack:
+                if sys.platform == "win32":
+                    stack.enter_context(NFSLock(lockfile=locks / key.b32()).context())
+                else:
+                    import fcntl
 
+                    # The OS releases flock even when a downloader is killed.
+                    lock = stack.enter_context((locks / key.b32()).open("a"))
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                return local if local.exists() else self._download(key, local)
+
+    def _download(self, key: ResultHash, local: Path) -> Path:
         remote_prefix = f"{self._prefix}/{key.b32()}"
         try:
             with _cloud_errors(
@@ -326,22 +342,30 @@ class ObstoreResultStore(MutableMapping[ResultHash, Path]):
         with _storage_errors(f"Could not create a local cache directory for result {key.b32()}"):
             tmp = Path(tempfile.mkdtemp(dir=self._cache_dir, prefix=f".{key.b32()}.", suffix=".tmp"))
         try:
-            with _cloud_errors(f"Could not materialize result {key.b32()}", passthrough=(FileExistsError,)):
+            with _cloud_errors(f"Could not materialize result {key.b32()}"), ThreadPoolExecutor(max_workers=8) as pool:
+
+                def download(entry: Any) -> None:
+                    rel = entry["path"][len(payload_prefix) + 1 :]
+                    if not rel or (payload_prefix == remote_prefix and rel.startswith(".builds/")):
+                        return
+                    target = tmp / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("wb") as output:
+                        output.writelines(obs.get(self._store, entry["path"]).stream())
+
                 for batch in obs.list(self._store, prefix=f"{payload_prefix}/"):
-                    for entry in batch:
-                        rel = entry["path"][len(payload_prefix) + 1 :]
-                        if not rel or (payload_prefix == remote_prefix and rel.startswith(".builds/")):
-                            continue
-                        target = tmp / rel
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_bytes(bytes(obs.get(self._store, entry["path"]).bytes()))
+                    list(pool.map(download, batch))
                 _require_result_manifest(tmp, key)
-                tmp.rename(local)
-        except FileExistsError:
+                try:
+                    tmp.rename(local)
+                except OSError as exc:
+                    # POSIX directory publication races can report ENOTEMPTY,
+                    # not just EEXIST. Reuse only a complete winning download.
+                    if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                        raise
+                    _require_result_manifest(local, key)
+        finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        except BaseException:
-            shutil.rmtree(tmp, ignore_errors=True)
-            raise
         return local
 
     def __setitem__(self, key: ResultHash, value: Path) -> None:

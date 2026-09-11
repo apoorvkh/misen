@@ -270,6 +270,7 @@ class ProjectSnapshot:
         workspace: Workspace,
         *,
         dependency_jobs: Mapping[WorkUnit, tuple[str, str]] | None = None,
+        reuse_env: bool = False,
     ) -> tuple[str, list[str], dict[str, str], Path]:
         """Prepare command/env overrides to execute one work unit.
 
@@ -284,6 +285,7 @@ class ProjectSnapshot:
             workspace: Workspace for payload/log storage.
             dependency_jobs: Prerequisite work units mapped to their
                 ``(submission_id, job_id)``, or ``None`` for native dependencies.
+            reuse_env: Cache a launch command on persistent workers.
 
         Returns:
             Tuple ``(job_id, argv, env_overrides, log_path)``.
@@ -339,6 +341,7 @@ class ProjectSnapshot:
             payload=payload_ref,
             env_files=list(self.env_file_refs),
             worker_args=worker_args,
+            reuse_env=reuse_env,
         )
         return job_id, ["bash", "-c", script], {}, log_path
 

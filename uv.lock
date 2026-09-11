@@ -589,7 +589,7 @@ name = "click"
 version = "8.1.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "platform_system == 'Windows'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b9/2e/0090cbf739cee7d23781ad4b89a9894a41538e4fcf4c31dcdd705b78eb8b/click-8.1.8.tar.gz", hash = "sha256:ed53c9d8990d83c2a27deae68e4ee337473f6330c040a31d4225c9574d16096a", size = 226593 }
 wheels = [
@@ -598,11 +598,11 @@ wheels = [
 
 [[package]]
 name = "cloudpickle"
-version = "3.1.0"
+version = "3.1.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/97/c7/f746cadd08c4c08129215cf1b984b632f9e579fc781301e63da9e85c76c1/cloudpickle-3.1.0.tar.gz", hash = "sha256:81a929b6e3c7335c863c771d673d105f02efdb89dfaba0c90495d1c64796601b", size = 66155 }
+sdist = { url = "https://files.pythonhosted.org/packages/27/fb/576f067976d320f5f0114a8d9fa1215425441bb35627b1993e5afd8111e5/cloudpickle-3.1.2.tar.gz", hash = "sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414", size = 22330 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/41/e1d85ca3cab0b674e277c8c4f678cf66a91cd2cecf93df94353a606fe0db/cloudpickle-3.1.0-py3-none-any.whl", hash = "sha256:fe11acda67f61aaaec473e3afe030feb131d78a43461b718185363384f1ba12e", size = 22021 },
+    { url = "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", size = 22228 },
 ]
 
 [[package]]
@@ -1177,7 +1177,7 @@ name = "importlib-metadata"
 version = "9.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.13'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405 }
 wheels = [
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [package.optional-dependencies]
 skypilot = [
-    { name = "skypilot" },
+    { name = "skypilot-nightly" },
 ]
 
 [package.dev-dependencies]
@@ -1512,12 +1512,13 @@ requires-dist = [
     { name = "processkit-py", specifier = ">=1.5.0,<2" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=13.7.0" },
-    { name = "skypilot", marker = "extra == 'skypilot'", specifier = ">=0.12.1" },
+    { name = "skypilot-nightly", marker = "extra == 'skypilot'", specifier = ">=1.0.0.dev20260905" },
     { name = "textual", specifier = ">=0.78.0" },
     { name = "typing-extensions", specifier = ">=4.1.0" },
     { name = "tyro", specifier = ">=1.0.0" },
     { name = "xxhash", specifier = ">=3.0.0" },
 ]
+provides-extras = ["skypilot"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1537,7 +1538,7 @@ version = "1.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
-    { name = "colorama", marker = "platform_system == 'Windows'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "ghp-import" },
     { name = "jinja2" },
     { name = "markdown" },
@@ -2043,10 +2044,10 @@ resolution-markers = [
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version >= '3.14'" },
-    { name = "python-dateutil", marker = "python_full_version >= '3.14'" },
-    { name = "pytz", marker = "python_full_version >= '3.14'" },
-    { name = "tzdata", marker = "python_full_version >= '3.14'" },
+    { name = "numpy" },
+    { name = "python-dateutil" },
+    { name = "pytz" },
+    { name = "tzdata" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/33/01/d40b85317f86cf08d853a4f495195c73815fdf205eef3993821720274518/pandas-2.3.3.tar.gz", hash = "sha256:e05e1af93b977f7eafa636d043f9f94c7ee3ac81af99c13508215942e64c993b", size = 4495223 }
 wheels = [
@@ -2105,9 +2106,9 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version < '3.14'" },
-    { name = "python-dateutil", marker = "python_full_version < '3.14'" },
-    { name = "tzdata", marker = "(python_full_version < '3.14' and sys_platform == 'emscripten') or (python_full_version < '3.14' and sys_platform == 'win32')" },
+    { name = "numpy" },
+    { name = "python-dateutil" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/be/4f/5f3422a2afec5ffc46308b79e53291365a93748b498ac2e58bead0197916/pandas-3.0.5.tar.gz", hash = "sha256:dca3734d6ab7c906e6730f0788b0a1dbb9f2467731f9711f77995c8e9d62d712", size = 4658219 }
 wheels = [
@@ -3133,8 +3134,8 @@ wheels = [
 ]
 
 [[package]]
-name = "skypilot"
-version = "0.13.0"
+name = "skypilot-nightly"
+version = "1.0.0.dev20260911"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -3189,9 +3190,9 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "wheel" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/69/b1/0ad50c2e89a3b18dafca3e8b5910e11aa9608dae8977394902fe59ba1e0d/skypilot-0.13.0.tar.gz", hash = "sha256:0bd0c59a649d59fa21f1093534318e6c2f50b30e10fb3f54f4d702acf2615fb7", size = 3313547 }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/2a/1ddf96de7a4663ab4cf197b39b41260f5b367ddcfcc3e2f93828c704ffbe/skypilot_nightly-1.0.0.dev20260911.tar.gz", hash = "sha256:984080f5a21afa3ced1071acc922ccfb68a5119f02fecc4b9b67bea6dc1fea68", size = 3617267 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cb/d9/a503213b79d362e7a5da595dd7fa38186a6d1adb3642466f1399045bafe2/skypilot-0.13.0-py3-none-any.whl", hash = "sha256:30411fb3622140e61d386494dfaaeefaee737f76565a3838d72a31157571d96c", size = 3653109 },
+    { url = "https://files.pythonhosted.org/packages/03/db/b0592d3dc086e758028eacaa4352e7e4f3295438c18ca3ebc5b520642268/skypilot_nightly-1.0.0.dev20260911-py3-none-any.whl", hash = "sha256:c21ae1ae43703d80e7e8d22468fe1a4be399de9e1307e6c838cec458f18ff112", size = 3967187 },
 ]
 
 [[package]]
@@ -3400,7 +3401,7 @@ name = "tqdm"
 version = "4.70.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "platform_system == 'Windows'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/21/3b/6c24bec5be5e743ffd99576daa5cc077722fc7d5bbc00bd133fa0c698dc6/tqdm-4.70.0.tar.gz", hash = "sha256:55b0b0dbd97462d06ebee91e4dac24ed4d4702be82b24f07e6c1d27e08cea220", size = 795438 }
 wheels = [

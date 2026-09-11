@@ -30,8 +30,8 @@ jobs:
             fail-fast: false
             matrix:
                 skypilot:
-                    - "==0.12.1"
-                    - ">=0.12.1"
+                    - "==1.0.0.dev20260905"
+                    - ">=1.0.0.dev20260905"
         steps:
             - uses: actions/checkout@v7
             - uses: astral-sh/setup-uv@v9.0.0
@@ -40,5 +40,5 @@ jobs:
                   python-version: "3.14"
                   enable-cache: true
             - run: uv sync --frozen
-            - run: uv pip install --python .venv/bin/python "skypilot${{ matrix.skypilot }}"
-            - run: .venv/bin/pytest -q tests/test_skypilot_executor.py
+            - run: uv pip install --python .venv/bin/python "skypilot-nightly${{ matrix.skypilot }}"
+            - run: .venv/bin/pytest -q tests/test_skypilot_executor.py tests/test_skypilot_workers.py tests/test_skypilot_local.py tests/test_skypilot_protocol.py tests/test_prepared_command.py

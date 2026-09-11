@@ -287,8 +287,8 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
         argv=[
             "--executor",
             "skypilot",
-            "--executor.infra",
-            "gcp/us-central1",
+            "--executor.workers",
+            '[{"infra":"gcp/us-central1","cpus":4,"memory":16}]',
             "--executor.name-prefix",
             "research",
             "list",
@@ -297,7 +297,9 @@ def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_ar
 
     executor = getattr(captured_args["args"], "executor")
     assert isinstance(executor, SkyPilotExecutor)
-    assert executor.infra == "gcp/us-central1"
+    assert executor.workers[0].infra == "gcp/us-central1"
+    assert executor.workers[0].cpus == 4
+    assert executor.workers[0].memory == 16
     assert executor.name_prefix == "research"
 
 

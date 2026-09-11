@@ -1,232 +1,151 @@
-# Design: remote executors
+# Remote executors
 
-Status: SkyPilot is the first optional remote adapter and can target the cloud,
-Kubernetes, SSH, and Slurm compute infrastructures registered by the installed
-SkyPilot SDK. Direct native SSH, remote Slurm, Kubernetes, Modal, and provider
-Batch adapters remain planned.
+Status: SkyPilot is the first optional remote adapter. All adapter implementation
+lives in `src/misen/executors/skypilot.py`. Direct SSH, remote
+Slurm, Kubernetes, Modal, and provider Batch adapters remain planned.
 
 ## Decision
 
-Use SkyPilot as an adapter, not as Misen's universal remote-execution
-abstraction.
-
-SkyPilot is a strong first integration because it already translates portable
-resource requests across clouds and existing clusters, and its
-[managed jobs](https://docs.skypilot.ai/en/stable/examples/managed-jobs.html)
-own recovery, resource teardown, and job lifecycle after submission.
-That gives Misen a broad remote backend without immediately duplicating every
-provider and cluster control plane.
-
-It therefore remains optional.
+SkyPilot provisions compute; persistent Misen agents execute WorkUnit subprocesses over SSH. Misen owns DAG scheduling
+and WorkUnit lifetimes; Workspace owns snapshots, payloads, results, locks,
+and logs. Keep these boundaries independent so users can change compute
+without changing task definitions or artifact storage. The graph-dispatch
+hook and workspace bootstrap transport are sufficient integration points;
+there is no broad RemoteExecutor abstraction yet.
 
 ## Installation and backend selection
 
-Misen declares the oldest compatible provider-neutral SDK without an upper
-bound. Compatibility CI tests both that minimum and the newest stable release
-on Python 3.14. Install only the upstream provider extras needed by the
-SkyPilot environment that provisions compute.
-For the default local API server this is the environment running Misen; a
-logged-in remote SkyPilot API server owns its provider packages and
-configuration, and its Misen clients need only `misen[skypilot]`:
+Install `misen[skypilot]` and the desired `skypilot-nightly` provider extras
+in the submitting environment, for example:
 
 ```bash
-uv pip install "misen[skypilot]" "skypilot[aws,gcp]>=0.12.1"
-# Or select a different set:
-uv pip install "misen[skypilot]" "skypilot[kubernetes,ssh,slurm]>=0.12.1"
-uv pip install "misen[skypilot]" "skypilot[oci,lambda,runpod]>=0.12.1"
-
-# Azure currently needs SkyPilot's documented uv prerequisite:
-uv pip install --prerelease allow "azure-cli<2.87.0"
-uv pip install "misen[skypilot]" "skypilot[azure]>=0.12.1"
-
-sky check
-
-# From a Misen source checkout:
-uv sync --extra skypilot
-uv run --extra skypilot --with "skypilot[runpod]>=0.12.1" sky check runpod
+uv pip install "misen[skypilot]" "skypilot-nightly[aws,gcp]>=1.0.0.dev20260905"
 ```
 
-The SDK must be installed in the same environment that runs Misen, not only
-as an isolated `uv tool`, because the executor loads `sky` in-process.
-The integration requires SkyPilot 0.12.1 or newer. Misen supports Python
-3.11–3.14; individual SkyPilot releases and provider extras may impose
-additional constraints. `misen[skypilot]` includes the provider-neutral SDK,
-but no provider clients.
-Keeping those clients explicit avoids installing large and unrelated stacks
-such as Azure CLI, Kubernetes clients, or Ray for every user. It also avoids
-claiming that `skypilot[all]` has identical dependency support on every Python
-version. Azure currently needs the extra uv prerequisite step in SkyPilot's
-[installation guide](https://docs.skypilot.co/en/latest/getting-started/installation.html).
+The minimum nightly provides configurable local API ports, isolated runtime
+directories, and foreground server startup. CI covers the minimum and latest
+nightly on Python 3.14; provider extras can impose additional constraints.
+Every worker entry owns its `infra` string, such as `aws/us-east-1`,
+or `ssh/my-pool`. Workers require SSH-accessible Linux nodes. SkyPilot retains provider validation and
+capability checks. Multi-node WorkUnits require a supporting provider.
 
-`SkyPilotExecutor.infra` is passed to `sky.Resources` and may be a single
-infrastructure string or an ordered list of alternatives. Common mappings are:
+## Local control-plane ownership
 
-| Target | Upstream extra | Example `infra` | Multi-node in SkyPilot 0.13 |
-|---|---|---|---|
-| AWS / Google Cloud | `aws` / `gcp` | `aws/us-east-1`, `gcp/us-central1` | Yes (GCP TPU caveats) |
-| Azure / OCI | `azure` / `oci` | `azure/eastus`, `oci` | Yes |
-| Lambda Cloud / RunPod | `lambda` / `runpod` | `lambda`, `runpod` | Yes / no |
-| Kubernetes | `kubernetes` | `k8s/my-context` | Yes |
-| Existing machines | `ssh` | `ssh/my-node-pool` | Yes |
-| Slurm through SkyPilot | `slurm` | `slurm/my-cluster/my-partition` | Yes |
+Every executor session starts one supervised local graph-controller process using
+the submitting interpreter. Before importing SkyPilot, its environment sets
+an isolated `SKY_RUNTIME_DIR`, a private `SKYPILOT_API_SERVER_LOCAL_PORT`, and
+a loopback `SKYPILOT_API_SERVER_ENDPOINT`. The controller supervises an API
+child started with `sky.api_start(foreground=True, port=...)`. It never invokes
+`sky.api_stop()` or shares ownership of another API server. After startup,
+implicit SDK server autostart is disabled so an API failure cannot silently
+create a detached replacement. Provider credentials and user configuration
+remain available from the real home directory.
 
-Ordered alternatives may mix backend families. Provider-specific fields such
-as `instance_type` and `image_id` apply to every resource option and should
-normally remain unset for a heterogeneous list.
+No cloud controller VM, remote API service, managed-jobs API, or nested
+credential injection is required. The local manifest contains workspace
+configuration, immutable commands, dependency IDs, and worker types; SDK
+dependencies stay on the submitting host. Ordinary workers receive
+`api_server_access=False`. The local API and catalog preflight must become
+ready within `startup_timeout` before submission returns job handles.
 
-The same pattern applies to SkyPilot's other registered compute providers:
-install the matching upstream extra, configure its credentials, and use its
-infrastructure name. Provider capabilities still apply; in particular, not
-every provider supports multi-node resources, so managed `DASK_CLIENT` work
-requires a backend for which SkyPilot reports multi-node support. A managed
-job also needs an enabled infrastructure that can host SkyPilot's jobs
-controller; some valid workload targets, including Lambda and Slurm, cannot
-host that controller themselves. This is an upstream placement constraint,
-not a Misen allowlist.
+Scheduling requires the submitting process to stay alive. Context exit,
+`close()`, and normal process exit request cooperative controller shutdown:
+tear down cloud workers first, then stop the owned API and controller tree.
+Cleanup has a shared bounded wait before forced process termination.
+On Unix a parent-loss watcher requests cooperative cleanup and bounds stalled
+SDK waits before stopping the API tree; direct-child SIGKILL would orphan
+SkyPilot helper processes. Windows uses processkit's Job Object to bind the
+whole tree to its owner. SkyPilot autodown backs up interrupted cloud cleanup after native jobs finish
+or hit their execution timeout. The executor does not promise detached
+scheduling or successful teardown after an abrupt kill.
 
-Compute selection does not select Misen's data store. `executor.infra` may be
-`runpod`, `k8s/...`, or `azure/...` while `workspace.backend` is `s3`, `gcs`,
-or `azure`, provided every worker has network access and ambient credentials
-for that object store. This separation is intentional: SkyPilot owns compute;
-`CloudWorkspace` owns snapshots, payloads, results, locks, and logs.
+## Reusable workers
 
-Misen still needs direct adapters. Users may already have SSH hosts, Slurm
-clusters, Kubernetes policy, Modal applications, or managed Batch queues that
-must be addressed in their native security and operational model. Routing
-all of those through SkyPilot would add an unnecessary control plane and
-would hide backend features Misen may need.
+`workers` is a required, non-empty, unordered list of `SkyPilotWorker` types.
+Each entry declares per-node CPU/RAM budgets, whole accelerators, node-group
+size, provider options, and `max_workers`. The executor's `max_workers` caps
+all groups across submissions in the session, including provisioning and draining groups.
+Worker names are generated internal identities, not user-facing pool names.
 
-Executor names therefore identify a compute control plane
-(`skypilot`, future `ssh`, `remote_slurm`, `kubernetes`, `modal`,
-`aws_batch`, or `gcp_batch`), not a cloud vendor. A SkyPilot target is
-selected with SkyPilot's
-[infrastructure strings](https://docs.skypilot.ai/en/latest/overview.html),
-for example `aws/us-east-1`, `k8s/my-context`, or `ssh/my-node-pool`.
+The controller launches each group through `sky.launch` once, then opens an
+SDK-authenticated SSH stream to a small stdlib agent on each node. Ready
+WorkUnits use subprocesses, without `sky.exec` or native per-job status polling.
+Agents report completion and kill process groups on cancellation or connection
+loss. A single native guard stays active while the agent lease is renewed,
+preventing SkyPilot autodown from interrupting externally dispatched work.
+After lease expiry the guard exits, allowing autodown to clean up abandoned VMs.
 
-## Stable boundary
+Each worker owns its status, connections, and environment preparation state;
+only durable fields enter checkpoints. The controller receives a configuration
+copy without live process handles and validates resource eligibility before launch.
+SDK completions and SSH events share one queue. Frontier planning, scheduling,
+and retirement remain separate steps, with one capacity check for launching and
+replacing workers. Shutdown waits for in-flight launches before requesting teardown.
 
-Remote execution has three owners:
+Scheduling accounts for starting capacity and packs compatible ready work.
+`lookahead_seconds` (default 90) bounds the next independent future frontier;
+observed elapsed times improve estimates without treating task timeouts as
+predictions. Workers materialize snapshot environments before running payloads.
+Preparation uses the idle worker's full declared CPU budget. A cached launch
+command then activates the prepared environment in a fresh subprocess, keeping
+resource assignments and env-file values specific to each WorkUnit. Payload
+transport still runs for each new job; dependency materialization does not.
+All admission, provisioning, and speculation obey per-type and session limits.
+The policy does not claim a global makespan optimum.
 
-1. **Misen** builds the cache-bounded work-unit DAG, publishes an immutable
-   project snapshot, prepares payloads, and defines normalized job states.
-2. **The executor** validates capabilities, translates resource requests,
-   submits work to a durable control plane, and maps native status back to
-   Misen.
-3. **The workspace** is the data plane for snapshots, payloads, env files,
-   results, locks, scratch synchronization, and logs.
+Single-node jobs pack within CPU/RAM and whole-device budgets. CPU thread
+caps and memory admission are cooperative controls, not OS memory isolation.
+Multi-node jobs exclusively reserve a complete group. `DASK_CLIENT` creates
+one private Dask worker per node with its scheduler and coordinator on rank
+zero. Otherwise only rank zero executes the Misen payload. The Dask scheduler
+port must be free and reachable on the allocation's trusted private network.
 
-The worker contract from `design_unified_snapshot.md` is deliberately
-backend-neutral. An executor delivers a small Bash bootstrap plus opaque
-workspace references; it does not copy the project or teach the remote
-control plane about Misen's result format.
+GPU eligibility uses per-device GiB capacities from concrete catalog
+offerings pinned to instance and region. One high-memory variant cannot
+justify a lower-memory variant of the same model. `accelerator_memory`
+metadata fills unknown capacities without inflating known values; unknown
+capacity cannot satisfy a memory minimum. Assigned memory is checked on every
+node before user code or Dask starts (CUDA via `nvidia-smi`, ROCm/XPU via the
+task environment's PyTorch). Other constrained backends are rejected.
 
-Do not introduce a broad `RemoteExecutor` base class yet. The existing
-graph-level dispatch hook and workspace transport are the correct extension
-points. Extract smaller shared pieces only after two adapters demonstrate the
-same need: durable submission manifests, status normalization, cancellation,
-reattachment, and command/log wrapping are likely candidates.
+Idle groups retire after `idle_timeout_minutes` or when another type needs their slot.
+With `reuse_workers=true`, submissions in the same executor and workspace share
+capacity and environments; `close()` retires all groups. `reuse_workers=false`
+releases the pool once all accepted work finishes. Per-WorkUnit cancellation leaves unrelated
+work running; provisioning and bootstrap failures propagate to descendants.
 
-## SkyPilot MVP contract
+## Status and interrupted submissions
 
-The current `SkyPilotExecutor` uses SkyPilot Python SDK interfaces available
-since version 0.12.1:
+Workspace checkpoints contain logical states, resource reservations, launch/teardown
+request IDs, and owned cluster names. Ownership is saved before dispatch, and
+uncertain side effects are never blindly replayed. Committed workspace
+results take precedence over later native failures. Matching graphs and
+snapshots reattach within the same live executor, including cache pruning
+and traversal reordering. Different graphs retain separate checkpoints while sharing the session pool.
+Local status files and a cancellation inbox keep scheduler traffic off S3. Infrastructure failures do not automatically retry user code.
 
-- Each pending Misen work unit becomes its own SkyPilot managed job. Misen
-  submits them eagerly, without waiting for parent jobs to finish, so arbitrary
-  DAG shapes are supported and independent branches provision and execute in
-  parallel.
-- Managed Dask is an orthogonal, intra-work-unit layer. Each Dask-backed work
-  unit owns a temporary cluster inside its one SkyPilot allocation; Dask does
-  not schedule Misen's work-unit DAG, and ready work units do not share a
-  worker pool.
-- Dependencies are submission-scoped state files in the workspace. A worker
-  waits for every parent to publish `done` before entering user code and
-  publishes its own terminal state on exit. Once the jobs are accepted, these
-  gates remain usable after the submitter exits; no long-lived Misen DAG
-  controller is required for ordinary user-code success or failure.
-- Eager submission has a cost tradeoff: a descendant can provision while its
-  worker is blocked on dependency markers. An infrastructure or bootstrap
-  failure before the parent worker starts cannot publish a marker itself.
-  Misen publishes one when the submitting process observes the terminal
-  SkyPilot status; without that observation, descendants wait until their
-  cumulative command timeout.
-- Multi-node requests are passed to SkyPilot as `num_nodes`. A work unit that
-  binds `DASK_CLIENT` runs a ranked wrapper on every node. It branches on
-  `SKYPILOT_NODE_RANK`: rank 0 hosts the scheduler and sole Misen task
-  coordinator, and every node (including rank 0) hosts exactly one worker.
-  CPU, memory, and accelerators are per-node requests; the scheduler and
-  coordinator share rank 0's resources with its worker. Without
-  `DASK_CLIENT`, the Misen payload runs only on rank 0 and user code remains
-  responsible for orchestrating the other nodes.
-- The managed Dask runtime uses the allocation's private node network. Nodes
-  must be mutually reachable over Dask's unencrypted TCP transport, and the
-  scheduler must not be exposed outside the allocation. Misen does not add
-  authentication or encryption, so the allocation network must be trusted and
-  isolated from untrusted workloads (including other Kubernetes tenants). The
-  scheduler address uses the first address in `SKYPILOT_NODE_IPS` and
-  `dask_scheduler_port` (default 8786, valid range 1024–65535), which must be
-  free on rank 0 and allowed by the private network. Each node independently
-  fetches and materializes the immutable snapshot before joining, so worker
-  identity, package access, and `dask_startup_timeout` (default 600 seconds)
-  apply across the whole group. The project environment must include
-  `distributed`.
-- Membership is fixed rather than elastic. The coordinator waits for exactly
-  one worker per node and verifies that membership remains unchanged on exit.
-  Scheduler/coordinator failure tears down rank-0 roles, scheduler shutdown
-  releases the remote workers, and a role failure on any rank fails the
-  SkyPilot task. Non-head diagnostics may be available primarily in
-  SkyPilot's managed-job logs rather than Misen's rank-0 job log.
-- `snapshot=true` and `prewarm_envs=false` are required. Ephemeral workers
-  fetch and materialize the submitted snapshot themselves.
-- Worker images must provide Bash and GNU `timeout`. Unless uv, Pixi (when
-  needed), and dependency caches are pre-provisioned, bootstrap also requires
-  outbound access to install tools and the project's locked dependencies.
-- The workspace must expose a non-path bootstrap transport and a relative
-  local cache path. `CloudWorkspace(cache_dir=".cache/misen")` is the normal
-  pairing.
-- SkyPilot receives CPU and memory as per-node minimums. Misen accelerator
-  types such as `cuda` are not hardware models, so configuration explicitly
-  maps each type to candidate SkyPilot names; optional capacity metadata
-  filters those candidates for per-device memory requests.
-- `job_recovery` accepts an infrastructure-recovery strategy name, while
-  application-error restarts remain disabled. Retrying side-effecting task
-  code requires a future explicit Misen policy rather than an implicit
-  backend default.
-- SkyPilot is the compute control plane only. Misen does not use SkyPilot file
-  mounts as an alternate artifact store, and worker tasks set
-  `api_server_access=False`.
-- A Misen workspace job log reflects the current worker attempt. Prior-attempt,
-  provisioning, early-bootstrap, and non-head diagnostics may remain only in
-  SkyPilot's managed-job logs.
-- One bulk SkyPilot queue request maps managed-job states into Misen's
-  `pending`, `running`, `done`, `failed`, and `unknown` lifecycle. Terminal
-  observations are cached, and the workspace remains the success authority:
-  a committed Misen result stays successful if SkyPilot reports the job as
-  failed. Status queries refresh an autostopped managed-jobs controller and
-  publish terminal markers for failures that never reached a worker.
-
-This decomposition preserves Misen's arbitrary DAG semantics without claiming
-that SkyPilot exposes a native arbitrary-DAG managed job. Its deliberate
-tradeoffs are eager descendant provisioning and the need for status observation
-to propagate failures that happen before Misen code starts.
+A graph ownership record is written before starting its controller. After
+controller loss, active workers with unconfirmed teardown keep affected jobs
+unknown. A new submission refuses to replay an unresolved graph. Retained
+local runtime state and the workspace checkpoint support diagnosis and
+manual reconciliation; confirm outstanding cluster teardown before clearing
+the durable graph record. Cross-process controller reattachment is not
+implemented. Once every job is terminal and every worker is down, a new
+submission may run normally.
 
 ## Authentication and trust
 
-There are two independent credential paths:
+The local API uses submit-host provider packages and credentials. Each worker
+independently accesses the workspace object store through an instance role,
+service account, or equivalent ambient identity. Compute selection does not
+select storage: an AWS worker can use any supported bucket it can reach and
+authenticate to. `CloudWorkspace.config` cannot carry bootstrap credentials;
+commands and snapshots are visible to the compute control plane.
 
-- The Misen process authenticates to SkyPilot; the local or remote SkyPilot
-  API server authenticates to each compute backend so it can provision and
-  query compute.
-- The worker authenticates directly to the Misen workspace bucket so it can
-  fetch snapshots and payloads and publish results and logs.
-
-Provision worker access with an instance role, service account, workload
-identity, or an equivalent ambient mechanism. Bootstrap shell text can be
-visible in control-plane commands, so `CloudWorkspace.config` is rejected
-for remote bootstrap and must not carry worker credentials. Non-secret locator
-fields such as an endpoint or S3 region are safe. Use least-privilege access
-to the configured workspace bucket/prefix and configure the corresponding
-SkyPilot worker identity outside Misen.
+The adapter requires `snapshot=true`, `prewarm_envs=false`, remotely fetchable
+workspace transport, coordination-file reads, and a relative cache path.
+Workers need Bash, GNU `timeout`, and snapshot dependency access. Dask work
+also requires `distributed` in the project environment.
 
 ## Alternatives and planned adapters
 
@@ -258,25 +177,10 @@ class.
 
 ## Roadmap
 
-1. **Harden the SkyPilot MVP.** Exercise representative elastic-cloud and
-   attached-cluster targets end to end, including AWS/GCP, Kubernetes,
-   SSH/Slurm, and a single-node GPU provider; document provider identity
-   setup; finish log UX and failure diagnostics.
-2. **Harden dependency orchestration.** Persist attachable submission
-   manifests, make pre-worker infrastructure failures propagate without a live
-   status observer, and reduce the cost of descendants provisioning while
-   blocked on dependency gates.
-3. **Add SSH and remote Slurm.** Build the command transport and durable
-   supervisor once, then reuse it for Slurm CLI submission/status. Slurm's
-   [dependency options](https://slurm.schedmd.com/sbatch.html) preserve graph
-   scheduling in the cluster.
-4. **Add native Kubernetes, Modal, and provider Batch adapters.** Each adapter
-   owns resource/status translation but reuses the same snapshot/bootstrap
-   and Workspace data plane.
-5. **Generalize proven lifecycle needs.** Persist backend IDs and graph
-   mappings, support attach/cancel, formalize workspace capability
-   validation, and add age-based pruning for snapshots, environments, and
-   submission blobs.
-
-Success means users can change compute control planes without changing task
-definitions, result identity, cache semantics, or artifact storage.
+1. Exercise representative cloud and attached-cluster targets end to end and
+   document worker identity setup and diagnostic recovery.
+2. Refine duration estimates and provisioning predictions from benchmark history.
+   Cross-process reuse would require a separate ownership and recovery design.
+3. Add direct SSH and remote Slurm command transport, then native Kubernetes,
+   Modal, and provider Batch adapters using the same Workspace data plane.
+4. Generalize lifecycle helpers once multiple adapters need them.

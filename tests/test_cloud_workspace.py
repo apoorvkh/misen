@@ -1479,3 +1479,34 @@ def test_scratch_background_sync_retries_operational_failure(
 
     assert attempts >= 2
     assert f"{remote_prefix}/checkpoint.txt" in _store_paths(workspace, "scratch_dirs")
+
+
+def test_concurrent_result_downloads_publish_one_complete_directory(monkeypatch, tmp_path) -> None:
+    """Concurrent readers share one download, while distinct files overlap."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = MemoryStore()
+    key = ResultHash.from_object("concurrent-download")
+    for name in ("manifest.json", "data.bin"):
+        obs.put(store, f"results/{key.b32()}/{name}", name.encode())
+    cache = tmp_path / "cache"
+    readers = [ObstoreResultStore(store, "results", cache_dir=cache) for _ in range(2)]
+    barrier = threading.Barrier(2)
+    original = obs.get
+    calls = []
+
+    def get(store, path, **kwargs):
+        calls.append(path)
+        # First GET reads the commit pointer; the next two payload GETs overlap.
+        if len(calls) > 1:
+            barrier.wait(timeout=5)
+        return original(store, path, **kwargs)
+
+    monkeypatch.setattr(obs, "get", get)
+    with ThreadPoolExecutor(max_workers=2) as threads:
+        paths = list(threads.map(lambda reader: reader[key], readers))
+    assert paths[0] == paths[1]
+    assert len(calls) == 3
+    assert (paths[0] / "data.bin").read_bytes() == b"data.bin"
+    assert (paths[0] / "manifest.json").read_bytes() == b"manifest.json"
+    assert not list(cache.glob("*.tmp"))

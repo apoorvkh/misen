@@ -2,8 +2,10 @@
 
 # No ``from __future__ import annotations``: tyro evaluates annotations at runtime.
 import os
+import shlex
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import tyro
@@ -30,6 +32,7 @@ def main(
     snapshot_key: str | None = None,
     env_store_root: Path | None = None,
     pixi_bin: str | None = None,
+    prepared_command: Path | None = None,
 ) -> None:
     """Build/reuse environments for local snapshot data, then exec the job.
 
@@ -67,6 +70,21 @@ def main(
                 raise SnapshotError(msg) from exc
 
     envs = _materialize_envs(project_dir, store_root, pixi_bin=pixi_bin)
+    if prepared_command is not None:
+        # Keep activation paths, never a preparation job's resource/env overrides.
+        argv = _worker_command(envs, [], Path("__MISEN_PAYLOAD__"), log_path=Path("__MISEN_LOG__"))
+        command = shlex.join(argv[:-3]) + ' "$@"'
+        activation = (
+            f"export VIRTUAL_ENV={shlex.quote(str(envs.overlay_venv_dir))}\n"
+            f"export PATH={shlex.quote(str(envs.deps_env_dir / 'bin'))}${{PATH:+:$PATH}}\n"
+            f"export PYTHONPATH={shlex.quote(str(envs.overlay_site_dir))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        )
+        prepared_command.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=prepared_command.parent, delete=False) as output:
+            output.write(f"set -eu\nunset {UV_BIN_ENV} {PIXI_BIN_ENV}\n{activation}exec {command}\n")
+        Path(output.name).replace(prepared_command)
+    if os.environ.pop("MISEN_PREPARE_ONLY", ""):
+        return
     command = _worker_command(
         envs,
         list(env_file),
