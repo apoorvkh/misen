@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import cloudpickle
+import pytest
 
 import misen.utils.execute as execute_mod
 from misen.workspace import Workspace
@@ -95,7 +96,10 @@ def test_execute_places_active_venv_first_on_path(tmp_path, monkeypatch) -> None
     ]
 
 
-def test_execute_streams_explicit_job_log_path(tmp_path) -> None:
+@pytest.mark.parametrize("captured", [False, True])
+def test_execute_streams_explicit_job_log_path(tmp_path, monkeypatch, captured: bool) -> None:
+    if captured:
+        monkeypatch.setenv("MISEN_JOB_LOG_CAPTURED", "1")
     marker_path = tmp_path / "streamed-path.txt"
     workspace = _RecordingWorkspace(marker_path)
     payload_path = tmp_path / "payload.pkl"
@@ -109,5 +113,8 @@ def test_execute_streams_explicit_job_log_path(tmp_path) -> None:
 
     execute_mod.execute(payload=payload_path, job_log_path=log_path)
 
-    assert marker_path.read_text(encoding="utf-8") == str(log_path)
+    if captured:
+        assert not marker_path.exists()
+    else:
+        assert marker_path.read_text(encoding="utf-8") == str(log_path)
     assert payload_marker.read_text(encoding="utf-8") == "ran"

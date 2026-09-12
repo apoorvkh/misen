@@ -346,6 +346,18 @@ cleanup before stopping the local process tree. Abrupt exits can interrupt
 cleanup; agent lease expiry kills subprocesses after connection loss, and SkyPilot autodown backs up VM cleanup. This executor does not provide detached graph scheduling. Local startup
 and catalog preflight have a `startup_timeout` of 300 seconds by default.
 
+Runtime events report local API startup, credential checks, VM provisioning,
+environment preparation, pool reuse, graph completion, and teardown. Set
+`MISEN_RUNTIME_EVENTS=0` to silence these console updates; logs are still recorded.
+Misen's Job logs include SkyPilot startup/provisioning context, environment
+preparation, and stdout/stderr from every rank, including failures before Python
+bootstrapping finishes. The controller owns their streaming uploads and finalizes
+each log before publishing the job's terminal state. A shared
+`<session>_skypilot.log` in the workspace's job-log directory also records later
+worker teardown. Original API, provisioning, setup, and SSH logs are retained under
+`<workspace temp>/skypilot/<session>/logs/`. The private API redirects native
+SkyPilot logs there instead of `~/sky_logs`.
+
 Each entry describes a repeatable allocation, not a priority or named pool.
 `cpus`, `memory` (GiB), and accelerators are per node; `nodes` defaults to one.
 `max_workers` inside an entry limits that type, while the executor-level limit

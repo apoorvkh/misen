@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import atexit
+import base64
 import contextlib
 import importlib
 import inspect
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -35,7 +37,7 @@ import msgspec
 from processkit import Command, SupervisionSession, Supervisor
 from tyro.constructors import PrimitiveConstructorSpec
 
-from misen.exceptions import ConfigError, ExecutionError, MisenError, StatusQueryError, SubmissionError
+from misen.exceptions import ConfigError, ExecutionError, MisenError, StatusQueryError, StorageError, SubmissionError
 from misen.executor import Executor, Job, JobState, _JobRecord
 from misen.task_metadata import AcceleratorType, Resources
 from misen.utils.dask_runtime import (
@@ -45,6 +47,7 @@ from misen.utils.dask_runtime import (
 )
 from misen.utils.hashing import TaskHash
 from misen.utils.resource_env import resource_environment
+from misen.utils.runtime_events import runtime_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -335,6 +338,104 @@ class WorkSpec(msgspec.Struct):
     submission_id: str = ""
     environment_key: str = ""
     duration_key: str = ""
+    log_path: str = ""
+
+
+def _event(directory: Path, message: str) -> None:
+    """Relay lifecycle events to the submitting process's runtime UI."""
+    try:
+        with (directory / "events.jsonl").open("a") as output:
+            output.write(json.dumps(message) + "\n")
+        (directory / "logs").mkdir(exist_ok=True)
+        with (directory / "logs" / "events.log").open("a") as output:
+            output.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    except OSError:
+        logger.exception("Could not record SkyPilot progress: %s", message)
+
+
+def _sky_wait(sky: Any, request: Any, path: Path) -> Any:
+    """Retain SDK request output and exceptions, including failed provisioning."""
+    with path.open("a", buffering=1) as output:
+        try:
+            return sky.stream_and_get(request, output_stream=output)
+        except BaseException:
+            traceback.print_exc(file=output)
+            raise
+
+
+class _JobLogs:
+    """One controller owns job-log uploads, including bootstrap and all ranks."""
+
+    def __init__(self, workspace: Workspace, directory: Path) -> None:
+        self.workspace, self.directory = workspace, directory
+        self.paths: dict[str, Path] = {}
+        self.streams: dict[str, contextlib.ExitStack] = {}
+        self.offsets: dict[Path, int] = {}
+        self.copied: dict[str, int] = {}
+        self.shared: Path | None = None
+        self.last_sync = 0.0
+        (directory / "logs").mkdir(exist_ok=True)
+
+    def add(self, specs: list[WorkSpec]) -> None:
+        for spec in specs:
+            if not spec.log_path or spec.job_id in self.paths:
+                continue
+            path = Path(spec.log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if self.shared is None:
+                self.shared = path.parent / f"{self.directory.name}_skypilot.log"
+                self._open("", self.shared)
+            self.paths[spec.job_id] = path
+            path.touch(mode=0o600)
+            path.write_text(f"SkyPilot job {spec.job_id}; session log: {self.shared}\n")
+
+    def _open(self, key: str, path: Path) -> None:
+        path.touch(mode=0o600)
+        self.streams[key] = contextlib.ExitStack()
+        self.streams[key].enter_context(self.workspace.streaming_job_log(path))
+
+    def sync(self) -> None:
+        """Collect native files incrementally; retain the originals for diagnosis."""
+        if self.shared is None:
+            return
+        with self.shared.open("ab") as output:
+            for path in sorted((self.directory / "logs").rglob("*.log")):
+                with path.open("rb") as source:
+                    offset = self.offsets.get(path, 0)
+                    size = source.seek(0, 2)
+                    source.seek(offset if size >= offset else 0)
+                    if source.tell() < size:
+                        output.write(f"\n--- {path.relative_to(self.directory)} ---\n".encode())
+                        shutil.copyfileobj(source, output)
+                    self.offsets[path] = source.tell()
+        self.last_sync = time.monotonic()
+
+    def write(self, job_id: str, data: bytes) -> None:
+        if job_id not in self.paths:
+            return
+        # Keep upload threads bounded by running work, not the size of the DAG.
+        if job_id not in self.streams:
+            self._open(job_id, self.paths[job_id])
+        with self.paths[job_id].open("ab") as output:
+            if self.shared is not None:
+                with self.shared.open("rb") as source:
+                    source.seek(self.copied.get(job_id, 0))
+                    shutil.copyfileobj(source, output)
+                    self.copied[job_id] = source.tell()
+            output.write(data)
+
+    def finish(self, job_id: str, message: str) -> None:
+        self.sync()
+        self.write(job_id, f"\nSkyPilot: {message}\n".encode())
+        if stream := self.streams.pop(job_id, None):
+            stream.close()
+
+    def close(self) -> None:
+        with contextlib.ExitStack() as cleanup:
+            for stream in self.streams.values():
+                cleanup.callback(stream.close)
+            self.sync()
+        self.streams.clear()
 
 
 class WorkState(msgspec.Struct):
@@ -357,6 +458,7 @@ class WorkerState(msgspec.Struct, dict=True):
     idle_since: float | None = None
 
     def __post_init__(self) -> None:
+        self.started = time.monotonic()
         self.future: Future[Any] | None = None
         self.connections: list[_Connection] = []
         self.ips: list[str] = []
@@ -385,6 +487,7 @@ class ControllerState(msgspec.Struct):
 
 def _worker_main() -> None:
     """Run the stdlib-only agent sent over SSH; EOF/lease loss kills its children."""
+    import base64
     import json
     import os
     import queue
@@ -412,6 +515,12 @@ def _worker_main() -> None:
 
     def emit(**event: Any) -> None:
         print(json.dumps(event), flush=True)  # noqa: T201 -- SSH wire protocol
+
+    def drain(job_id: str, reader: Any, *, complete: bool) -> None:
+        while data := reader.read(65536):
+            emit(kind="log", job_id=job_id, data=base64.b64encode(data).decode())
+            if not complete:
+                break
 
     def kill(process: subprocess.Popen) -> None:
         try:  # noqa: SIM105 -- self-contained remote agent
@@ -441,7 +550,9 @@ def _worker_main() -> None:
                     assigned = [cpus[i] for i in message["cpus"]]
                     # taskset applies affinity before Bash or user code can run.
                     argv = ["taskset", "-c", ",".join(map(str, assigned)), "bash", "-c", message["command"]]
-                    log = Path(message["log"]).expanduser().open("ab", buffering=0)
+                    path = Path(message["log"]).expanduser()
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    log = path.open("wb", buffering=0)
                     process = subprocess.Popen(  # noqa: S603 -- authenticated controller command
                         argv,
                         env=os.environ | message["env"],
@@ -450,28 +561,32 @@ def _worker_main() -> None:
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
-                    jobs[job_id] = (process, log, time.monotonic())
+                    jobs[job_id] = (process, log, path.open("rb"), time.monotonic())
                     emit(kind="started", job_id=job_id, pid=process.pid)
                 elif kind == "cancel" and message["job_id"] in jobs:
                     kill(jobs[message["job_id"]][0])
-            for job_id, (process, log, started) in list(jobs.items()):
+            for job_id, (process, log, reader, started) in list(jobs.items()):
                 code = process.poll()
                 if code is not None:
-                    kill(process)  # also reap background descendants after a successful shell exit
+                    kill(process)
+                # Read before the completion event so the controller can finalize
+                # the complete log before advertising a terminal job state.
+                drain(job_id, reader, complete=code is not None)
+                if code is not None:
                     log.close()
-                    with Path(log.name).open("rb") as output:
-                        output.seek(max(0, output.seek(0, 2) - 16384))
-                        tail = output.read().decode(errors="replace") if code or job_id.startswith("prepare-") else ""
+                    reader.close()
                     del jobs[job_id]
-                    emit(kind="finished", job_id=job_id, code=code, seconds=time.monotonic() - started, log=tail)
+                    emit(kind="finished", job_id=job_id, code=code, seconds=time.monotonic() - started)
             if time.monotonic() - heartbeat > 5:  # noqa: PLR2004 -- heartbeat seconds
                 emit(kind="heartbeat")
                 heartbeat = time.monotonic()
     finally:
-        for process, log, _ in jobs.values():
+        for job_id, (process, log, reader, _) in jobs.items():
             kill(process)
             process.wait()
+            drain(job_id, reader, complete=True)
             log.close()
+            reader.close()
 
 
 class _Connection:
@@ -500,7 +615,8 @@ class _Connection:
             finally:
                 events.put((name, rank, {"kind": "lost", "reason": "SSH stream closed"}))
 
-        threading.Thread(target=read, daemon=True).start()
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
 
     def send(self, message: dict[str, Any]) -> None:
         self.stdin.write(json.dumps(message) + "\n")
@@ -514,6 +630,7 @@ class _Connection:
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait()
+        self.reader.join(timeout=5)
         self.log.close()
         return self.process.returncode == 0
 
@@ -550,8 +667,10 @@ class Controller:
     config: SkyPilotExecutor
     directory: Path
     stop_requested: Callable[[], bool]
+    log_capture: InitVar[_JobLogs | None] = None
 
-    def __post_init__(self, specs: list[WorkSpec]) -> None:
+    def __post_init__(self, specs: list[WorkSpec], log_capture: _JobLogs | None) -> None:
+        self.logs = log_capture or _JobLogs(self.workspace, self.directory)
         self.work: dict[str, WorkSpec] = {}
         self.graphs: dict[str, list[str]] = {}
         self.state = ControllerState({})
@@ -572,6 +691,8 @@ class Controller:
             if spec.job_id in self.work:
                 raise ConfigError(f"Duplicate WorkUnit identity: {spec.job_id}")
         self.graphs[submission_id] = [s.job_id for s in specs]
+        self.logs.add(specs)
+        _event(self.directory, f"SkyPilot accepted {len(specs)} WorkUnits for graph {submission_id}.")
         for spec in specs:
             spec.submission_id = submission_id
             self.work[spec.job_id] = spec
@@ -641,14 +762,26 @@ class Controller:
             and _optional(lambda: self.workspace.read_job_file(submission, f"{job_id}.state")) == b"done"
         ):
             state = "done"
-        job.state, job.reason = state, reason if state != "done" else None
+        reason = reason if state != "done" else None
+        try:
+            self.logs.finish(job_id, f"{state}: {reason}" if reason else state)
+        except (OSError, StorageError) as exc:
+            if state == "done":
+                raise
+            reason = f"{reason or state}; additionally, publishing the job log failed: {exc}"
+            logger.exception("Could not publish the failed job log %s", job_id)
+        job.state, job.reason = state, reason
         self.workspace.put_job_file(submission, f"{job_id}.state", state.encode())
+        if all(self.state.jobs[j].state in _TERMINAL for j in self.graphs[submission]):
+            counts = Counter(self.state.jobs[j].state for j in self.graphs[submission])
+            _event(self.directory, f"SkyPilot graph {submission}: {counts['done']} done, {counts['failed']} failed.")
 
     def _drain(self, worker: WorkerState) -> None:
         if worker.state == "down" or (worker.state == "draining" and worker.future is not None):
             return
         launch = worker.future if worker.state == "provisioning" else None
         worker.state = "draining"
+        _event(self.directory, f"Terminating SkyPilot worker {worker.name}.")
 
         def down() -> None:
             if launch is not None:
@@ -657,7 +790,7 @@ class Controller:
                     connections, _ = launch.result()
                     for connection in connections:
                         connection.close()
-            self.sky.get(self.sky.down(worker.name))
+            _sky_wait(self.sky, self.sky.down(worker.name), self.directory / "logs" / f"{worker.name}-down.log")
 
         self._request(worker, down)
 
@@ -676,6 +809,7 @@ class Controller:
             worker.state = "connecting"
         else:
             worker.state = "down"
+            _event(self.directory, f"SkyPilot worker {worker.name} terminated.")
             worker.close()
             worker.connections.clear()
             worker.prepared.clear()
@@ -710,6 +844,8 @@ class Controller:
                 if worker.future is event:
                     self._complete_request(worker)
                 continue
+            if self._capture_output(worker, rank, event):
+                continue
             if worker.state in {"down", "draining"}:
                 continue
             if event["kind"] == "lost":
@@ -727,12 +863,14 @@ class Controller:
                 connection.ready = True
                 if all(c.ready for c in worker.connections):
                     worker.state, worker.idle_since = "ready", time.time()
+                    _event(
+                        self.directory,
+                        f"SkyPilot worker {name} connected in {time.monotonic() - worker.started:.1f}s; "
+                        "ready to prepare environments.",
+                    )
             if event["kind"] != "finished":
                 continue
             job_id = event["job_id"]
-            if event.get("log"):
-                with (self.directory / f"{name}-{rank}.log").open("a") as log:
-                    log.write(f"\n{job_id}:\n{event['log']}\n")
             codes = worker.completions.setdefault(job_id, {})
             codes[rank] = event["code"]
             if event["code"]:
@@ -748,6 +886,7 @@ class Controller:
                         f"Environment preparation failed on {name}; see worker logs in {self.directory}."
                     )
                 worker.prepared.add(key)
+                _event(self.directory, f"Environment ready on {name} ({event['seconds']:.1f}s on rank {rank}).")
             else:
                 spec, job = self.work[job_id], self.state.jobs[job_id]
                 self.durations[spec.duration_key] = event["seconds"]
@@ -756,6 +895,20 @@ class Controller:
                     "failed" if any(codes.values()) or job.reason else "done",
                     job.reason or f"Worker subprocess exited with codes {codes}.",
                 )
+
+    def _capture_output(self, worker: WorkerState, rank: int, event: Any) -> bool:
+        if not isinstance(event, dict) or event.get("kind") != "log":
+            return False
+        job_id = event["job_id"]
+        data = base64.b64decode(event["data"])
+        if job_id.startswith("prepare-"):
+            with (self.directory / "logs" / f"{worker.name}-prepare-{rank}.log").open("ab") as output:
+                output.write(data)
+        else:
+            if len(worker.connections) > 1:
+                data = f"\n--- rank {rank} ---\n".encode() + data
+            self.logs.write(job_id, data)
+        return True
 
     def _dispatch(self, worker: WorkerState, spec: WorkSpec, *, prepare: bool = False) -> None:
         offering = self.offerings[worker.offering]
@@ -769,12 +922,15 @@ class Controller:
         job_id = f"prepare-{spec.job_id}" if prepare else spec.job_id
         if prepare:
             worker.preparing = job_id, spec.environment_key
+            _event(self.directory, f"Preparing environment on SkyPilot worker {worker.name}.")
         else:
             job = self.state.jobs[job_id]
             job.cluster, job.state, job.started = worker.name, "running", time.time()
             job.cpus, job.gpus = assigned["cpus"], assigned["gpus"]
             # Persist ownership before writing any command. Never replay after stream loss.
             self.save()
+            self.logs.sync()
+            self.logs.write(spec.job_id, f"\nRunning on {worker.name}; using prepared environment.\n".encode())
         worker.idle_since = None
         for rank, connection in enumerate(worker.connections):
             environment = resource_environment(
@@ -785,6 +941,7 @@ class Controller:
                 "SKYPILOT_NODE_RANK": str(rank),
                 "SKYPILOT_NODE_IPS": "\n".join(worker.ips),
                 "MISEN_PREPARE_ONLY": "1" if prepare else "",
+                "MISEN_JOB_LOG_CAPTURED": "1",
             }
             connection.send(
                 {
@@ -803,6 +960,12 @@ class Controller:
         self.state.workers.append(worker)
         self.save()
         offering = self.offerings[index]
+        _event(
+            self.directory,
+            f"Provisioning SkyPilot worker {worker.name} on {offering.worker.infra}: "
+            f"{offering.worker.nodes} node(s), {offering.worker.cpus} CPUs, "
+            f"{offering.worker.memory} GiB RAM/node, GPUs {offering.worker.accelerators or 'none'}.",
+        )
         # One native job guards the entire worker lifetime, so SkyPilot does not
         # autodown a busy VM merely because WorkUnits run outside its job queue.
         guard = (
@@ -819,8 +982,8 @@ class Controller:
 
         def launch() -> Any:
             request = self.sky.launch(task, cluster_name=worker.name, idle_minutes_to_autostop=10, down=True)
-            _, handle = self.sky.get(request)
-            return _connect(handle, worker.name, self.events, self.directory)
+            _, handle = _sky_wait(self.sky, request, self.directory / "logs" / f"{worker.name}-launch.log")
+            return _connect(handle, worker.name, self.events, self.directory / "logs")
 
         self._request(worker, launch)
         return worker
@@ -883,12 +1046,17 @@ class Controller:
 
     def tick(self) -> bool:
         """Accept graphs, consume events, schedule work, and retire idle workers."""
+        if time.monotonic() - self.logs.last_sync >= 1:
+            self.logs.sync()
         for path in self.directory.glob("graph-*.pkl"):
             submission_id = path.stem.removeprefix("graph-")
             specs = cloudpickle.loads(path.read_bytes())
+            self.logs.add(specs)
             try:
                 self.add_graph(submission_id, specs)
             except ConfigError as exc:
+                for spec in specs:
+                    self.logs.finish(spec.job_id, str(exc))
                 state = ControllerState({s.job_id: WorkState(state="failed", reason=str(exc)) for s in specs})
                 self.workspace.put_job_file(submission_id, STATE_FILE, msgspec.json.encode(state))
                 _atomic_write(self.directory / f"{submission_id}.json.error", str(exc).encode())
@@ -935,10 +1103,20 @@ class Controller:
                 time.sleep(0.1)
         except BaseException as exc:
             self.state.failure = str(exc)
+            logger.exception("SkyPilot execution failed")
+            _event(self.directory, f"SkyPilot execution failed: {exc}")
             # A normal agent exit acknowledges that its subprocesses stopped.
             # Cloud teardown acceptance alone does not establish this: a VM
             # can remain in "shutting-down" for minutes after sky.down returns.
             quiesced = {w.name for w in self.state.workers if w.close()}
+            # Agent exit delivers its final buffered output before teardown. Do
+            # not process scheduling/completion events while handling a failure.
+            try:  # Best-effort log capture must not interrupt VM cleanup.
+                while not self.events.empty():
+                    name, rank, event = self.events.get_nowait()
+                    self._capture_output(next(w for w in self.state.workers if w.name == name), rank, event)
+            except Exception:
+                logger.exception("Could not capture final worker output during SkyPilot cleanup")
             for worker in self.state.workers:
                 try:
                     self._drain(worker)
@@ -975,6 +1153,21 @@ class LocalSkySession:
 
     directory: Path
     process: SupervisionSession | None = field(default=None, init=False)
+    event_offset: int = field(default=0, init=False)
+
+    def poll_events(self) -> None:
+        """Display each child lifecycle event once, honoring runtime_events settings."""
+        from rich.markup import escape
+
+        with contextlib.suppress(OSError):  # Progress must never interrupt status checks or cleanup.
+            with (self.directory / "events.jsonl").open("rb") as source:
+                source.seek(self.event_offset)
+                for line in source:
+                    if not line.endswith(b"\n"):
+                        break
+                    self.event_offset += len(line)
+                    with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+                        runtime_event(escape(json.loads(line)))
 
     @property
     def active(self) -> bool:
@@ -987,7 +1180,7 @@ class LocalSkySession:
         try:
             return (self.directory / "ready.error").read_text()
         except OSError:
-            return f"see {self.directory / 'controller.log'}"
+            return f"see {self.directory / 'logs' / 'controller.log'}"
 
     def start(self, *, timeout: int) -> None:
         """Start and wait for resource preflight before returning job handles."""
@@ -995,19 +1188,25 @@ class LocalSkySession:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
         endpoint = f"http://127.0.0.1:{port}"
+        log_dir = self.directory / "logs"
+        log_dir.mkdir(exist_ok=True)
+        runtime_event(f"Starting local SkyPilot API; logs: {log_dir}")
         environment = {
             "SKY_RUNTIME_DIR": str(self.directory / "runtime"),
             "SKYPILOT_API_SERVER_LOCAL_PORT": str(port),
             "SKYPILOT_API_SERVER_ENDPOINT": endpoint,
             "MISEN_SKYPILOT_OWNER_PID": str(os.getpid()),
+            # Relative paths work on the submitter and on remote nodes. SkyPilot
+            # uses the same log-directory string when generating remote commands.
+            "MISEN_SKYPILOT_LOG_DIR": os.path.relpath(log_dir / "native"),
             "PATH": os.pathsep.join((str(Path(sys.executable).parent), os.environ.get("PATH", ""))),
         }
         (self.directory / "connection.json").write_text(json.dumps(environment))
         command = Command(sys.executable, args=["-m", "misen.executors.skypilot", str(self.directory)])
         command = (
             command.envs(environment)
-            .stdout_file(self.directory / "controller.log", append=True)
-            .stderr_file(self.directory / "controller.log", append=True)
+            .stdout_file(log_dir / "controller.log", append=True)
+            .stderr_file(log_dir / "controller.log", append=True)
         )
         # Linux's direct-child SIGKILL would orphan SkyPilot helper processes.
         # There the controller watches its parent and tears down the API tree.
@@ -1025,16 +1224,19 @@ class LocalSkySession:
     def _wait_ready(self, timeout: int, marker: str = "ready") -> None:
         deadline = time.monotonic() + timeout
         while not (self.directory / marker).exists():
+            self.poll_events()
             if error := _optional((self.directory / f"{marker}.error").read_text):
                 raise ConfigError(error)
             if not self.active or time.monotonic() >= deadline:
                 raise SubmissionError(f"Local SkyPilot session stopped or timed out after {timeout}s: {self.failure}")
             time.sleep(0.1)
+        self.poll_events()
 
     def submit(self, specs: list[WorkSpec], workspace: Workspace, config: SkyPilotExecutor) -> None:
         """Publish commands after graph ownership has been recorded in the workspace."""
         submission_id = specs[0].submission_id
         if self.active:
+            runtime_event("Reusing the SkyPilot worker pool and cached environments.")
             _atomic_write(self.directory / f"graph-{submission_id}.pkl", cloudpickle.dumps(specs))
             self._wait_ready(config.startup_timeout, f"{submission_id}.json")
         else:
@@ -1051,6 +1253,8 @@ class LocalSkySession:
     def close_all(sessions: Sequence[LocalSkySession], *, timeout: float = 30) -> None:
         """Request worker teardown before stopping the owned process trees."""
         active = [session for session in sessions if session.active]
+        if active:
+            runtime_event("Shutting down SkyPilot worker pools and local APIs.")
         for session in active:
             try:
                 (session.directory / "stop").touch()
@@ -1058,6 +1262,8 @@ class LocalSkySession:
                 logger.exception("Could not request SkyPilot cleanup in %s", session.directory)
         deadline = time.monotonic() + timeout
         while any(session.active for session in active) and time.monotonic() < deadline:
+            for session in active:
+                session.poll_events()
             time.sleep(0.1)
         for session in active:
             if session.process is not None and session.active:
@@ -1066,16 +1272,20 @@ class LocalSkySession:
                 )
                 session.process.stop(grace_seconds=2)
         for session in sessions:
+            session.poll_events()
             if session in _SESSIONS:
                 _SESSIONS.remove(session)
 
 
-def _check_cloud_access(sky: Any, workers: Sequence[SkyPilotWorker]) -> None:
+def _check_cloud_access(sky: Any, workers: Sequence[SkyPilotWorker], directory: Path) -> None:
     """Populate the isolated runtime's enabled-cloud state before launching."""
     if not workers:
         return
     infras = tuple(sorted({worker.infra.split("/")[0] for worker in workers}))
-    results = sky.get(sky.client.sdk.check(infra_list=infras, verbose=False))
+    _event(directory, f"Checking SkyPilot credentials for {', '.join(infras)}.")
+    results = _sky_wait(
+        sky, sky.client.sdk.check(infra_list=infras, verbose=False), directory / "logs" / "credentials.log"
+    )
     enabled = {
         name.lower()
         for workspace in results.values()
@@ -1093,11 +1303,31 @@ def _check_cloud_access(sky: Any, workers: Sequence[SkyPilotWorker]) -> None:
         )
 
 
+def __getattr__(name: str) -> Any:
+    """Load the API logging plugin lazily, keeping SkyPilot an optional import."""
+    if name != "_LogPlugin":
+        raise AttributeError(name)
+    from sky.server.plugins import BasePlugin
+    from sky.skylet import constants
+
+    class LogPlugin(BasePlugin):
+        def install(self, extension_context: Any) -> None:
+            del extension_context
+            # The plugin runs in both API and spawned request processes. Only
+            # our private API config enables it; shared SkyPilot is untouched.
+            cast("Any", constants).SKY_LOGS_DIRECTORY = os.environ["MISEN_SKYPILOT_LOG_DIR"]
+
+    return LogPlugin
+
+
 def main(directory: Path) -> None:
     """Own the foreground API and bound cleanup after submitter loss."""
     api: SupervisionSession | None = None
     finished = threading.Event()
     owner_pid = int(os.environ.get("MISEN_SKYPILOT_OWNER_PID", os.getppid()))
+    payload = cloudpickle.loads((directory / "controller.pkl").read_bytes())
+    logs = _JobLogs(payload["workspace"], directory)
+    logs.add(payload["specs"])
 
     def watch_owner() -> None:
         while not finished.wait(0.2):
@@ -1117,18 +1347,33 @@ def main(directory: Path) -> None:
             cleanup.callback(finished.set)
             threading.Thread(target=watch_owner, name="misen-skypilot-owner", daemon=True).start()
             sky = _load_skypilot()
+            if "MISEN_SKYPILOT_LOG_DIR" in os.environ:
+                from sky.server import plugins
+
+                plugin_config = dict(plugins._load_plugin_config() or {})  # noqa: SLF001 -- preserve user plugins
+                plugin_config["plugins"] = [
+                    *plugin_config.get("plugins", []),
+                    {"class": "misen.executors.skypilot._LogPlugin"},
+                ]
+                config_path = directory / "plugins.json"
+                _atomic_write(config_path, json.dumps(plugin_config).encode())
+                os.environ["SKYPILOT_SERVER_PLUGINS_CONFIG"] = str(config_path)
             port = int(os.environ["SKYPILOT_API_SERVER_LOCAL_PORT"])
             # Foreground mode never creates a detached shared API daemon.
             command = Command(sys.executable, args=["-c", f"import sky; sky.api_start(foreground=True, port={port})"])
-            command = command.stdout_file(directory / "api.log", append=True).stderr_file(
-                directory / "api.log", append=True
+            command = command.stdout_file(directory / "logs" / "api.log", append=True).stderr_file(
+                directory / "logs" / "api.log", append=True
             )
             api = Supervisor(command.kill_on_parent_death(), restart="never").start()
             cleanup.callback(api.stop, grace_seconds=2)
             endpoint = os.environ["SKYPILOT_API_SERVER_ENDPOINT"]
             while True:
+                if time.monotonic() - logs.last_sync >= 1:
+                    logs.sync()
                 if (directory / "stop").exists() or not api.status.is_active:
-                    raise ExecutionError(f"Owned SkyPilot API stopped during startup; see {directory / 'api.log'}.")  # noqa: TRY301 -- persist startup failure
+                    raise ExecutionError(  # noqa: TRY301 -- persist startup failure
+                        f"Owned SkyPilot API stopped during startup; see {directory / 'logs' / 'api.log'}."
+                    )
                 try:
                     with urllib.request.urlopen(f"{endpoint}/api/health", timeout=1) as response:  # noqa: S310
                         if response.status == 200:  # noqa: PLR2004
@@ -1136,19 +1381,24 @@ def main(directory: Path) -> None:
                 except (OSError, urllib.error.URLError):
                     time.sleep(0.1)
             os.environ["SKYPILOT_DISABLE_LOCAL_API_SERVER"] = "1"
-            payload = cloudpickle.loads((directory / "controller.pkl").read_bytes())
+            _event(directory, "Local SkyPilot API is ready.")
             config = payload["config"]
-            _check_cloud_access(sky, config.workers)
+            _check_cloud_access(sky, config.workers, directory)
+            _event(directory, "Resolving SkyPilot worker offerings and GPU memory requirements.")
             controller = Controller(
                 sky=sky,
                 directory=directory,
                 offerings=resolve_workers(sky, config.workers, config.accelerator_memory),
                 stop_requested=lambda: (directory / "stop").exists() or not api.status.is_active,
+                log_capture=logs,
                 **payload,
             )
             (directory / "ready").touch()
             controller.run()
     except BaseException as exc:
+        _event(directory, f"SkyPilot session failed: {exc}")
+        with (directory / "logs" / "controller.log").open("a") as output:
+            traceback.print_exc(file=output)
         # No launch precedes readiness, so ordinary startup failures are retryable.
         if not (directory / "ready").exists():
             try:
@@ -1158,10 +1408,20 @@ def main(directory: Path) -> None:
                     failure=str(exc),
                 )
                 payload["workspace"].put_job_file(payload["submission_id"], STATE_FILE, msgspec.json.encode(state))
+                for spec in payload["specs"]:
+                    logs.finish(spec.job_id, str(exc))
             except Exception:
                 logger.exception("Could not record SkyPilot startup failure")
         _atomic_write(directory / "ready.error", str(exc).encode())
         raise
+    finally:
+        failed = sys.exc_info()[0] is not None
+        try:
+            logs.close()
+        except (OSError, StorageError):
+            if not failed:
+                raise
+            logger.exception("Could not finalize SkyPilot session logs")
 
 
 atexit.register(lambda: LocalSkySession.close_all(list(_SESSIONS)))
@@ -1226,6 +1486,8 @@ class SkyPilotJob(Job):
         """Read one checkpoint per submission; committed results take precedence."""
         result: dict[Job, JobState] = {}
         checkpoints: dict[str, ControllerState | None] = {}
+        for session in {job.session for job in cast("Sequence[SkyPilotJob]", jobs)}:
+            session.poll_events()
         for job in cast("Sequence[SkyPilotJob]", jobs):
             if job._terminal_state is not None:  # noqa: SLF001
                 result[job] = job._terminal_state  # noqa: SLF001
@@ -1428,6 +1690,7 @@ class SkyPilotExecutor(Executor[SkyPilotJob]):
                     snapshot.submission_id,
                     snapshot.snapshot_key,
                     f"{unit.root.func.__module__}.{unit.root.func.__qualname__}",
+                    str(log_path),
                 )
             )
         pool_key = TaskHash.from_object(workspace).b32()

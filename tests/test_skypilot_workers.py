@@ -95,6 +95,10 @@ class Sky:
             raise value
         return value
 
+    def stream_and_get(self, request, output_stream):
+        output_stream.write(f"SkyPilot request {request}\n")
+        return self.get(request)
+
     def launch(self, task, **kwargs):
         self.launches.append((task, kwargs))
         return self._request((1, None))

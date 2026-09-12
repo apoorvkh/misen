@@ -139,6 +139,14 @@ controller per executor session. No remote API server or managed controller VM i
 needed. Existing SkyPilot endpoints, daemons, and runtime state remain separate.
 `startup_timeout` bounds API startup and resource preflight (default 300 seconds).
 
+Lifecycle progress uses `runtime_events` (`MISEN_RUNTIME_EVENTS=0` disables
+console output). Job logs capture startup/provisioning context and complete
+bootstrap/execution output from all ranks. The controller streams these logs to
+the workspace and finalizes them before reporting terminal states. A shared
+`<session>_skypilot.log` includes API and teardown diagnostics; original files live
+under `<workspace temp>/skypilot/<session>/logs/`, including native SkyPilot logs
+that would otherwise go to `~/sky_logs`.
+
 The submitting process must remain alive. Use the executor as a context
 manager or call `close()` to clean up unfinished work; normal process exit
 also requests cleanup. SkyPilot autodown backs up abrupt shutdown after active

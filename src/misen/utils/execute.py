@@ -82,7 +82,14 @@ def execute(
     # SLURM ``--output=...``) at this same path, so the live uploader
     # sees everything the worker writes -- allocation/setup,
     # ``WorkUnit.execute``, post-execute Python finalizers.
-    streaming = workspace.streaming_job_log(job_log_path) if job_log_path is not None else contextlib.nullcontext()
+    # A remote controller may already own the complete stdout/stderr stream.
+    # Two uploaders must never publish competing versions of the same job log.
+    captured = os.environ.pop("MISEN_JOB_LOG_CAPTURED", "")
+    streaming = (
+        workspace.streaming_job_log(job_log_path)
+        if job_log_path is not None and not captured
+        else contextlib.nullcontext()
+    )
 
     with streaming:
         payload_fn()

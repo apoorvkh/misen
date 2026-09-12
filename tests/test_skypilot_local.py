@@ -241,15 +241,16 @@ os._exit(0)
                 process.kill()
 
 
-def test_fresh_runtime_checks_declared_clouds_before_provisioning():
+def test_fresh_runtime_checks_declared_clouds_before_provisioning(tmp_path):
     from misen.executors.skypilot import SkyPilotWorker
 
     sky = MagicMock()
     sky.Resources.side_effect = lambda *, infra: SimpleNamespace(cloud=infra.upper())
-    sky.get.return_value = {"default": {"AWS": ["compute", "storage"]}}
+    (tmp_path / "logs").mkdir()
+    sky.stream_and_get.return_value = {"default": {"AWS": ["compute", "storage"]}}
     workers = [SkyPilotWorker(cpus=2, memory=4, infra="aws/us-east-1")]
-    local._check_cloud_access(sky, workers)
+    local._check_cloud_access(sky, workers, tmp_path)
     sky.client.sdk.check.assert_called_once_with(infra_list=("aws",), verbose=False)
-    sky.get.return_value = {"default": {"AWS": ["storage"]}}
+    sky.stream_and_get.return_value = {"default": {"AWS": ["storage"]}}
     with pytest.raises(ConfigError, match="not enabled for: AWS"):
-        local._check_cloud_access(sky, workers)
+        local._check_cloud_access(sky, workers, tmp_path)

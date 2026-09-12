@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+import base64
 import json
 import os
 import queue
@@ -78,6 +79,31 @@ def test_eof_kills_running_child(worker):
     connection.process.wait(timeout=5)
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def test_eof_preserves_output_larger_than_one_protocol_chunk(worker):
+    connection, events, root = worker
+    expected = ("unicode λ without a trailing newline " * 8000).encode()
+    code = (
+        "import sys,time; from pathlib import Path; "
+        f"sys.stdout.buffer.write({expected!r}); sys.stdout.buffer.flush(); "
+        f"Path({str(root / 'written')!r}).touch(); time.sleep(60)"
+    )
+    # Keep the command below the OS argument-size limit.
+    script = root / "output.py"
+    script.write_text(code)
+    run(connection, root, "output", shlex.join([sys.executable, str(script)]))
+    deadline = time.monotonic() + 5
+    while not (root / "written").exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    connection.close()
+    chunks = []
+    while not events.empty():
+        event = events.get_nowait()[2]
+        if event["kind"] == "log":
+            chunks.append(base64.b64decode(event["data"]))
+    assert b"".join(chunks) == expected
 
 
 def test_duplicate_dispatch_fails_without_replaying(worker):
