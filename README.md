@@ -351,12 +351,19 @@ environment preparation, pool reuse, graph completion, and teardown. Set
 `MISEN_RUNTIME_EVENTS=0` to silence these console updates; logs are still recorded.
 Misen's Job logs include SkyPilot startup/provisioning context, environment
 preparation, and stdout/stderr from every rank, including failures before Python
-bootstrapping finishes. The controller owns their streaming uploads and finalizes
+bootstrapping finishes. The TUI's Job view receives this context about once a
+second, including while jobs are queued or produce no output.
+The controller owns their streaming uploads and finalizes
 each log before publishing the job's terminal state. A shared
 `<session>_skypilot.log` in the workspace's job-log directory also records later
 worker teardown. Original API, provisioning, setup, and SSH logs are retained under
 `<workspace temp>/skypilot/<session>/logs/`. The private API redirects native
 SkyPilot logs there instead of `~/sky_logs`.
+
+For cloud workspaces, `cache_dir` is a base directory: local files live under
+`<cache_dir>/<workspace_id>/`. This stable ID identifies the backend, bucket,
+prefix, endpoint, and S3 region, keeping different cloud workspaces' caches
+separate while allowing repeated runs against the same workspace to reuse them.
 
 Each entry describes a repeatable allocation, not a priority or named pool.
 `cpus`, `memory` (GiB), and accelerators are per node; `nodes` defaults to one.

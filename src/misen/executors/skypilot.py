@@ -372,6 +372,7 @@ class _JobLogs:
         self.streams: dict[str, contextlib.ExitStack] = {}
         self.offsets: dict[Path, int] = {}
         self.copied: dict[str, int] = {}
+        self.finished: set[str] = set()
         self.shared: Path | None = None
         self.last_sync = 0.0
         (directory / "logs").mkdir(exist_ok=True)
@@ -408,13 +409,16 @@ class _JobLogs:
                         output.write(f"\n--- {path.relative_to(self.directory)} ---\n".encode())
                         shutil.copyfileobj(source, output)
                     self.offsets[path] = source.tell()
+        # The TUI tails each WorkUnit's log, including queued and silent work.
+        for job_id in self.paths.keys() - self.finished:
+            self.write(job_id, b"", start_upload=False)
         self.last_sync = time.monotonic()
 
-    def write(self, job_id: str, data: bytes) -> None:
-        if job_id not in self.paths:
+    def write(self, job_id: str, data: bytes, *, start_upload: bool = True) -> None:
+        if job_id not in self.paths or job_id in self.finished:
             return
         # Keep upload threads bounded by running work, not the size of the DAG.
-        if job_id not in self.streams:
+        if start_upload and job_id not in self.streams:
             self._open(job_id, self.paths[job_id])
         with self.paths[job_id].open("ab") as output:
             if self.shared is not None:
@@ -429,6 +433,7 @@ class _JobLogs:
         self.write(job_id, f"\nSkyPilot: {message}\n".encode())
         if stream := self.streams.pop(job_id, None):
             stream.close()
+        self.finished.add(job_id)
 
     def close(self) -> None:
         with contextlib.ExitStack() as cleanup:

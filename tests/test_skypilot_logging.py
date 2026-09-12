@@ -179,11 +179,22 @@ def test_running_logs_stream_live_and_session_retains_later_teardown(tmp_path):
         native = tmp_path / "logs" / "provision.log"
         native.write_text("provisioned\n")
         logs.sync()
+        # The TUI follows Job.log_path even while its VM is provisioning.
+        assert "provisioned" in Path(work.log_path).read_text()
+        assert len(workspace._live_log_uploaders) == 1
+        # A separate host can also read the shared log before execution starts.
+        deadline = time.monotonic() + 5
+        while not any("provisioned" in path.read_text() for path in reader.job_log_iter()):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
         logs.write("a", b"still running\n")
+        with native.open("a") as output:
+            output.write("progress while job is silent\n")
+        logs.sync()
         deadline = time.monotonic() + 5
         while True:
             paths = list(reader.job_log_iter(unit))
-            if paths and "still running" in paths[0].read_text():
+            if paths and "progress while job is silent" in paths[0].read_text():
                 break
             assert time.monotonic() < deadline
             time.sleep(0.02)
@@ -192,6 +203,10 @@ def test_running_logs_stream_live_and_session_retains_later_teardown(tmp_path):
         logs.close()
         text = next(reader.job_log_iter(unit)).read_text()
         assert text.count("provisioned") == text.count("still running") == 1
+        assert text.count("progress while job is silent") == 1
+        assert "terminated" not in text
+        assert "terminated" not in Path(work.log_path).read_text()
+        assert not workspace._live_log_uploaders
         shared = next(p for p in reader.job_log_iter() if p.name.endswith("_skypilot.log"))
         assert "terminated" in shared.read_text()
     finally:
