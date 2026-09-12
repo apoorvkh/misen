@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 __all__ = ["Executor", "Job", "JobState", "bulk_job_states", "raise_for_failed_jobs"]
 
 ExecutorType: TypeAlias = Literal["local", "in_process", "slurm", "skypilot"]
-JobState: TypeAlias = Literal["pending", "running", "done", "failed", "unknown"]
-_VALID_JOB_STATES: frozenset[JobState] = frozenset({"pending", "running", "done", "failed", "unknown"})
+JobState: TypeAlias = Literal["pending", "starting", "running", "done", "failed", "unknown"]
+_VALID_JOB_STATES: frozenset[JobState] = frozenset({"pending", "starting", "running", "done", "failed", "unknown"})
 JobT = TypeVar("JobT", bound="Job")
 logger = logging.getLogger(__name__)
 
@@ -448,7 +448,7 @@ class Job(ABC):
 
     @abstractmethod
     def state(self) -> JobState:
-        """Return the current backend job state."""
+        """Return the backend state: pending waits, starting prepares, running executes."""
 
     @classmethod
     def bulk_state(cls, jobs: Sequence[Job]) -> dict[Job, JobState]:

@@ -42,8 +42,10 @@ __all__ = [
 
 Mode = Literal["task", "job"]
 _TERMINAL_STATES = frozenset({"done", "failed"})
+_ACTIVE_STATES = frozenset({"pending", "starting", "running"})
 _STATE_STYLES: dict[JobState, str] = {
     "pending": "yellow",
+    "starting": "blue",
     "running": "cyan",
     "done": "green",
     "failed": "bold red",
@@ -51,6 +53,7 @@ _STATE_STYLES: dict[JobState, str] = {
 }
 _STATE_ICONS: dict[JobState, str] = {
     "pending": "○",
+    "starting": "◔",
     "running": "◐",
     "done": "●",
     "failed": "✗",
@@ -282,9 +285,9 @@ def _render_summary(jobs: list[Job], states: list[JobState]) -> Text:
     summary = Text("Jobs: ")
     summary.append(str(len(jobs)), style="bold")
     summary.append("  ")
-    for state in ("pending", "running", "done", "failed", "unknown"):
+    for state, style in _STATE_STYLES.items():
         summary.append(f"{state}=", style="dim")
-        summary.append(str(counts.get(state, 0)), style=_STATE_STYLES[state])
+        summary.append(str(counts.get(state, 0)), style=style)
         summary.append("  ")
     return summary
 
@@ -892,19 +895,19 @@ def _run_textual_task_monitor(
             return all(self._job_states.get(job, "unknown") in _TERMINAL_STATES for job in job_graph.nodes())
 
         def _active_jobs(self) -> list[Job]:
-            """Return jobs known to be queued or executing.
+            """Return jobs known to be queued, starting, or executing.
 
             An ``unknown`` backend state is intentionally not included. It
             remains visible in the summary, but it must not trap users in the
-            monitor when no job is reported as pending or running.
+            monitor when no job is reported as active.
             """
-            return [job for job, state in self._job_states.items() if state in {"pending", "running"}]
+            return [job for job, state in self._job_states.items() if state in _ACTIVE_STATES]
 
         def _selected_active_job(self) -> Job | None:
-            """Return the selected row's job when it is pending or running."""
+            """Return the selected row's job when it is known to be active."""
             entry = self._cursor_entry
             job = index.job_for_work_unit(entry.work_unit) if entry is not None else None
-            if job is None or self._job_states.get(job, "unknown") not in {"pending", "running"}:
+            if job is None or self._job_states.get(job, "unknown") not in _ACTIVE_STATES:
                 return None
             return job
 
@@ -917,7 +920,7 @@ def _run_textual_task_monitor(
                 self._last_activity_at = time.monotonic()
             # Re-evaluate the state-gated quit and cancellation actions after
             # every poll. In particular, Escape becomes available when the
-            # last pending/running state disappears, even if another backend
+            # last active state disappears, even if another backend
             # state is temporarily unknown.
             self.refresh_bindings()
             if self._all_done and (time.monotonic() - self._last_activity_at >= self.POST_RUN_IDLE_TIMEOUT_S):

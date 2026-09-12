@@ -349,6 +349,10 @@ and catalog preflight have a `startup_timeout` of 300 seconds by default.
 Runtime events report local API startup, credential checks, VM provisioning,
 environment preparation, pool reuse, graph completion, and teardown. Set
 `MISEN_RUNTIME_EVENTS=0` to silence these console updates; logs are still recorded.
+Jobs are `pending` while waiting for dependencies or capacity, `starting` while
+their worker or environment is being prepared, and `running` during execution.
+Lookahead preparation leaves dependency-blocked jobs `pending`. Starting jobs
+can be cancelled in the TUI; execution timing begins at `running`.
 Misen's Job logs include SkyPilot startup/provisioning context, environment
 preparation, and stdout/stderr from every rank, including failures before Python
 bootstrapping finishes. The TUI's Job view receives this context about once a

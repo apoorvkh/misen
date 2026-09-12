@@ -381,12 +381,60 @@ def test_provisioning_capacity_and_per_type_limits(monkeypatch):
     c = controller(monkeypatch, [spec(str(i), cpus=2, memory=16) for i in range(10)], max_workers=5)
     c.tick()
     assert len(c.sky.launches) == 2  # per-type max, two slots per starting VM
+    assert [j.state for j in c.state.jobs.values()].count("starting") == 4
+    assert [j.state for j in c.state.jobs.values()].count("pending") == 6
     c.tick()
     assert len(c.sky.executions) == 4
     for worker in c.state.workers:
         assert len(c._active(worker)) == 2
     c.tick()
     assert len(c.sky.launches) == 2
+
+
+def test_starting_spans_provisioning_connection_and_environment_setup(monkeypatch):
+    dispatch = Controller._dispatch
+    c = controller(monkeypatch, [spec("a", cpus=4), spec("b", ["a"], cpus=4)], max_workers=1)
+    monkeypatch.setattr(Controller, "_dispatch", dispatch)
+    c.tick()
+    worker = c.state.workers[0]
+    assert worker.state == "provisioning"
+    assert c.state.jobs["a"].state == "starting"
+    c._complete_request(worker)
+    assert worker.state == "connecting"
+    c._schedule(*c._frontiers())
+    assert c.state.jobs["a"].state == "starting"
+    c.tick()
+    assert worker.preparing is not None
+    c.tick()  # Remain starting until setup finishes, without reserving execution resources.
+    assert not c._active(worker)
+    assert c.state.jobs["a"].state == "starting"
+    assert c.state.jobs["a"].started is None
+    assert c.state.jobs["b"].state == "pending"
+    checkpoint = msgspec.json.decode((c.directory / "ABC.json").read_bytes(), type=ControllerState)
+    assert checkpoint.jobs["a"].state == "starting"
+    c.sky.finish("prepare-a")
+    c.tick()
+    assert c.state.jobs["a"].state == "running"
+    assert c.state.jobs["a"].started is not None
+    assert c.state.jobs["b"].state == "pending"
+
+
+@pytest.mark.parametrize("preparing", [False, True])
+def test_starting_job_can_be_cancelled_before_execution(monkeypatch, preparing):
+    dispatch = Controller._dispatch
+    c = controller(monkeypatch, [spec("a"), spec("b", ["a"])], max_workers=1)
+    monkeypatch.setattr(Controller, "_dispatch", dispatch)
+    c.tick()
+    if preparing:
+        c.tick()
+    assert c.state.jobs["a"].state == "starting"
+    (c.directory / "a.cancel").touch()
+    c.tick()
+    assert all(j.state == "failed" for j in c.state.jobs.values())
+    assert not any(task.name == "misen-a" for task, _, _ in c.sky.executions)
+    c.stop_requested = lambda: True
+    c.run()
+    assert all(w.state == "down" for w in c.state.workers)
 
 
 def test_gpu_whole_device_reservations(monkeypatch):
@@ -677,6 +725,8 @@ def test_lookahead_launches_fanout_capacity_before_root_finishes(monkeypatch):
     c.tick()
     assert len(c.sky.launches) == 2
     assert not c.sky.executions
+    assert c.state.jobs["root"].state == "starting"
+    assert c.state.jobs["a"].state == c.state.jobs["b"].state == "pending"
 
 
 def test_lookahead_never_scales_a_serial_chain(monkeypatch):
@@ -697,6 +747,7 @@ def test_pool_reuses_workers_across_graphs_and_expires_idle_capacity(monkeypatch
     assert not c.sky.downs
     c.add_graph("SECOND", [spec("b")])
     c.tick()
+    assert c.state.jobs["b"].state == "running"  # Warm workers can skip starting.
     assert len(c.sky.launches) == 1
     assert c.state.jobs["a"].cluster == c.state.jobs["b"].cluster
     c.sky.finish("b")

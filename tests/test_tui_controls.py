@@ -119,8 +119,11 @@ def _run_monitor(
     )
 
 
-def test_c_binding_is_visible_async_and_cancels_only_selected_active_job(monkeypatch: pytest.MonkeyPatch) -> None:
-    jobs, graph = _jobs_with_states(["done", "pending", "running"])
+@pytest.mark.parametrize("active_state", ["pending", "starting", "running"])
+def test_c_binding_is_visible_async_and_cancels_only_selected_active_job(
+    monkeypatch: pytest.MonkeyPatch, active_state: JobState
+) -> None:
+    jobs, graph = _jobs_with_states(["done", active_state, "running"])
     exited_after_cancel: list[bool] = []
 
     async def drive(app: Any, pilot: Any) -> None:
@@ -129,11 +132,14 @@ def test_c_binding_is_visible_async_and_cancels_only_selected_active_job(monkeyp
         assert inspect.iscoroutinefunction(getattr(app, f"action_{binding.action}"))
         assert app.check_action(binding.action, ()) is False
 
-        # The first job is done. Move the highlight to the pending second job
+        # The first job is done. Move the highlight to the active second job
         # and verify that cancellation becomes available for that job alone.
         await pilot.press("down")
         await pilot.pause()
         assert app.check_action(binding.action, ()) is True
+        if active_state == "starting":
+            assert jobs[1] not in app._job_started_at
+            assert "starting=1" in tui_module._render_summary(jobs, list(app._job_states.values())).plain
         await pilot.press("c")
         await pilot.pause()
         exited_after_cancel.append(app._exit)
@@ -296,7 +302,7 @@ def test_ctrl_c_propagates_keyboard_interrupt_without_cancelling_jobs(monkeypatc
 
 
 @pytest.mark.parametrize("key", ["escape", "q"])
-def test_quit_key_exits_when_no_job_is_pending_or_running(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+def test_quit_key_exits_when_no_job_is_active(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
     # Unknown is deliberately included: the quit condition is the absence of
     # known active work, not that every job has reached a terminal state.
     jobs, graph = _jobs_with_states(["done", "failed", "unknown"])
@@ -313,7 +319,7 @@ def test_quit_key_exits_when_no_job_is_pending_or_running(monkeypatch: pytest.Mo
 
 
 @pytest.mark.parametrize("key", ["escape", "q"])
-@pytest.mark.parametrize("active_state", ["pending", "running"])
+@pytest.mark.parametrize("active_state", ["pending", "starting", "running"])
 def test_quit_key_is_blocked_while_job_is_active(
     monkeypatch: pytest.MonkeyPatch,
     key: str,

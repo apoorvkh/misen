@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import cast
 
 import pytest
 import tyro
@@ -1189,7 +1189,7 @@ class FakeJob(Job):
         self,
         *,
         work_unit: WorkUnit,
-        states: list[Literal["pending", "running", "done", "failed", "unknown"]],
+        states: list[JobState],
         job_id: str | None = None,
         log_path: Path | None = None,
     ) -> None:
@@ -1197,7 +1197,7 @@ class FakeJob(Job):
         self._states = states
         self.state_calls = 0
 
-    def state(self) -> Literal["pending", "running", "done", "failed", "unknown"]:
+    def state(self) -> JobState:
         idx = min(self.state_calls, len(self._states) - 1)
         self.state_calls += 1
         return self._states[idx]
@@ -1341,7 +1341,7 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
     )
     sink_job = FakeJob(
         work_unit=WorkUnit(root=sink_task, dependencies=set()),
-        states=["pending", "running", "failed"],
+        states=["pending", "starting", "running", "failed"],
     )
     graph.add_node(source_job)
     graph.add_node(sink_job)
@@ -1376,15 +1376,16 @@ def test_run_without_tui_line_events_and_final_tree(monkeypatch, capsys) -> None
 
     output = capsys.readouterr().err
     # The source is already done, but the monitor keeps polling until the sink
-    # advances through both nonterminal states. The terminal observation is
+    # advances through all three nonterminal states. The terminal observation is
     # reused for the final tree and failure check instead of being queried
     # again. A foreground run cannot return while any job is still running.
-    assert source_job.state_calls == 3
-    assert sink_job.state_calls == 3
+    assert source_job.state_calls == 4
+    assert sink_job.state_calls == 4
     assert "source(x=1)" in output
     assert "sink(x=2)" in output
     # Terminal states render without the trailing job graph bookkeeping.
     assert "complete" in output
+    assert "starting" in output
     assert "failed" in output
     assert len(exc_info.value.failures) == 1
     assert "sink" in exc_info.value.failures[0].label

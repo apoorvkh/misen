@@ -139,6 +139,12 @@ controller per executor session. No remote API server or managed controller VM i
 needed. Existing SkyPilot endpoints, daemons, and runtime state remain separate.
 `startup_timeout` bounds API startup and resource preflight (default 300 seconds).
 
+`JobState` includes `starting`: dependencies are satisfied and worker
+provisioning, connection, or environment preparation is in progress. Waiting for
+dependencies or available capacity remains `pending`; execution is `running`.
+Lookahead preparation does not change dependency-blocked jobs to `starting`.
+The TUI supports cancellation during startup and counts runtime from `running`.
+
 Lifecycle progress uses `runtime_events` (`MISEN_RUNTIME_EVENTS=0` disables
 console output). Job logs capture startup/provisioning context and complete
 bootstrap/execution output from all ranks. The controller streams these logs to

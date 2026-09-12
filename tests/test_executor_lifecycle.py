@@ -176,11 +176,12 @@ def test_submit_preserves_work_graph_contract_errors(tmp_path, monkeypatch) -> N
         )
 
 
-def test_bulk_job_states_groups_by_class_and_dispatches_once_per_class() -> None:
+@pytest.mark.parametrize("active_state", ["starting", "running"])
+def test_bulk_job_states_groups_by_class_and_dispatches_once_per_class(active_state: JobState) -> None:
     _CountingJob.bulk_calls.clear()
     _BatchSlurmJob.queries.clear()
 
-    counting_jobs = [_CountingJob(work_unit=_wu(i), state_value="running") for i in range(3)]
+    counting_jobs = [_CountingJob(work_unit=_wu(i), state_value=active_state) for i in range(3)]
     slurm_jobs = [_BatchSlurmJob(work_unit=_wu(100 + i), slurm_id=str(i), state_value="done") for i in range(4)]
     completed_jobs = [CompletedJob(work_unit=_wu(200 + i)) for i in range(2)]
     all_jobs: list[Job] = [*counting_jobs, *slurm_jobs, *completed_jobs]
@@ -192,7 +193,7 @@ def test_bulk_job_states_groups_by_class_and_dispatches_once_per_class() -> None
     assert _BatchSlurmJob.queries == [["0", "1", "2", "3"]]
     # CompletedJob group is reported as done without per-job state() calls.
     assert all(states[job] == "done" for job in completed_jobs)
-    assert all(states[job] == "running" for job in counting_jobs)
+    assert all(states[job] == active_state for job in counting_jobs)
     assert all(states[job] == "done" for job in slurm_jobs)
     # _CountingJob's default impl falls back to per-job state() — that's the
     # cost a backend pays when it doesn't override bulk_state.

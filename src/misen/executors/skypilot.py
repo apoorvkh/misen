@@ -1022,6 +1022,8 @@ class Controller:
         for frontier, speculative in ((ready, False), (future, True)):
             reserved: dict[str, set[str]] = {}
             for spec in sorted(frontier, key=lambda s: (-s.resources["accelerators"], s.job_id)):
+                if not speculative:
+                    self.state.jobs[spec.job_id].state = "pending"
                 candidates = [
                     w
                     for w in self.state.workers
@@ -1040,9 +1042,13 @@ class Controller:
                 worker = candidates[0]
                 reserved.setdefault(worker.name, set()).add(spec.job_id)
                 if worker.state != "ready" or worker.preparing is not None:
+                    if not speculative:
+                        self.state.jobs[spec.job_id].state = "starting"
                     continue
                 if spec.environment_key not in worker.prepared:
                     if not self._active(worker):
+                        if not speculative:
+                            self.state.jobs[spec.job_id].state = "starting"
                         self._dispatch(worker, spec, prepare=True)
                 elif not speculative:
                     reserved[worker.name].remove(spec.job_id)
