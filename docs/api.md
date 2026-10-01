@@ -109,76 +109,83 @@ generic `config` mapping cannot be embedded in worker bootstrap commands.
       members:
         - __init__
 
-# SkyPilotExecutor
+# SSHExecutor
 
-`SkyPilotExecutor` schedules ready WorkUnits on reusable cloud or cluster
-allocations. `workers` is a required non-empty list of `SkyPilotWorker`
-entries (`[[executor.workers]]` in TOML), with per-type and per-session
-`max_workers` limits. The CLI accepts the same list as JSON through
-`--executor.workers '[{"infra":"aws","cpus":4,"memory":16}]'`.
-CPU, RAM, node count, accelerator type/count, and
-per-device GPU memory determine eligibility. Single-node work shares declared
-capacity; multi-node work reserves a complete group. Idle groups retire after
-`idle_timeout_minutes`, or when another required type needs their slot.
-`reuse_workers=true` shares workers and environments across graphs in the same
-executor and workspace. `lookahead_seconds=90` enables bounded advance
-provisioning; zero disables it. Close the executor before changing workspaces.
-Preparation uses the worker's full declared CPU allocation. Prepared launch
-commands reuse environments while keeping each WorkUnit in a fresh process.
+`SSHExecutor` uses AsyncSSH to run snapshot-pinned jobs on existing Linux hosts.
+Install `misen[ssh]` on the submitting machine. Configuration, alias resolution,
+and core imports do not load AsyncSSH until execution is requested.
 
-```bash
-uv pip install "misen[skypilot]" "skypilot-nightly[aws]>=1.0.0.dev20260905"
+```python
+from misen.executors.ssh import SSHExecutor, SSHWorker
+from misen.workspaces.disk import DiskWorkspace
+
+workspace = DiskWorkspace(directory="/shared/research/misen")
+with SSHExecutor(workers=[SSHWorker(hosts=["research-node"], cpus=8, memory=32)]) as executor:
+    jobs = executor.submit({task}, workspace, blocking=True)
 ```
 
-Install provider extras and configure credentials on the submitting host.
-VM provisioning also requires `rsync` and SSH on the host's `PATH`.
-Workers require SSH-accessible Linux nodes with Python 3 and `taskset`. The
-runtime checks the declared clouds' credentials before provisioning workers.
-Misen owns an isolated foreground local API server and a supervised graph
-controller per executor session. No remote API server or managed controller VM is
-needed. Existing SkyPilot endpoints, daemons, and runtime state remain separate.
-`startup_timeout` bounds API startup and resource preflight (default 300 seconds).
+The alias is `[executor] type = "ssh"`, with `[[executor.workers]]` entries.
+The CLI accepts the same list through
+`--executor ssh --executor.workers '[{"hosts":["research-node"],"cpus":8,"memory":32}]'`.
+The [README](../README.md#remote-execution-with-ssh-optional) covers SSH keys,
+resource budgets, workspace access, and lifecycle requirements.
 
-`JobState` includes `starting`: dependencies are satisfied and worker
-provisioning, connection, or environment preparation is in progress. Waiting for
-dependencies or available capacity remains `pending`; execution is `running`.
-Lookahead preparation does not change dependency-blocked jobs to `starting`.
-The TUI supports cancellation during startup and counts runtime from `running`.
+A worker group's `hosts` must match the task's node count exactly. `cpus`,
+`memory`, `accelerators`, and `accelerator_memory` are per-node capacities;
+`accelerator_memory` is GiB per device. `accelerator_type` accepts `cuda`,
+`rocm`, or `xpu`. `accelerator_indices` optionally selects the physical devices.
+Single-node jobs share capacity; multi-node jobs occupy the complete group.
+`max_concurrent_jobs` optionally caps the number of jobs reserved on a worker,
+including preparation. It must be a positive integer; the default `None` adds
+no limit beyond the resource budgets. Jobs waiting for this limit stay pending.
+Groups must not overlap, even through different SSH aliases.
+`addresses` optionally supplies a node-to-node hostname/IP for each host.
 
-Lifecycle progress uses `runtime_events` (`MISEN_RUNTIME_EVENTS=0` disables
-console output). Job logs capture startup/provisioning context and complete
-bootstrap/execution output from all ranks. The controller streams these logs to
-the workspace and finalizes them before reporting terminal states. A shared
-`<session>_skypilot.log` includes API and teardown diagnostics; original files live
-under `<workspace temp>/skypilot/<session>/logs/`, including native SkyPilot logs
-that would otherwise go to `~/sky_logs`.
+`ssh_config` selects an SSH config file; by default AsyncSSH reads the user's
+SSH config. `known_hosts` selects a host-key file; omission keeps AsyncSSH's
+verification defaults. Host-key verification is never disabled by the executor.
+Authentication uses SSH config, local keys, or the local agent; agent forwarding
+is disabled. SSH config may supply a proxy command or jump host.
 
-The submitting process must remain alive. Use the executor as a context
-manager or call `close()` to clean up unfinished work; normal process exit
-also requests cleanup. SkyPilot autodown backs up abrupt shutdown after active
-agents stop their subprocesses on connection loss or lease expiry. Job handles support individual
-cancellation and local status queries; checkpoints and results remain durable in the workspace. Matching graphs reattach within
-the same live executor; uncertain execution or cleanup after controller loss
-blocks replay. Detached scheduling and automatic WorkUnit retries are not
-supported.
+Use a shared `DiskWorkspace` mounted at the same absolute path everywhere, or
+`CloudWorkspace` with a relative cache directory and ambient credentials on
+every host. `InMemoryWorkspace` is rejected before snapshot staging.
+The SSH executor requires `snapshot=true` and `prewarm_envs=false`.
+It reuses snapshot environments and prepared launch commands, with a fresh
+process for each WorkUnit. The shared workspace retains results and logs.
 
-Worker entries own `infra`, `instance_type`, `use_spot`, `image_id`, `disk_size`,
-and `max_hourly_cost`. GPU memory comes from pinned catalog offerings;
-`accelerator_memory` supplies fallback capacities in GiB/device without
-inflating known values. Assigned device memory is checked before task startup.
-See the [design contract](design_remote_executors.md#reusable-workers)
-and README for complete configuration and scheduling details.
+`connect_timeout` defaults to 30 seconds, and `startup_timeout` to 600 seconds.
+Task `time` covers execution after preparation. For `DASK_CLIENT`,
+`dask_startup_timeout` bounds Dask readiness (default 600 seconds), and
+`dask_scheduler_port` defaults to 8786 (valid range 1024–65535). The first
+host runs the scheduler and sole task coordinator; each host runs one Dask
+worker. The nodes need a trusted private network and a free, reachable
+scheduler port. Without `DASK_CLIENT`, only rank zero executes the payload;
+task code can inspect `MISEN_NODE_RANK` and `MISEN_NODE_IPS`.
 
-The adapter requires `snapshot = true`, `prewarm_envs = false`, a remotely
-fetchable workspace such as `CloudWorkspace`, and a relative `cache_dir`.
-Every worker needs independent object-store access. `DASK_CLIENT` creates a
-private fixed-membership Dask cluster with one worker per node, a rank-zero
-scheduler, and one task coordinator. The project must include `distributed`.
-`dask_startup_timeout` bounds readiness; `dask_scheduler_port` (default 8786,
-range 1024–65535) must be free and reachable on the allocation's trusted private
-network. Without `DASK_CLIENT`, only rank zero executes the Misen payload.
+The public executor and job APIs are synchronous. One background asyncio loop
+handles SSH connections, concurrent streams, and scheduling. Job status is
+local. Each host has a reusable connection pool, with up to eight jobs sharing
+each connection. More connections open as needed for admitted jobs; SSH channel
+counts do not impose an eight-job limit on the host. New connection handshakes
+are serialized per host. Log writes are
+batched and flushed every 200 ms or when a batch reaches roughly 256 KiB.
+The TUI resolves and reads log storage outside its UI loop. Job states are
+`pending`, `starting`, `running`, then `done` or `failed`. Logs are
+finalized before terminal status is published. Cancelling a prerequisite fails
+its dependents; cancelling one job does not cancel independent work.
 
-::: misen.executors.skypilot.SkyPilotExecutor
-    options:
-      members:
-        - __init__
+Keep the submitting process alive. Context exit or `close()` cancels outstanding
+jobs and awaits cleanup. Remote supervisors stop their process groups after
+EOF, cancellation, time limits, or expiry of the 15-second controller lease,
+with a 5-second termination grace period. These are cooperative process-group
+controls; tasks must not deliberately detach descendants. Connection loss
+never triggers replay. Uncertain cleanup disables the worker group for that
+session. Scheduling budgets do not coordinate with other submitting processes.
+Machines are not provisioned, rebooted, or terminated.
+
+::: misen.executors.ssh.SSHExecutor
+
+::: misen.executors.ssh.SSHWorker
+
+::: misen.executors.ssh.SSHJob

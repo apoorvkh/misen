@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 __all__ = ["Executor", "Job", "JobState", "bulk_job_states", "raise_for_failed_jobs"]
 
-ExecutorType: TypeAlias = Literal["local", "in_process", "slurm", "skypilot"]
+ExecutorType: TypeAlias = Literal["local", "in_process", "slurm", "ssh"]
 JobState: TypeAlias = Literal["pending", "starting", "running", "done", "failed", "unknown"]
 _VALID_JOB_STATES: frozenset[JobState] = frozenset({"pending", "starting", "running", "done", "failed", "unknown"})
 JobT = TypeVar("JobT", bound="Job")
@@ -69,7 +69,7 @@ class Executor(Configurable, Generic[JobT]):
         "local": "misen.executors.local:LocalExecutor",
         "in_process": "misen.executors.in_process:InProcessExecutor",
         "slurm": "misen.executors.slurm:SlurmExecutor",
-        "skypilot": "misen.executors.skypilot:SkyPilotExecutor",
+        "ssh": "misen.executors.ssh:SSHExecutor",
     }
 
     snapshot: bool = True

@@ -1,5 +1,7 @@
 # Reusable SkyPilot workers: emergent-geometry v5
 
+> Historical benchmark of a removed executor prototype; this is not the current execution API.
+
 Measured on September 11, 2026, using `PriorComputers/emergent-geometry` v5 at
 `440d009fb9082a71371c79b675861d9919c73eed` and the Misen working tree based on
 `6f7cd416993118c03f4bcb9f80476b17567be3a9`. The isolated workflow checkout is

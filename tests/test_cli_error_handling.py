@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 from pathlib import Path
 from typing import Any
@@ -146,7 +147,10 @@ def test_tui_propagates_state_query_errors_after_teardown(monkeypatch: pytest.Mo
         )
 
 
-def test_tui_renders_log_storage_errors_without_crashing(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("error", [StorageError, OSError])
+def test_tui_renders_log_storage_errors_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
     from textual.app import App
 
     messages: list[str] = []
@@ -160,16 +164,17 @@ def test_tui_renders_log_storage_errors_without_crashing(monkeypatch: pytest.Mon
 
     viewer = Viewer()
 
-    def run_with_log_failure(app: Any) -> None:
-        def fail_log_resolution(_entry: object) -> None:
-            raise StorageError("log backend unavailable")
+    async def run_with_log_failure(app: Any) -> None:
+        def fail_log_resolution(_entry: object, _mode: str) -> None:
+            raise error("log backend unavailable")
 
         monkeypatch.setattr(app, "query_one", lambda *_args, **_kwargs: viewer)
         monkeypatch.setattr(app, "_resolve_log_source", fail_log_resolution)
         app._cursor_entry = object()
         app._stream_log_chunk()
+        await app._log_task
 
-    monkeypatch.setattr(App, "run", run_with_log_failure)
+    monkeypatch.setattr(App, "run", lambda app: asyncio.run(run_with_log_failure(app)))
 
     tui_module._run_textual_task_monitor(
         named_tasks={},
@@ -179,7 +184,7 @@ def test_tui_renders_log_storage_errors_without_crashing(monkeypatch: pytest.Mon
         state_poll_interval_s=2.0,
     )
 
-    assert messages == ["(log unavailable: StorageError)"]
+    assert messages == [f"(log unavailable: {error.__name__})"]
 
 
 def test_keyboard_interrupt_has_conventional_exit_code(capsys: pytest.CaptureFixture[str]) -> None:

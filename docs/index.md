@@ -16,7 +16,7 @@ The intended public API is:
 - `SCRATCH_DIR`, `DASK_CLIENT`
 - `Workspace` (`DiskWorkspace` by default; `CloudWorkspace` for remote data)
 - `Executor` (`LocalExecutor`, `InProcessExecutor`, `SlurmExecutor`,
-  and optional `SkyPilotExecutor`)
+  and optional `SSHExecutor`)
 - `Experiment`
 
 Most user code should only import from `misen.__init__`.
@@ -61,9 +61,9 @@ Backends remain simple because they do not implement custom cache-lock logic.
 - `Workspace`: hash/result persistence, locking, task/job logs.
 
 This split allows changing the compute control plane (local, in-process,
-SLURM, or a SkyPilot-supported cloud or cluster) without changing cache format
-or lock semantics. Remote executors use a remotely fetchable workspace
-transport; SkyPilot does not replace the workspace as Misen's data plane.
+SLURM, or existing SSH hosts) without changing cache format
+or lock semantics. Remote executors use shared filesystem paths or a remotely fetchable workspace
+transport; SSH does not replace the workspace as Misen's data plane.
 
 ## Runtime Argument Injection
 
@@ -85,9 +85,9 @@ applied by Python at call time and would bypass the argument resolver, leaking
 the raw sentinel object into the function body.
 
 `DASK_CLIENT` requires a task request with `nodes > 1` and is realized by
-`SlurmExecutor` and `SkyPilotExecutor`. Misen starts one worker per allocated
-node and executes the task body once on the coordinator. With SkyPilot, this
-runtime is contained within one `num_nodes` managed job: rank 0 hosts the
+`SlurmExecutor` and `SSHExecutor`. Misen starts one worker per allocated
+node and executes the task body once on the coordinator. With SSH, this
+runtime is contained within one configured host group: rank 0 hosts the
 scheduler and coordinator, and every rank hosts one worker. `LocalExecutor`
 and `InProcessExecutor` intentionally remain single-node executors.
 This is intra-work-unit parallelism: the executor still schedules the Misen

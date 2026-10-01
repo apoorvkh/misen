@@ -25,7 +25,10 @@ from misen.exceptions import CacheError, CliUsageError, ExperimentReferenceError
 from misen.executor import ExecutorType  # noqa: TC001
 from misen.utils.runtime_events import task_label
 from misen.utils.settings import Settings
-from misen.workspace import WorkspaceType  # noqa: TC001
+from misen.workspace import (
+    WorkspaceType,
+    job_log_paths,
+)
 
 from . import system_exit_code, tui
 from .display import format_task_line_markup, iter_task_arg_children
@@ -707,7 +710,7 @@ def _print_log_content(log_path: Path, console: Console, *, rule_title: str | No
     if rule_title is not None:
         console.rule(rule_title)
     try:
-        content = log_path.read_text(encoding="utf-8", errors="replace")
+        content = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in job_log_paths(log_path))
     except OSError as exc:
         msg = f"Could not read job log {log_path}: {exc}"
         raise StorageError(msg) from exc

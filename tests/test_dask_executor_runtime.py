@@ -344,14 +344,14 @@ def test_ranked_cluster_script_assigns_head_and_worker_roles_safely() -> None:
         cpus=4,
         memory_gib=8,
         startup_timeout=30,
-        node_rank_env="SKYPILOT_NODE_RANK",
-        node_ips_env="SKYPILOT_NODE_IPS",
+        node_rank_env="MISEN_NODE_RANK",
+        node_ips_env="MISEN_NODE_IPS",
         scheduler_port=18786,
     )
 
     subprocess.run([_bash(), "-n"], input=script, text=True, check=True)
-    assert "SKYPILOT_NODE_RANK" in script
-    assert "SKYPILOT_NODE_IPS" in script
+    assert "MISEN_NODE_RANK" in script
+    assert "MISEN_NODE_IPS" in script
     assert "MISEN_DASK_ROLE=scheduler" in script
     assert "MISEN_DASK_ROLE=worker" in script
     assert "MISEN_DASK_ROLE=preflight" in script

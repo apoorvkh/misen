@@ -2,8 +2,7 @@
 
 Status: phases 1–3 implemented (`ProjectSnapshot`, workspace snapshot
 store + job files, universal bootstrap, `env_store_dir`/`prewarm_envs`).
-Phase 4 has its first adapter, `SkyPilotExecutor`; SSH and the other remote
-adapters remain pending. Phase 5 (prune) is pending. Builds on
+Phase 4 has an implemented `SSHExecutor`; other remote adapters remain pending. Phase 5 (prune) is pending. Builds on
 `design_shared_env_store.md` (whose store protocol is unchanged) and
 supersedes the deep/shallow split. See
 `design_remote_executors.md` for the remote-control-plane decision.
@@ -17,7 +16,7 @@ content-addressable, shareable across submissions), the **submission**
 cloudpickled payload written at dispatch). It is also duplicated across two
 build paths (deep: `uv sync` from the working tree at submission; shallow:
 staged export + worker-side build), and its transport assumes a shared
-filesystem — which SSH and SkyPilot execution do not have.
+filesystem, which remote execution does not always have.
 
 This design collapses all of that into one model:
 
@@ -236,26 +235,17 @@ package).
   cannot work; `CloudWorkspace` (or a remote-mounted disk workspace) can.
   Content-addressed snapshots make repeat submissions cheap: the remote
   cache is keyed by hash, so unchanged code transfers nothing.
-- **SkyPilotExecutor (implemented first adapter)**: Misen's local graph
-  controller schedules ready WorkUnits onto reusable SkyPilot allocations.
-  Each executor session owns an isolated foreground local API server; scheduling
-  lasts only while the submitting process remains alive. Unnamed worker types
-  declare capacity and provider settings. Single-node jobs share compatible
-  capacity; multi-node jobs reserve a group. `DASK_CLIENT` starts one private
-  worker per node with the scheduler and coordinator on rank zero; otherwise
-  only rank zero executes the payload. The adapter requires `snapshot=true`,
-  `prewarm_envs=false`, a remotely fetchable workspace (normally
-  `CloudWorkspace`), and a relative cache path. Workers fetch snapshots,
-  env files, payloads, and results through the workspace using ambient
-  credentials. The local controller checkpoints status, propagates failures,
-  and dispatches subprocesses through persistent SSH agents. Worker environments
-  are prepared ahead of execution and reused across submissions; idle expiry
-  or executor shutdown removes owned workers. Prepared launch commands are
-  partitioned by immutable snapshot, interpreter selection, platform, and
-  bootstrap requirement. They retain activation paths, not per-job settings.
-  Cloud result downloads use a local per-result process lock and up to eight
-  concurrent streaming transfers before atomic cache publication. SkyPilot
-  autodown backs up abrupt process loss.
+- **SSHExecutor**: connects to existing Linux hosts using AsyncSSH. Single-node
+  jobs share declared capacity; multi-node jobs reserve a configured group.
+  With DASK_CLIENT, rank zero hosts the scheduler/coordinator and every node
+  hosts one worker; otherwise the payload executes only on rank zero. The
+  adapter requires snapshot=true and prewarm_envs=false. It accepts shared
+  filesystem paths or a remotely fetchable workspace with a relative cache
+  directory. Environments and prepared commands persist on each host, while
+  every WorkUnit gets a fresh process. SSH supervisors enforce task timeouts
+  and stop process groups on cancellation or controller lease loss. The
+  submitter must remain alive; automatic retries and detached scheduling are
+  not implemented. See design_remote_executors.md for the current contract.
 
 Compatibility (validated at submit, failing early with a clear error):
 
@@ -264,7 +254,6 @@ Compatibility (validated at submit, failing early with a clear error):
 | InProcess/Local | ✓ | ✓ | ✓ | ✓ |
 | Slurm | ✓ | ✗ | ✓ | ✗ |
 | SSH | ✓ (if mounted) | ✗ | ✓ | ✗ |
-| SkyPilot (current) | ✗ | ✗ | ✓ | ✗ |
 
 ## Lifecycle (phase 5 TODO)
 
@@ -419,11 +408,10 @@ remove the domain-specific lifecycle code.
    snapshots dispatch directly; `env_store_dir` + `prewarm_envs` replace
    `snapshot="shallow"`/`env_cache`/`snapshots_dir`; dependency envs use
    the staged project's frozen uv sync on either host.
-4. **New executors** (partial): SkyPilot is implemented as the first optional
-   adapter on the phase-3 contract, including submit-time workspace validation
-   and a managed multi-node `DASK_CLIENT` runtime. Direct SSH, remote Slurm,
-   Kubernetes, Modal, and provider Batch adapters remain on the roadmap; see
-   `design_remote_executors.md`.
+4. **New executors** (partial): SSH is implemented on the phase-3 contract,
+   including workspace validation and the managed multi-node DASK_CLIENT runtime.
+   Cloud provisioning and other remote adapters remain deferred; see
+   design_remote_executors.md.
 5. **Storage lifecycle** (pending): repair result/cache cleanup invariants;
    add durable submission ownership; expose report and dry-run-first prune
    commands; then add reference- and generation-safe GC for snapshots,

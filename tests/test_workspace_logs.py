@@ -135,3 +135,29 @@ def test_disk_workspace_close_is_idempotent_and_leaves_caches_readable(tmp_path)
     assert sample_key in cache
     assert cache[sample_key] == ResolvedTaskHash(0x1234)
     assert len(cache) == 1
+
+
+@pytest.mark.parametrize("reference", ["missing.log", "../outside.log", "/outside.log", "job.log", ""])
+def test_shared_job_log_links_are_optional_siblings(tmp_path, reference) -> None:
+    from misen.workspace import JOB_LOG_CONTEXT_PREFIX, job_log_paths
+
+    path = tmp_path / "job.log"
+    path.write_text(f"{JOB_LOG_CONTEXT_PREFIX}{reference}\njob output\n")
+    assert job_log_paths(path) == (path,)
+
+
+def test_cli_job_logs_include_shared_context(tmp_path) -> None:
+    import io
+
+    from rich.console import Console
+
+    from misen.utils.cli.experiment import _print_log_content
+    from misen.workspace import JOB_LOG_CONTEXT_PREFIX
+
+    context = tmp_path / "pool.log"
+    context.write_text("provisioning output\n")
+    path = tmp_path / "job.log"
+    path.write_text(f"{JOB_LOG_CONTEXT_PREFIX}{context.name}\ntask output\n")
+    output = io.StringIO()
+    _print_log_content(path, Console(file=output))
+    assert output.getvalue().count("provisioning output") == output.getvalue().count("task output") == 1

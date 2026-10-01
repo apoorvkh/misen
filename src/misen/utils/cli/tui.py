@@ -14,10 +14,11 @@ from rich.console import Console
 from rich.text import Text
 from rich.tree import Tree as RichTree
 
-from misen.exceptions import CacheError, ConfigError, StorageError
+from misen.exceptions import CacheError, ConfigError
 from misen.executor import CompletedJob, JobState, bulk_job_states, raise_for_failed_jobs
 from misen.utils.cli.display import format_task_line_markup, format_task_line_text, iter_task_arg_children
 from misen.utils.runtime_events import task_label
+from misen.workspace import job_log_paths
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -648,8 +649,11 @@ def _run_textual_task_monitor(
             self._entry_by_node_id: dict[int, _TaskTreeNode] = {}
             self._wu_canonical: dict[WorkUnit, _TaskTreeNode] = {}
             self._cursor_entry: _TaskTreeNode | None = None
-            self._log_offset: int = 0
+            self._log_offsets: dict[Any, int] = {}
             self._log_key: tuple[Any, ...] | None = None
+            self._log_generation = 0
+            self._log_task: asyncio.Task[None] | None = None
+            self._log_shutdown = False
             self._all_done: bool = False
             self._last_activity_at: float = time.monotonic()
             self._last_scroll_offsets: tuple[float, float, float, float] | None = None
@@ -1039,64 +1043,101 @@ def _run_textual_task_monitor(
             self.refresh_bindings()
 
         def _reset_log(self) -> None:
+            self._log_generation += 1
             self._log_key = None
-            self._log_offset = 0
+            self._log_offsets.clear()
             log_viewer = self.query_one("#log-viewer", _LogPane)
             log_viewer.clear()
 
         def _stream_log_chunk(self) -> None:
-            entry = self._cursor_entry
-            if entry is None:
+            if self._log_shutdown or self._cursor_entry is None:
                 return
-            log_viewer = self.query_one("#log-viewer", _LogPane)
+            if self._log_task is None or self._log_task.done():
+                self._log_task = asyncio.create_task(self._fetch_log_chunk())
+
+        async def on_unmount(self) -> None:
+            self._log_shutdown = True
+            if self._log_task is not None:
+                self._log_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._log_task
+
+        async def _fetch_log_chunk(self) -> None:
+            while not self._log_shutdown and (entry := self._cursor_entry) is not None:
+                generation = self._log_generation
+                key, offsets, chunks = await asyncio.to_thread(
+                    self._read_log_chunk, entry, self._mode, self._log_key, self._log_offsets.copy()
+                )
+                if generation != self._log_generation:
+                    # Navigation happened during I/O. Discard the old result
+                    # and read the new selection without overlapping reads.
+                    continue
+                log_viewer = self.query_one("#log-viewer", _LogPane)
+                if key != self._log_key:
+                    log_viewer.clear()
+                self._log_key, self._log_offsets = key, offsets
+                for chunk, placeholder in chunks:
+                    log_viewer.write(
+                        Text(chunk, style="dim italic") if placeholder else Text.from_ansi(chunk.rstrip("\n"))
+                    )
+                return
+
+        def _read_log_chunk(
+            self, entry: _TaskTreeNode, mode: Mode, previous_key: tuple[Any, ...] | None, offsets: dict[Any, int]
+        ) -> tuple[tuple[Any, ...], dict[Any, int], list[tuple[str, bool]]]:
+            """Resolve and read storage off the UI loop, without changing UI state."""
+            chunks: list[tuple[str, bool]] = []
 
             try:
-                key, opener, placeholder = self._resolve_log_source(entry)
-            except StorageError as exc:
+                key, sources, placeholder = self._resolve_log_source(entry, mode)
+            except Exception as exc:  # noqa: BLE001 -- storage failures must remain visible in the log pane
                 key = ("log-error", type(exc).__name__, str(exc))
-                opener = None
+                sources = {}
                 placeholder = f"(log unavailable: {type(exc).__name__})"
-            is_new_source = key != self._log_key
+            is_new_source = key != previous_key
             if is_new_source:
-                self._log_key = key
-                self._log_offset = 0
-                log_viewer.clear()
+                offsets.clear()
 
-            if opener is None:
+            if not sources:
                 if is_new_source:
-                    log_viewer.write(Text(placeholder, style="dim italic"))
-                return
+                    chunks.append((placeholder, True))
+                return key, offsets, chunks
 
-            try:
-                with opener() as f:
-                    f.seek(self._log_offset)
-                    chunk = f.read()
-                    self._log_offset = f.tell()
-            except (FileNotFoundError, CacheError):
-                # CacheError fires when the task log path can't be resolved
-                # yet — its directory is keyed by ``resolved_hash``, which
-                # requires every dependency's result hash, which doesn't
-                # exist until the deps complete. Treat that the same as
-                # "log file not produced yet" and show the placeholder.
-                if is_new_source:
-                    log_viewer.write(Text(placeholder, style="dim italic"))
-                return
-            except Exception as exc:  # noqa: BLE001
-                if is_new_source:
-                    log_viewer.write(Text(f"(log unavailable: {exc.__class__.__name__})", style="dim italic"))
-                return
+            for source_key, opener in sources.items():
+                try:
+                    with opener() as f:
+                        offset = offsets.get(source_key, 0)
+                        f.seek(0, 2)
+                        f.seek(offset if f.tell() >= offset else 0)
+                        # Bound each update's storage and rendering work.
+                        chunk = f.read(64 * 1024)
+                        offsets[source_key] = f.tell()
+                except (FileNotFoundError, CacheError):
+                    # CacheError fires when the task log path can't be resolved
+                    # yet — its directory is keyed by ``resolved_hash``, which
+                    # requires every dependency's result hash, which doesn't
+                    # exist until the deps complete. Treat that the same as
+                    # "log file not produced yet" and show the placeholder.
+                    if is_new_source:
+                        chunks.append((placeholder, True))
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    if is_new_source:
+                        chunks.append((f"(log unavailable: {exc.__class__.__name__})", True))
+                    continue
 
-            if chunk:
-                log_viewer.write(Text.from_ansi(chunk.rstrip("\n")))
+                if chunk:
+                    chunks.append((chunk, False))
+            return key, offsets, chunks
 
-        def _resolve_log_source(self, entry: _TaskTreeNode) -> tuple[tuple[Any, ...], Any, str]:
-            """Return ``(key, opener, placeholder)`` for the log matching the current mode.
+        def _resolve_log_source(self, entry: _TaskTreeNode, mode: Mode) -> tuple[tuple[Any, ...], Any, str]:
+            """Return ``(key, sources, placeholder)`` for the log matching the current mode.
 
-            ``opener`` is either a zero-arg callable returning a readable text file or
-            ``None`` when no log is resolvable. ``placeholder`` is the message shown
+            ``sources`` maps source identities to text-file openers, or is empty
+            when no log is resolvable. ``placeholder`` is the message shown
             when there's nothing to stream (either resolution failed or the file is missing).
             """
-            if self._mode == "task":
+            if mode == "task":
                 job = index.job_for_work_unit(entry.work_unit)
                 if job is not None and not isinstance(job, CompletedJob):
                     # Real current-session job runs this task — pin the task
@@ -1104,28 +1145,31 @@ def _run_textual_task_monitor(
                     # archived log from a prior session.
                     job_id = job.job_id
                     if job_id is None:
-                        return ("task", id(entry.task), "pending"), None, "(no task log yet)"
+                        return ("task", id(entry.task), "pending"), {}, "(no task log yet)"
                     return (
                         ("task", id(entry.task), job_id),
-                        lambda: workspace.read_task_log(entry.task, job_id=job_id),
+                        {job_id: lambda: workspace.read_task_log(entry.task, job_id=job_id)},
                         "(no task log yet)",
                     )
                 # No current-session job, or a cached CompletedJob — fall back
                 # to whichever task log was most recently written.
                 return (
                     ("task", id(entry.task)),
-                    lambda: workspace.read_task_log(entry.task),
+                    {None: lambda: workspace.read_task_log(entry.task)},
                     "(no task log yet)",
                 )
             wu = entry.work_unit
             if wu is None:
-                return ("job", None), None, "(no job assigned)"
+                return ("job", None), {}, "(no job assigned)"
             log_path = self._resolve_job_log_path(wu)
             if log_path is None:
-                return ("job", id(wu)), None, "(no job log yet)"
+                return ("job", id(wu)), {}, "(no job log yet)"
             return (
                 ("job", str(log_path)),
-                lambda: log_path.open("r", encoding="utf-8", errors="replace"),
+                {
+                    path: lambda path=path: path.open(encoding="utf-8", errors="replace")
+                    for path in job_log_paths(log_path)
+                },
                 "(no job log yet)",
             )
 

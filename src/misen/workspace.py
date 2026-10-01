@@ -19,7 +19,7 @@ import logging
 import shutil
 from abc import abstractmethod
 from collections.abc import Iterator, MutableMapping
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TextIO, TypeAlias, TypeVar, cast
 
 from misen.exceptions import CacheError, LockUnavailableError, SerializationError, StorageError
@@ -43,6 +43,25 @@ WorkspaceType: TypeAlias = Literal["disk", "cloud", "memory"]
 TRACE_LEVEL = logging.DEBUG - 5
 logger = logging.getLogger(__name__)
 _HashMappingT = TypeVar("_HashMappingT")
+JOB_LOG_CONTEXT_PREFIX = "misen: shared job log: "
+
+
+def job_log_paths(path: Path) -> tuple[Path, ...]:
+    """Read an optional first-line link to shared context beside a job log.
+
+    Relative sibling names survive cloud downloads to a different cache root.
+    Missing context is allowed while logs are still being uploaded. Links are
+    followed once, and cannot reference files outside the job-log directory.
+    """
+    with suppress(OSError):
+        with path.open(encoding="utf-8", errors="replace") as source:
+            header = source.readline().rstrip("\n")
+        if header.startswith(JOB_LOG_CONTEXT_PREFIX):
+            name = header.removeprefix(JOB_LOG_CONTEXT_PREFIX)
+            context = path.parent / name
+            if name and name == context.name and context != path and context.is_file():
+                return context, path
+    return (path,)
 
 
 def _hash_mapping_type(cls: type[_HashMappingT], item: tuple[type[Any], type[Any]]) -> type[_HashMappingT]:

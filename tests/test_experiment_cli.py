@@ -279,28 +279,26 @@ def test_experiment_cli_instance_defaults_still_overridable_by_flags(captured_ar
     assert exp.value == 99
 
 
-def test_experiment_cli_builds_skypilot_executor_from_concrete_flags(captured_args) -> None:
-    from misen.executors.skypilot import SkyPilotExecutor
+def test_experiment_cli_builds_ssh_executor_from_concrete_flags(captured_args) -> None:
+    from misen.executors.ssh import SSHExecutor
 
     experiment_cli(
         CliExperiment,
         argv=[
             "--executor",
-            "skypilot",
+            "ssh",
             "--executor.workers",
-            '[{"infra":"gcp/us-central1","cpus":4,"memory":16}]',
-            "--executor.name-prefix",
-            "research",
+            '[{"hosts":["research-node"],"cpus":4,"memory":16}]',
+            "--executor.connect-timeout",
+            "15",
             "list",
         ],
     )
-
     executor = getattr(captured_args["args"], "executor")
-    assert isinstance(executor, SkyPilotExecutor)
-    assert executor.workers[0].infra == "gcp/us-central1"
+    assert isinstance(executor, SSHExecutor)
+    assert executor.workers[0].hosts == ["research-node"]
     assert executor.workers[0].cpus == 4
-    assert executor.workers[0].memory == 16
-    assert executor.name_prefix == "research"
+    assert executor.connect_timeout == 15
 
 
 def test_resolve_experiment_reference_accepts_instance(monkeypatch, tmp_path) -> None:

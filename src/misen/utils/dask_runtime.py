@@ -194,7 +194,7 @@ def managed_ranked_cluster_script(
 ) -> str:
     """Run a fixed Dask cluster through one scheduler command per node.
 
-    Distributed launchers such as SkyPilot invoke the same command on every
+    Distributed launchers such as SSHExecutor invoke the same command on every
     allocation member and expose a zero-based rank plus an ordered IP list.
     Rank zero reuses :func:`managed_cluster_script` for the scheduler, one
     local worker, and the Misen coordinator. Every other rank runs one worker

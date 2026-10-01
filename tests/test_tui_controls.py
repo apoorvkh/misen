@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import io
+import threading
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -337,3 +339,141 @@ def test_quit_key_is_blocked_while_job_is_active(
     _run_monitor(monkeypatch, jobs, graph, drive)
 
     assert exited_after_key == [False]
+
+
+@pytest.mark.parametrize("archived", [False, True])
+def test_job_view_tails_shared_context_and_output_independently(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, archived: bool
+) -> None:
+    from misen.executor import CompletedJob
+    from misen.workspace import JOB_LOG_CONTEXT_PREFIX
+
+    jobs, graph = _jobs_with_states(["starting"])
+    path = tmp_path / "job.log"
+    context = tmp_path / "pool.log"
+    path.write_text(f"{JOB_LOG_CONTEXT_PREFIX}{context.name}\njob header\n")
+    jobs[0].log_path = path
+    if archived:
+        graph = DependencyGraph()
+        graph.add_node(CompletedJob(jobs[0].work_unit))
+    workspace = MagicMock(spec=Workspace)
+    workspace.job_log_iter.return_value = [path]
+
+    async def run_test(app: Any) -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            viewer = app.query_one("#log-viewer")
+
+            def text() -> str:
+                return "\n".join(line.text for line in viewer.lines)
+
+            assert "job header" in text()
+            # A context upload can arrive after its job log. Discover it without
+            # resetting the existing output or waiting for a job-state change.
+            context.write_text("provisioning now\n")
+            app._stream_log_chunk()
+            await app._log_task
+            assert text().count("provisioning now") == text().count("job header") == 1
+            with context.open("a") as output:
+                output.write("environment ready\n")
+            with path.open("a") as output:
+                output.write("task output\n")
+            app._stream_log_chunk()
+            await app._log_task
+            app._stream_log_chunk()
+            await app._log_task
+            assert text().count("environment ready") == text().count("task output") == 1
+            context.write_text("retired\n")
+            app._stream_log_chunk()
+            await app._log_task
+            assert text().count("retired") == text().count("task output") == 1
+            app.exit()
+
+    monkeypatch.setattr(App, "run", lambda app: asyncio.run(run_test(app)))
+    tui_module._run_textual_task_monitor(
+        named_tasks={"task": jobs[0].root},
+        job_graph=graph,
+        workspace=workspace,
+        poll_interval_s=3600,
+        state_poll_interval_s=3600,
+    )
+
+
+@pytest.mark.parametrize("blocked_stage", ["resolution", "read"])
+def test_log_io_keeps_navigation_responsive_and_discards_stale_results(
+    monkeypatch: pytest.MonkeyPatch, blocked_stage: str
+) -> None:
+    jobs, graph = _jobs_with_states(["running"])
+
+    async def drive(app: Any, pilot: Any) -> None:
+        if app._log_task is not None:
+            await app._log_task
+        started, release = threading.Event(), threading.Event()
+        ui_thread = threading.get_ident()
+        calls: list[str] = []
+
+        def block() -> None:
+            assert threading.get_ident() != ui_thread
+            started.set()
+            assert release.wait(5)
+
+        def resolve(_entry: Any, mode: str) -> tuple[Any, Any, str]:
+            calls.append(mode)
+            if mode == "task" and blocked_stage == "resolution":
+                block()
+
+            def opener() -> io.StringIO:
+                if mode == "task" and blocked_stage == "read":
+                    block()
+                return io.StringIO("STALE task output" if mode == "task" else "current job output")
+
+            return (mode,), {mode: opener}, ""
+
+        monkeypatch.setattr(app, "_resolve_log_source", resolve)
+        app._reset_log()
+        app._stream_log_chunk()
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            app._stream_log_chunk()
+            assert not app._log_task.done()
+            await pilot.press("tab")
+            assert app._mode == "job"
+            assert calls == ["task"]
+        finally:
+            release.set()
+        await app._log_task
+        text = "\n".join(line.text for line in app.query_one("#log-viewer").lines)
+        assert "current job output" in text
+        assert "STALE" not in text
+        assert calls == ["task", "job"]
+        app.exit()
+
+    _run_monitor(monkeypatch, jobs, graph, drive)
+
+
+def test_unmount_does_not_wait_for_blocked_log_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    jobs, graph = _jobs_with_states(["running"])
+
+    async def drive(app: Any, _pilot: Any) -> None:
+        if app._log_task is not None:
+            await app._log_task
+        started, release = threading.Event(), threading.Event()
+
+        def resolve(_entry: Any, _mode: str) -> tuple[Any, Any, str]:
+            started.set()
+            assert release.wait(5)
+            return ("late",), {}, "late output"
+
+        monkeypatch.setattr(app, "_resolve_log_source", resolve)
+        app._stream_log_chunk()
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            await asyncio.wait_for(app.on_unmount(), timeout=2)
+            assert app._log_task.cancelled()
+        finally:
+            release.set()
+        assert app._log_key != ("late",)
+        app.exit()
+
+    _run_monitor(monkeypatch, jobs, graph, drive)

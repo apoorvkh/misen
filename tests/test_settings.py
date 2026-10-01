@@ -239,37 +239,24 @@ class TestConfigurable:
         assert isinstance(ex, LocalExecutor)
         assert ex.num_cpus == 1
 
-    def test_skypilot_executor_alias_auto_from_toml(self, tmp_path: Path) -> None:
-        config = tmp_path / "skypilot.toml"
+    def test_ssh_executor_alias_auto_from_toml(self, tmp_path: Path) -> None:
+        config = tmp_path / "ssh.toml"
         config.write_text(
-            (
-                "[executor]\n"
-                'type = "skypilot"\n'
-                'name_prefix = "research"\n'
-                "[executor.accelerator_memory]\n"
-                "A100 = 80\n"
-                "L4 = 24\n"
-                "[[executor.workers]]\n"
-                'infra = "aws"\n'
-                "cpus = 8\n"
-                "memory = 32\n"
-                "use_spot = true\n"
-                "accelerators = { L4 = 1 }\n"
-            ),
+            '[executor]\ntype = "ssh"\nconnect_timeout = 15\n'
+            '[[executor.workers]]\nhosts = ["gpu-box"]\ncpus = 8\nmemory = 32\n'
+            "accelerators = 1\naccelerator_memory = 24\nmax_concurrent_jobs = 4\n",
             encoding="utf-8",
         )
-
         from misen.executor import Executor
-        from misen.executors.skypilot import SkyPilotExecutor
+        from misen.executors.ssh import SSHExecutor
 
         executor = Executor.auto(settings=Settings(config_file=config))
-
-        assert isinstance(executor, SkyPilotExecutor)
-        assert executor.workers[0].infra == "aws"
-        assert executor.workers[0].use_spot is True
-        assert executor.name_prefix == "research"
-        assert executor.workers[0].accelerators == {"L4": 1}
-        assert executor.accelerator_memory == {"A100": 80, "L4": 24}
+        assert isinstance(executor, SSHExecutor)
+        assert executor.workers[0].hosts == ["gpu-box"]
+        assert executor.workers[0].accelerators == 1
+        assert executor.workers[0].accelerator_memory == 24
+        assert executor.workers[0].max_concurrent_jobs == 4
+        assert executor.connect_timeout == 15
 
     def test_resolve_type_with_alias(self) -> None:
         from misen.executor import Executor

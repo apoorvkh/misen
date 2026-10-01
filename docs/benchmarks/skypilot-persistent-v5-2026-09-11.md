@@ -1,5 +1,7 @@
 # Persistent SkyPilot workers: v5 benchmark, 2026-09-11
 
+> Historical benchmark of a removed executor prototype; this is not the current execution API.
+
 Persistent Misen workers improved cold AWS end-to-end time by **2.0–4.0×** over the previous reusable-VM implementation. Median WorkUnit dispatch-to-bootstrap fell from about **13 seconds to 0.08 seconds**. A fresh fan-out graph on the warm pool needed **125.7 seconds**, with **zero new VM launches, zero environment builds, and zero initial result-cache hits**.
 
 | Workflow | Local | Previous AWS | Persistent AWS, cold | Improvement |

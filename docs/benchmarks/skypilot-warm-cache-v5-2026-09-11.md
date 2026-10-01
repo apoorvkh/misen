@@ -1,5 +1,7 @@
 # SkyPilot warm-cache improvements: v5 benchmark, 2026-09-11
 
+> Historical benchmark of a removed executor prototype; this is not the current execution API.
+
 This run measures cached launch commands, concurrent streaming result downloads with per-result local locking, and full declared CPU allocation during environment preparation. SkyPilot worker/session bookkeeping was consolidated. Each WorkUnit still runs in a fresh subprocess. The five changed production files add 73 net lines relative to the previous implementation; `executors/skypilot.py` grows by 14 lines, with all SkyPilot-specific logic remaining there.
 
 | Workflow | Local | Previous persistent AWS | Updated AWS, cold |
